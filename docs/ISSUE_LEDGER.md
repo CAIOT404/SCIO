@@ -1952,3 +1952,23 @@ Template:
 - Sweep: none needed. The hook refuses every such command, so none got through.
 - Guard: guardrail 17 (`hook:push_gate`), which held both times. Its rule now cites this id too. Three recurrences say the hook, not the habit, is the guard that works; it stays.
 - Resolved: 2026-11-14 · Status: resolved
+
+### I-208 · On the Claude Code backend the API-price budget is a hard stop, and the owner wants it to be only a tracked metric
+- Found: 2026-11-14 · graphcalc S13, live-run issue #115 (an owner correction at ~19:15 UTC) · `scio/harness/budget.py`, `scio/loop/exits.py`, `scio/loop/claude_code_worker.py`, `scio/harness/providers/claude_code.py`, and every node that catches `BudgetExceeded`
+- Symptom: the owner, verbatim: "th budget is hypaathoical and should no halt scio. it is more of a metic im track and can use the info later to being optimize sico in a futer ession". Live, P26 attempt 3 (T1, cap $8.00 after `claude_code_budget_factor` 4.0) had used $4.64 at 19:23 UTC. Each later Claude Code session was started with `--max-budget-usd` cut to the remainder ($5.45, then less). Earlier T1 attempts in this run reached $5.45, $4.63, $4.23 and $4.17. None has halted on `budget` yet, but a long attempt sits within 1.5 times of the cap.
+- Root cause: ADR 0012 kept `budgets.yaml`'s caps binding on the Claude Code backend and only scaled them (I-069, I-099). There the dollars are estimates and nothing is billed, so a cap that ends a run or shortens a session stops work for a figure that costs the owner nothing.
+- Fix: a budget now binds or only records, by `SCIO_BUDGET_MODE` (`auto`, the default; `enforce`; `track`), read by `budget_binding(settings)`. `auto` records only, without binding, when every call runs on the subscription (`SCIO_WORKER_BACKEND` and `SCIO_PROVIDER_OVERRIDE` both `claude_code`), and binds otherwise, because an API key bills real money. A budget that does not bind:
+  - `BudgetGuard.reserve` never refuses a call, and `BudgetGuard.exhausted` and the state's `Budget.exhausted` are never true, so there is no `budget` exit from `check_exit` or from a node's `BudgetExceeded` handler;
+  - `ClaudeCodeWorker` passes no `--max-budget-usd`;
+  - `record` and `snapshot` account as before, and `scio report` and the dashboard show the spend as "(tracked, no cap)".
+
+  The ADR 0012 amendment is dated 2026-11-14; `configs/budgets.yaml` and the `Budget` excerpt in ARCHITECTURE say when `usd_max` binds.
+- Sweep: `grep -rn` for `Budget(`, `BudgetGuard(`, `for_settings`, `guard_for`, `max-budget-usd`, `exhausted`, `BudgetExceeded(` and `usd_max` over `scio/`, `evals/`, `recovery/`, `configs/` and `docs/`. Each site falls in one of four groups:
+  - Changed: `Harness.from_settings`, `RunContext`, `feature_context`, the worker's argv, the report's spend line, and the dashboard's Tokens and Budget rows.
+  - Correct as it stands: `apply_tier_budgets`, the `model_copy` calls in `implement.py`, `carry_spend`, the harness's unlimited default guard, and `ClaudeCodeProvider`'s `error_max_budget_usd` (without the flag it cannot fire, and an `enforce` run still gets it).
+  - Left binding on purpose:
+    - The evals (`evals/runner.py` builds a guard that always binds, and the solvers pass their own harness). An eval's dollar figures are its measurement, and its runs may use an API key.
+    - The recovery supervisor's repair session (`repair_max_budget_usd` $40, ADR 0019 decision 7). It guards an unattended session the supervisor starts, not a build, and the one live repair cost $13.35.
+  - The stopgap: graphcalc's `scio.sh` sets both factors to 1000 (the owner's OK). It comes out once this merges and live-wt moves.
+- Guard: the 15 cases in `tests/unit/test_budget_binding.py`. With the five changed spots disabled, 8 of them fail: every non-binding case. The 7 that pass are the cases that should bind. Guardrail 85.
+- Resolved: 2026-11-14 · Status: resolved

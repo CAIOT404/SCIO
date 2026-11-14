@@ -2,7 +2,8 @@
 
 The pre-check is conservative. It assumes the call will use its full ``max_tokens``
 (scaled by ``reserve_output_fraction``) and refuses the call if that *could* exceed the
-cap. The post-call update records what was actually used.
+cap. The post-call update records what was actually used. A guard that does not bind
+(:func:`budget_binding`, issue #115) skips the pre-check and only records.
 """
 
 from __future__ import annotations
@@ -44,11 +45,23 @@ class BudgetSnapshot(BaseModel):
 
 
 class BudgetGuard:
-    """Thread-safe token and dollar budget for one run."""
+    """Thread-safe token and dollar budget for one run.
 
-    def __init__(self, limits: BudgetLimits, *, reserve_output_fraction: float = 1.0) -> None:
+    ``binding=False`` makes the caps a recorded metric, not a stop (issue #115): ``reserve``
+    never refuses a call and ``exhausted`` is never true, while ``record`` and ``snapshot``
+    account as before. :func:`budget_binding` decides it from the settings.
+    """
+
+    def __init__(
+        self,
+        limits: BudgetLimits,
+        *,
+        reserve_output_fraction: float = 1.0,
+        binding: bool = True,
+    ) -> None:
         self.limits = limits
         self.reserve_output_fraction = reserve_output_fraction
+        self.binding = binding
         self._tokens_used = 0
         self._usd_used = 0.0
         self._calls = 0
@@ -57,7 +70,11 @@ class BudgetGuard:
     def reserve(
         self, *, est_input_tokens: int, max_output_tokens: int, pricing: ModelPricing
     ) -> None:
-        """Raise :class:`BudgetExceeded` if this call could push the run over either cap."""
+        """Raise :class:`BudgetExceeded` if this call could push the run over either cap.
+
+        A guard that does not bind never raises (issue #115)."""
+        if not self.binding:
+            return
         reserved_out = int(max_output_tokens * self.reserve_output_fraction)
         est_usage = Usage(input_tokens=est_input_tokens, output_tokens=reserved_out)
         est_usd = pricing.cost_of(est_usage)
@@ -98,6 +115,9 @@ class BudgetGuard:
 
     @property
     def exhausted(self) -> bool:
+        """True when either cap is reached and the guard binds; never true otherwise."""
+        if not self.binding:
+            return False
         s = self.snapshot()
         return s.tokens_used >= s.tokens_max or s.usd_used >= s.usd_max
 
@@ -138,6 +158,26 @@ def token_factor(settings: Any) -> float:
     return 1.0
 
 
+def budget_binding(settings: Any) -> bool:
+    """Whether the dollar and token caps stop a run, or are only recorded (issue #115).
+
+    ``settings.budget_mode`` decides: ``enforce`` binds and ``track`` does not. ``auto`` does
+    not bind only when every call runs on the Claude subscription (``worker_backend`` and
+    ``provider_override`` both ``claude_code``), where nothing is billed and the dollars are
+    API-price estimates (ADR 0012); any other setup can bill an API key, so its caps bind.
+    """
+    mode = getattr(settings, "budget_mode", "auto")
+    if mode == "enforce":
+        return True
+    if mode == "track":
+        return False
+    on_subscription = (
+        getattr(settings, "worker_backend", "aci") == "claude_code"
+        and getattr(settings, "provider_override", None) == "claude_code"
+    )
+    return not on_subscription
+
+
 class BudgetsConfig(BaseModel):
     tiers: dict[str, BudgetLimits]
     reserve_output_fraction: float = 1.0
@@ -173,5 +213,10 @@ class BudgetsConfig(BaseModel):
         }
         return self.model_copy(update={"tiers": tiers})
 
-    def guard_for(self, tier: str) -> BudgetGuard:
-        return BudgetGuard(self.tiers[tier], reserve_output_fraction=self.reserve_output_fraction)
+    def guard_for(self, tier: str, *, binding: bool = True) -> BudgetGuard:
+        """A guard sized for ``tier``; ``binding=False`` records without stopping (#115)."""
+        return BudgetGuard(
+            self.tiers[tier],
+            reserve_output_fraction=self.reserve_output_fraction,
+            binding=binding,
+        )

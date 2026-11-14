@@ -7,7 +7,8 @@ Shape of a turn:
    Claude Code's own tools replace SCIO's), the task projection on stdin, the role's allowed
    tools, ``acceptEdits`` permissions with nobody to answer prompts, a turn cap in Claude
    Code's own unit (:func:`scio.loop.backends.claude_code_max_turns`; never SCIO's tool-call
-   cap, I-153) and a dollar cap from the remaining budget; ``stream-json`` output is
+   cap, I-153) and, only when the budget binds, a dollar cap from the remaining budget
+   (issue #115: on the subscription the dollars are a metric); ``stream-json`` output is
    rendered into the same transcript shape ``AgentLoop`` produces, so ``scio report`` reads
    it unchanged.
 2. One ``--resume`` call on that session, one turn, no tools, ``--json-schema`` for the
@@ -247,8 +248,11 @@ class ClaudeCodeWorker:
         model = self.harness.config.role(self.role).model
         test_cmd = " ".join(self.toolchain.test_argv(filter=None, path=None))
         system = self.prompts.get(self.role).render() + BACKEND_NOTE.format(test_cmd=test_cmd)
-        snap = self.harness.budget.snapshot()
+        guard = self.harness.budget
+        snap = guard.snapshot()
         remaining = snap.usd_max - snap.usd_used
+        # Issue #115: a budget that does not bind never caps or shortens a session.
+        budget_cap = ["--max-budget-usd", f"{max(remaining, 0.01):.2f}"] if guard.binding else []
         # Built per turn, not in __init__: the install phase sets ``sandbox.python`` after the
         # worker exists (a resumed build, a lazy install_deps).
         env = worker_env(self.sandbox)
@@ -273,8 +277,7 @@ class ClaudeCodeWorker:
                 "none",
                 "--max-turns",
                 str(self.max_turns),
-                "--max-budget-usd",
-                f"{max(remaining, 0.01):.2f}",
+                *budget_cap,
                 "--name",
                 f"scio-{self.role}",
             ]

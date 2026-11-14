@@ -212,9 +212,15 @@ class Budget(BaseModel):
     advisor_calls_on_step: dict[str, int] = Field(default_factory=dict)
     max_iters: int = 30
     max_stall: int = 2
+    binding: bool = True
+    """False when the dollar and token caps are a recorded metric, not a stop (issue #115,
+    ``scio.harness.budget.budget_binding``): the usage is still kept here and reported."""
 
     @property
     def exhausted(self) -> bool:
+        """True when either cap is reached and the budget binds; never true otherwise."""
+        if not self.binding:
+            return False
         return self.tokens_used >= self.tokens_max or self.usd_used >= self.usd_max
 
     def advisor_allowed(self, step_id: str) -> bool:

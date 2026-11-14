@@ -281,7 +281,9 @@ In progress:
 - **The graphcalc live product run** (a TI-Nspire-style graphing calculator, [issue #63](https://github.com/NewMe505/SCIO/issues/63) for its retrospective), paused at M3 since 2026-11-05.
 
 Proposed next (each one on the [board](https://github.com/users/NewMe505/projects/1)):
-- run graphcalc under the supervisor ([#98](https://github.com/NewMe505/SCIO/issues/98); the scheduled tick is registered)
+- run graphcalc under the supervisor ([#98](https://github.com/NewMe505/SCIO/issues/98); the tick is registered, and graphcalc's M3 runs supervised since 2026-11-14)
+- on the Claude subscription the budget is a metric, never a stop ([#115](https://github.com/NewMe505/SCIO/issues/115), in review)
+- a capped worker session that edited nothing escalates cheapest step first: resume it, carry its findings, more turns or the next tier, then halt ([#116](https://github.com/NewMe505/SCIO/issues/116))
 - guard every orchestrator node's harness errors, I-182 ([#99](https://github.com/NewMe505/SCIO/issues/99))
 - move the nightly live suite to the Claude Code backend, or retire it, I-181 ([#101](https://github.com/NewMe505/SCIO/issues/101))
 - the dashboard's last two follow-ups: Claude Code spans (I-122) and the thread id in telemetry (I-123) ([#102](https://github.com/NewMe505/SCIO/issues/102))

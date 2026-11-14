@@ -2,6 +2,8 @@
 
 ``success`` is decided by the feature list (all passing), not here. This module answers
 "must we stop even though we are not done?": ``max_iters``, ``budget``, ``stall``.
+``budget`` only when the budget binds: ``Budget.exhausted`` is never true for a budget that
+is a recorded metric (issue #115).
 """
 
 from __future__ import annotations

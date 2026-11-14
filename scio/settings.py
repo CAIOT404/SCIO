@@ -97,6 +97,15 @@ class Settings(BaseSettings):
     """Scale for the tier token caps on the ``claude_code`` backend: its tokens are mostly
     cheap cache traffic (about 380,000 billable tokens per estimated dollar in the live product
     evals), so tokens need a larger factor than dollars for both caps to bind together (I-099)."""
+    budget_mode: Literal["auto", "enforce", "track"] = "auto"
+    """Whether the dollar and token caps stop anything (issue #115, ADR 0012 amendment of
+    2026-11-14). ``enforce``: a call that could go over a cap is refused and an exhausted
+    budget ends the run with ``budget``. ``track``: the figures are recorded and shown (the
+    ledger, ``scio report``, ``scio status``, the dashboard) and never refuse a call, end a
+    run or cap a Claude Code session. ``auto`` (the default) tracks only when every call runs
+    on the subscription (``worker_backend`` and ``provider_override`` both ``claude_code``),
+    where nothing is billed, and enforces otherwise, because an API key bills real money.
+    The iteration, stall, turn, tool and advisor caps apply in every mode."""
 
 
 def get_settings() -> Settings:
