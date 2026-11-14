@@ -178,3 +178,37 @@ def test_guard_exists_looks_in_the_repository() -> None:
     assert not cd.guard_exists("test", "test_that_was_never_written")
     assert not cd.guard_exists("symbol", "NO_SUCH_SYMBOL_ANYWHERE")
     assert not cd.guard_exists("test", "bad name(")  # not an identifier: never a match
+
+
+def test_a_logon_trigger_without_its_user_is_refused() -> None:
+    """I-200: ``-AtLogOn`` alone is any user's logon, which only an administrator may
+    register, so the recovery tick's documented recipe was refused with "Access is denied"."""
+    cd = _load()
+    refused = cd.logon_trigger_problems("a.md", "  (New-ScheduledTaskTrigger -AtLogOn),\n")
+    assert len(refused) == 1 and "a.md" in refused[0] and "I-200" in refused[0]
+    named = '(New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\\$env:USERNAME"),'
+    assert cd.logon_trigger_problems("a.md", named) == []
+    continued = "New-ScheduledTaskTrigger -AtLogOn `\n  -User me\n"
+    assert cd.logon_trigger_problems("a.md", continued) == []  # one line, read whole
+    assert cd.logon_trigger_problems("a.md", "New-ScheduledTaskTrigger -Daily -At 03:17") == []
+    # The recipe that was refused sat in a code block inside a list item (docs/RECOVERY.md).
+    doc = "3. Register it:\n   ```powershell\n   (New-ScheduledTaskTrigger -AtLogOn),\n   ```\n"
+    assert len(cd.logon_trigger_problems("a.md", cd.markdown_code(doc))) == 1
+    prose = "The bad form was New-ScheduledTaskTrigger -AtLogOn, alone.\n"
+    assert cd.markdown_code(prose) == ""  # prose may name the bad form
+    assert cd.check_scheduled_task_recipes() == []
+
+
+def test_an_indented_code_block_is_code_too(tmp_path: Path) -> None:
+    """I-201: the fence pattern matched only column-0 fences. The I-200 check read nothing
+    from docs/RECOVERY.md's indented recipe and passed, and links in such a block were
+    checked as links."""
+    cd = _load()
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        "1. Step:\n   ```sh\n   cat [x](missing.md)\n   ```\n- [ok](doc.md)\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    assert cd.links_in(doc) == []
+    assert "missing.md" in cd.markdown_code(doc.read_text(encoding="utf-8"))

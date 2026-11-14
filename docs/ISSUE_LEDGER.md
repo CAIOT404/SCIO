@@ -1713,3 +1713,28 @@ Template:
 - Sweep: `grep -rn "Path([^)]*)\.name\|Path([^)]*)\.parts\|Path([^)]*)\.parent" recovery/` finds only this site. `classify.scio_module_path` already splits frame paths on both separators, which was agent B's choice in the wave.
 - Guard: `test_a_windows_worktree_path_finds_its_transcript_on_any_os` runs on every OS. It bites on Linux, where the bug lives, and CI is that runner. Guardrail 78.
 - Resolved: 2026-11-14 · Status: resolved
+
+### I-200 · The documented recipe for the scheduled recovery tick was refused: a logon trigger without `-User` needs an administrator
+- Found: 2026-11-14 · issue #98, registering the `SCIO recovery tick` task on the owner's request · `docs/RECOVERY.md`, set-up step 3
+- Symptom: `Register-ScheduledTask`, run from a normal (not elevated) shell with the recipe as written, failed with "Access is denied." No task was created.
+- Root cause: `New-ScheduledTaskTrigger -AtLogOn` with no `-User` is a trigger on any user's logon, and Windows lets only an administrator register one. Three temporary tasks, each deleted afterwards, isolated it:
+  - a repeating time trigger alone registered;
+  - `-AtLogOn` alone was refused;
+  - `-AtLogOn -User` with the current user registered.
+
+  The Task Scheduler measurement in ADR 0019 §12a registered a task without a logon trigger, so it never met this.
+- Fix: the recipe binds the logon trigger to the current user (`-User "$env:USERDOMAIN\$env:USERNAME"`) and says how to check the task once.
+  - The task was then registered with that recipe. Its repeating trigger reads `PT10M` with an empty duration (indefinite), and the logon trigger names the user.
+  - A run started by hand ended `Ready` with `LastTaskResult` 0 and wrote the supervisor's `state.sqlite`. The drill's incident stayed `awaiting_merge` on PR #110, as it should before the merge.
+- Sweep: `grep -rn "AtLogOn\|New-ScheduledTaskTrigger\|Register-ScheduledTask"` over the repository, outside `.scio/` and other worktrees, finds this recipe and `scripts/nightly_live.py`'s. That one uses a `-Daily` trigger, which needs no administrator.
+- Guard: `check_scheduled_task_recipes` in the docs check fails on a logon trigger without `-User` in any Markdown code block or script. `test_a_logon_trigger_without_its_user_is_refused`. Guardrail 81. Run against `origin/main`'s recipe, the check names it, but only after I-201's fix.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-201 · The docs check's fence pattern skipped indented code blocks, so I-200's first guard passed without reading the recipe
+- Found: 2026-11-14 · issue #98, when I-200's new check was run against `origin/main`'s unfixed `docs/RECOVERY.md` · `scripts/check_docs.py::FENCE_RE`
+- Symptom: the new check returned no problem for the recipe it was written to catch. Its own test also passed, since it asserted only that the repository was clean.
+- Root cause: `FENCE_RE` matched a fence only at column 0. RECOVERY.md's recipe sits in a fenced block inside a numbered list item, indented three spaces, so the check read no code from it.
+- Fix: `FENCE_RE` allows leading whitespace before both fences, and `markdown_code` gives the joined code blocks of a text. The test now feeds the refused recipe, in its list-item form, through `markdown_code`.
+- Sweep: `grep -n "FENCE_RE" scripts/` finds its one other user, `_strip_code`. The link check strips code before it reads links, so a link inside an indented block was checked as a link. The wider pattern fixes both, and the docs check still reports 0 problems over the repository.
+- Guard: `test_an_indented_code_block_is_code_too` (a link inside an indented block is ignored, and its code is read). `test_a_logon_trigger_without_its_user_is_refused` now passes the list-item form. Guardrail 82.
+- Resolved: 2026-11-14 · Status: resolved
