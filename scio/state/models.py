@@ -200,6 +200,26 @@ class ProgressLedger(BaseModel):
     list."""
     gate_replans: int = 0
     """Times the gate sent a planned run back to ``plan``; capped at one per run (I-043)."""
+    # --- issue #116: the capped-session ladder (ADR 0005 and 0006 amendments) ---
+    last_worker_stop: str | None = None
+    """How the last coder or debugger session ended: ``end_turn``, ``tool_cap``,
+    ``model_cap`` or ``truncated`` (``scio.loop.agent_loop.StopKind``). After a resume, the
+    resume's stop. None before the first session."""
+    last_worker_edited: bool | None = None
+    """Whether the last coder or debugger session changed the working tree, judged from git
+    (a before and after snapshot of the tree), never from the worker's own report."""
+    last_worker_resumed: bool = False
+    """Ladder step 1: the last session ended at its turn cap with no edits, so the same
+    Claude Code session was resumed once with tools before verify."""
+    raised_cap_step: str | None = None
+    """Ladder step 3: the plan step granted the raised turn cap, once per step, keyed
+    ``v<plan version>:<step id>`` so a replan's steps, which reuse ids, start afresh."""
+    raised_cap_pending: bool = False
+    """True from the grant until the next coder or debugger session; when that session is
+    on ``raised_cap_step``, it runs with the raised cap."""
+    stall_exempt: bool = False
+    """Set on the iteration that earned the raised cap: the next ``advance`` does not count
+    it toward a stall, and clears the flag."""
 
 
 class Budget(BaseModel):

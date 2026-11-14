@@ -13,10 +13,14 @@ Shape of a turn:
    it unchanged.
 2. One ``--resume`` call on that session, one turn, no tools, ``--json-schema`` for the
    typed closing output (``WorkerOutput`` by default).
+3. Only when the node asks (issue #116, ladder step 1: the session ended at its turn cap and
+   git shows no edit): :meth:`ClaudeCodeWorker.resume_typed` continues the same session with
+   tools for a bounded number of turns, then takes the typed summary again as in 2.
 
 Verify stays SCIO's ground truth; the ACI's per-edit lint gate does not apply inside a
 Claude Code turn. Cost is Claude Code's own estimate, folded into the harness ledger and
-budget through :meth:`scio.harness.core.Harness.account`. Both calls run with
+budget through :meth:`scio.harness.core.Harness.account`; each call's latency is its own
+share of the session's cumulative ``duration_api_ms`` (I-210). Every call runs with
 :func:`worker_env`, so the turn's Bash commands find the product's interpreter first (I-114).
 """
 
@@ -233,6 +237,8 @@ class ClaudeCodeWorker:
         self._run = runner or claude_runner(binary)
         self.timeout_s = timeout_s
         self.calls: list[list[str]] = []
+        self._api_ms: dict[str, int] = {}
+        """Each session's cumulative ``duration_api_ms`` after its last call (I-210)."""
 
     def run(self, user_message: str, *, tags: dict[str, str] | None = None) -> LoopResult:
         return self.run_typed(user_message, WorkerOutput, tags=tags)
@@ -248,43 +254,95 @@ class ClaudeCodeWorker:
         model = self.harness.config.role(self.role).model
         test_cmd = " ".join(self.toolchain.test_argv(filter=None, path=None))
         system = self.prompts.get(self.role).render() + BACKEND_NOTE.format(test_cmd=test_cmd)
-        guard = self.harness.budget
-        snap = guard.snapshot()
-        remaining = snap.usd_max - snap.usd_used
-        # Issue #115: a budget that does not bind never caps or shortens a session.
-        budget_cap = ["--max-budget-usd", f"{max(remaining, 0.01):.2f}"] if guard.binding else []
         # Built per turn, not in __init__: the install phase sets ``sandbox.python`` after the
         # worker exists (a resumed build, a lazy install_deps).
         env = worker_env(self.sandbox)
         with tempfile.TemporaryDirectory(prefix="scio-claude-") as tmp:
             system_path = Path(tmp) / "system.md"
             system_path.write_text(system, encoding="utf-8", newline="\n")
-            argv = [
-                "-p",
-                SAFE_MODE,  # never the machine's CLAUDE.md (I-171)
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--model",
-                model,
-                "--system-prompt-file",
-                str(system_path),
-                "--allowedTools",
-                ",".join(allowed_tools_for(self.tool_names, self.toolchain)),
-                "--permission-mode",
-                "acceptEdits",
-                "--permission-prompts",
-                "none",
-                "--max-turns",
-                str(self.max_turns),
-                *budget_cap,
-                "--name",
-                f"scio-{self.role}",
-            ]
-            self.calls.append(list(argv))
-            res = self._run(
-                argv, cwd=self.sandbox.root, stdin=user_message, timeout_s=self.timeout_s, env=env
+            argv = self._turn_argv(model, self.max_turns, system_path=system_path)
+            turn, stop, session_id = self._stream(
+                argv, user_message, self.max_turns, model, tags, env
             )
+        return self._close(
+            turn, stop, session_id, user_message, output_model, summary_prompt, model, tags, env
+        )
+
+    def resume_typed[T: BaseModel](
+        self,
+        session_id: str,
+        prompt: str,
+        output_model: type[T],
+        *,
+        max_turns: int,
+        summary_prompt: str = SUMMARY_PROMPT,
+        tags: dict[str, str] | None = None,
+    ) -> LoopResult:
+        """Ladder step 1 (issue #116): continue ``session_id`` with its tools for at most
+        ``max_turns`` more turns, then take the typed summary again, as :meth:`run_typed`
+        does. Measured live on Claude Code 2.1.325: a ``-p --resume`` keeps the session id and
+        its system prompt, runs tools when the tool flags are passed again (also after the
+        no-tools ``--json-schema`` summary call), and counts ``--max-turns`` from zero."""
+        model = self.harness.config.role(self.role).model
+        env = worker_env(self.sandbox)
+        argv = self._turn_argv(model, max_turns, resume=session_id)
+        turn, stop, sid = self._stream(argv, prompt, max_turns, model, tags, env)
+        return self._close(
+            turn, stop, sid or session_id, prompt, output_model, summary_prompt, model, tags, env
+        )
+
+    def _turn_argv(
+        self,
+        model: str,
+        max_turns: int,
+        *,
+        system_path: Path | None = None,
+        resume: str | None = None,
+    ) -> list[str]:
+        """The flags of a tool-using call, a new session or a ``--resume``. A resume passes
+        every flag again: ``--permission-mode`` is not inherited on a ``-p`` resume (sessions
+        docs, measured on issue #116). Its system prompt is kept by the session, so it is not
+        sent again, and the session keeps its ``--name``."""
+        guard = self.harness.budget
+        snap = guard.snapshot()  # at call time: a resume sees what the session already spent
+        remaining = snap.usd_max - snap.usd_used
+        # Issue #115: a budget that does not bind never caps or shortens a session.
+        budget_cap = ["--max-budget-usd", f"{max(remaining, 0.01):.2f}"] if guard.binding else []
+        session = ["--resume", resume] if resume else ["--system-prompt-file", str(system_path)]
+        name = [] if resume else ["--name", f"scio-{self.role}"]
+        return [
+            "-p",
+            SAFE_MODE,  # never the machine's CLAUDE.md (I-171)
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--model",
+            model,
+            *session,
+            "--allowedTools",
+            ",".join(allowed_tools_for(self.tool_names, self.toolchain)),
+            "--permission-mode",
+            "acceptEdits",
+            "--permission-prompts",
+            "none",
+            "--max-turns",
+            str(max_turns),
+            *budget_cap,
+            *name,
+        ]
+
+    def _stream(
+        self,
+        argv: list[str],
+        stdin: str,
+        max_turns: int,
+        model: str,
+        tags: dict[str, str] | None,
+        env: Mapping[str, str],
+    ) -> tuple[StreamTurn, StopKind, str]:
+        """Run one ``stream-json`` call and account it: its turn, its stop, its session id."""
+        self.calls.append(list(argv))
+        res = self._run(argv, cwd=self.sandbox.root, stdin=stdin, timeout_s=self.timeout_s, env=env)
         turn = parse_stream(res.stdout)
         if not turn.result:
             raise FatalError(
@@ -295,12 +353,24 @@ class ClaudeCodeWorker:
         if capped:  # the turn cap is a normal stop for SCIO, not an error: summarise the session
             turn.result = {**turn.result, "is_error": False}
         result = parse_result(ClaudeRunResult(res.code, json.dumps(turn.result), res.stderr))
-        session_id = str(result.get("session_id") or "")
         self._account(result, model, tags)
-        messages = [Message.user(user_message), *turn.messages]
-        stop: StopKind = "tool_cap" if capped or turn.turns >= self.max_turns else "end_turn"
+        stop: StopKind = "tool_cap" if capped or turn.turns >= max_turns else "end_turn"
+        return turn, stop, str(result.get("session_id") or "")
 
-        # The typed closing output: one more turn on the same session, no tools.
+    def _close[T: BaseModel](
+        self,
+        turn: StreamTurn,
+        stop: StopKind,
+        session_id: str,
+        stdin: str,
+        output_model: type[T],
+        summary_prompt: str,
+        model: str,
+        tags: dict[str, str] | None,
+        env: Mapping[str, str],
+    ) -> LoopResult:
+        """The typed closing output: one more turn on the same session, no tools."""
+        messages = [Message.user(stdin), *turn.messages]
         schema = wire_schema(output_model)
         output, summary_text, calls = self._summary(
             session_id, schema, output_model, summary_prompt, model, tags, env
@@ -312,6 +382,7 @@ class ClaudeCodeWorker:
             tool_calls=turn.tool_calls,
             model_calls=max(turn.turns, 1) + calls,
             messages=messages,
+            session_id=session_id or None,
         )
 
     def _summary[T: BaseModel](
@@ -378,13 +449,25 @@ class ClaudeCodeWorker:
 
     def _account(self, data: dict[str, Any], model: str, tags: dict[str, str] | None) -> Usage:
         usage = usage_from_result(data)
+        session_id = str(data.get("session_id") or "")
         self.harness.account(
             role=self.role,
             model=served_model(data, model),
             provider=PROVIDER_NAME,
             usage=usage,
-            latency_ms=int(data.get("duration_api_ms") or 0),
-            request_id=str(data.get("session_id") or "") or None,
+            latency_ms=self._own_latency(session_id, int(data.get("duration_api_ms") or 0)),
+            request_id=session_id or None,
             tags=tags,
         )
         return usage
+
+    def _own_latency(self, session_id: str, cumulative_ms: int) -> int:
+        """This call's own API time (I-210). ``duration_api_ms`` on a resumed call covers the
+        whole session (measured on issue #116), so the summary call had recorded the session's
+        time a second time: the session's figure after its previous call is subtracted. The
+        ``usage`` block is per call already, so the dollars need no such correction."""
+        if not session_id:
+            return cumulative_ms
+        before = self._api_ms.get(session_id, 0)
+        self._api_ms[session_id] = max(before, cumulative_ms)
+        return max(cumulative_ms - before, 0)

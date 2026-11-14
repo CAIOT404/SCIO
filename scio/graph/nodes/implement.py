@@ -1,12 +1,29 @@
 """T1/T2 execution nodes: ``implement`` (one step per cycle), ``debug``, ``advise``,
-``review``, and the edges around the ``triage`` decision stored by ``verify``."""
+``review``, and the edges around the ``triage`` decision stored by ``verify``.
+
+The capped-session ladder (issue #116, ADR 0005 and 0006 amendments) lives in ``implement``
+and ``debug``. A coder or debugger session that ends at its turn cap while git shows no
+edit takes the next unused step, cheapest first:
+
+1. Its Claude Code session is resumed once, with tools, for ``RESUME_TURN_CAP`` turns, to
+   write the fix its summary describes; the typed summary is taken again. Skipped on the
+   ``aci`` backend, whose turns have no session.
+2. The next session gets the previous one's findings (I-154, ``previous_on_step``).
+3. If it still edited nothing, the next session on the same plan step gets
+   ``RAISED_CAP_FACTOR`` times the turn cap, once per step, and this iteration counts no
+   stall (``ProgressLedger.stall_exempt``).
+4. Once the raised cap is spent, a capped session that edited nothing counts toward a stall
+   as before.
+"""
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Literal
 
+from scio.aci.sandbox.base import Sandbox
 from scio.aci.toolbox import ToolBox
 from scio.context.projections import advisor_brief, debug_message, review_message, step_message
 from scio.graph.nodes.common import decision, diff_stat, fact, git_out, untracked_files
@@ -14,13 +31,21 @@ from scio.graph.nodes.planning import keep_localized_files, normalize_steps, sum
 from scio.graph.run_context import RunContext
 from scio.harness.failures import BudgetExceeded
 from scio.harness.types import Message
-from scio.loop.backends import make_worker
+from scio.loop.agent_loop import LoopResult
+from scio.loop.backends import (
+    RAISED_CAP_FACTOR,
+    RESUME_TURN_CAP,
+    ResumableWorker,
+    Worker,
+    make_worker,
+)
 from scio.loop.impact import assess
 from scio.state.models import (
     AdvisorOutput,
     EscalationRecord,
     EscalationTrigger,
     ExitReason,
+    LedgerEntry,
     Plan,
     ReviewerOutput,
     Role,
@@ -50,30 +75,196 @@ def _diff_text(ctx: RunContext, state: SCIOState) -> str:
     return git_out(ctx.sandbox, "diff", base) if base else git_out(ctx.sandbox, "diff")
 
 
-def _after_worker(
+CAPPED_STOPS = frozenset({"tool_cap", "model_cap"})
+"""Stops that mean a session ran out of turns: Claude Code's ``--max-turns`` and SCIO's tool
+cap report ``tool_cap``; SCIO's own loop on T1/T2 stops at its model-call cap,
+``model_cap``."""
+
+RESUME_PROMPT = (
+    "Your turn cap ended this session before you changed any file, and your JSON summary "
+    "above records what you found. You have diagnosed it; now write the fix: make the edits "
+    "your summary describes, run the step's tests, and stop when they pass."
+)
+"""Ladder step 1's prompt on the resumed session (issue #116)."""
+
+SNAPSHOT_INDEX = "scio-snapshot.index"
+"""A throwaway git index in the sandbox's git directory, for :func:`tree_snapshot`."""
+
+
+def tree_snapshot(sandbox: Sandbox) -> str | None:
+    """The id of a git tree of every file in the working tree that git does not ignore,
+    written through a throwaway index so the repository's own index is untouched.
+
+    Equal ids before and after a worker session mean git saw no edit (issue #116), whatever
+    the session reports. ``changed_since_head`` cannot tell: an earlier session's
+    uncommitted edits on the same step are still in the tree. None when git cannot say.
+    """
+    gitdir = sandbox.exec(["git", "rev-parse", "--absolute-git-dir"], timeout_s=60)
+    if not gitdir.ok:
+        return None
+    env = {"GIT_INDEX_FILE": f"{gitdir.stdout.strip()}/{SNAPSHOT_INDEX}"}
+    added = sandbox.exec(["git", "add", "--all", "--", "."], env=env, timeout_s=120)
+    if not added.ok:
+        return None
+    tree = sandbox.exec(["git", "write-tree"], env=env, timeout_s=60)
+    return (tree.stdout.strip() or None) if tree.ok else None
+
+
+def _edited(before: str | None, after: str | None) -> bool | None:
+    return None if before is None or after is None else before != after
+
+
+@dataclass
+class Session:
+    """One coder or debugger session as the capped-session ladder sees it (issue #116)."""
+
+    result: LoopResult
+    """The session's result; after a resume, merged with the resume's (its output and stop)."""
+    edited: bool | None
+    """Whether git saw the tree change over the session and its resume; None: git cannot say."""
+    capped: LoopResult | None = None
+    """The first call's result when the session was resumed (ladder step 1)."""
+    raised: bool = False
+    """The session ran with the raised turn cap (ladder step 3)."""
+
+
+def ladder_key(state: SCIOState) -> str | None:
+    """The plan step a raised turn cap is granted to: plan version and step id, since a
+    replan's steps reuse ids (``S1``)."""
+    step_id = state.progress.current_step_id
+    if state.plan is None or step_id is None:
+        return None
+    return f"v{state.plan.version}:{step_id}"
+
+
+def raised_cap_due(state: SCIOState) -> bool:
+    """Ladder step 3: this session is the one the step was granted the raised cap for."""
+    p, key = state.progress, ladder_key(state)
+    return p.raised_cap_pending and key is not None and p.raised_cap_step == key
+
+
+def resume_if_capped(
     ctx: RunContext,
-    state: SCIOState,
-    output: WorkerOutput,
+    loop: Worker,
+    first: LoopResult,
+    before: str | None,
     *,
-    role: Role,
-    tool_calls: int,
-    stop: str,
-    transcript: str,
+    tags: dict[str, str],
+    raised: bool,
+) -> Session:
+    """Ladder step 1 after a session's first call (``before`` is the tree snapshot taken
+    before it): resume the session once when it ran out of turns and git shows no edit. The
+    resume continues the same Claude Code session with tools for ``RESUME_TURN_CAP`` turns
+    and takes its typed summary again; ``AgentLoop`` has no session (``session_id`` None), so
+    it is never resumed. Called inside the node's ``BudgetExceeded`` guard (I-098)."""
+    edited = _edited(before, tree_snapshot(ctx.sandbox))
+    if (
+        first.stop not in CAPPED_STOPS
+        or edited is not False
+        or not first.session_id
+        or not isinstance(loop, ResumableWorker)
+    ):
+        return Session(result=first, edited=edited, raised=raised)
+    second = loop.resume_typed(
+        first.session_id, RESUME_PROMPT, WorkerOutput, max_turns=RESUME_TURN_CAP, tags=tags
+    )
+    merged = LoopResult(
+        output=second.output,
+        stop=second.stop,
+        tool_calls=first.tool_calls + second.tool_calls,
+        model_calls=first.model_calls + second.model_calls,
+        messages=[*first.messages, *second.messages],
+        session_id=second.session_id,
+    )
+    return Session(
+        result=merged,
+        edited=_edited(before, tree_snapshot(ctx.sandbox)),
+        capped=first,
+        raised=raised,
+    )
+
+
+def _ladder(
+    state: SCIOState, session: Session, *, role: Role, step_id: str | None
+) -> tuple[dict[str, Any], list[LedgerEntry]]:
+    """The progress fields and ledger facts the ladder writes after a session."""
+    stop = session.result.stop
+    key = ladder_key(state)
+    capped_empty = stop in CAPPED_STOPS and session.edited is False
+    grant = capped_empty and key is not None and state.progress.raised_cap_step != key
+    entries: list[LedgerEntry] = []
+    if session.capped is not None:
+        first = session.capped.output
+        found = first.summary if isinstance(first, WorkerOutput) else ""
+        entries.append(
+            fact(
+                f"ladder step 1 on {step_id}: the {role.value} session ended at its turn cap "
+                f"({session.capped.stop}) with no edit in git and was resumed once for up to "
+                f"{RESUME_TURN_CAP} turns; "
+                + ("it edited" if session.edited else "it still edited nothing")
+                + (f". Its first summary: {found}" if found else ""),
+                source=Role.SYSTEM,
+                step_id=step_id,
+            )
+        )
+    if grant:
+        entries.append(
+            fact(
+                f"ladder step 3 on {step_id}: the {role.value} session ended at its turn cap "
+                f"with no edit; the next session on this step gets {RAISED_CAP_FACTOR}x the "
+                "turn cap, and this iteration counts no stall",
+                source=Role.SYSTEM,
+                step_id=step_id,
+            )
+        )
+    elif session.raised:
+        entries.append(
+            fact(
+                f"ladder step 3 on {step_id}: the {role.value} session ran with "
+                f"{RAISED_CAP_FACTOR}x the turn cap"
+                + (
+                    "; it ended at its cap with no edit, so stalls count as before (step 4)"
+                    if capped_empty
+                    else ""
+                ),
+                source=Role.SYSTEM,
+                step_id=step_id,
+            )
+        )
+    fields: dict[str, Any] = {
+        "last_worker_stop": stop,
+        "last_worker_edited": session.edited,
+        "last_worker_resumed": session.capped is not None,
+        "raised_cap_step": key if grant else state.progress.raised_cap_step,
+        "raised_cap_pending": grant,
+        "stall_exempt": grant,
+    }
+    return fields, entries
+
+
+def _after_worker(
+    ctx: RunContext, state: SCIOState, session: Session, *, role: Role
 ) -> dict[str, Any]:
+    result = session.result
+    output: WorkerOutput = result.output
+    tool_calls, stop = result.tool_calls, result.stop
     attempt = state.progress.attempts_on_step + 1
     ref = ctx.artifacts.put(
         "log",
-        transcript,
+        result.transcript(),
         produced_by=role,
         name=f"{role.value}-{state.progress.iterations + 1:02d}",
     )
+    # The plan, not the model, says which step is current: a worker that names a finished
+    # step would otherwise move the run back onto it and loop (I-046).
+    step_id = state.progress.current_step_id or output.step_id
+    ladder, ladder_entries = _ladder(state, session, role=role, step_id=step_id)
     progress = state.progress.model_copy(
         update={
-            # The plan, not the model, says which step is current: a worker that names a
-            # finished step would otherwise move the run back onto it and loop (I-046).
-            "current_step_id": state.progress.current_step_id or output.step_id,
+            "current_step_id": step_id,
             "attempts_on_step": attempt,
             "tool_calls": state.progress.tool_calls + tool_calls,
+            **ladder,
         }
     )
     flags = assess(
@@ -87,7 +278,8 @@ def _after_worker(
             f"[{tool_calls} tool calls, stop={stop}, confidence={output.confidence}]",
             source=role,
             step_id=progress.current_step_id,
-        )
+        ),
+        *ladder_entries,
     ]
     if output.sweep is not None:
         entries.append(
@@ -130,7 +322,8 @@ def implement(ctx: RunContext) -> Node:
         toolbox = ToolBox(
             ctx.sandbox, WRITER_TOOLS, human_gate=False, role="coder", context=ctx.tool_context
         )
-        loop = make_worker(ctx, toolbox, "coder")
+        raised = raised_cap_due(state)
+        loop = make_worker(ctx, toolbox, "coder", cap_factor=RAISED_CAP_FACTOR if raised else 1)
         previous = previous_on_step(state)
         msg = step_message(
             state.task,
@@ -144,20 +337,15 @@ def implement(ctx: RunContext) -> Node:
             previous=previous,
             tree=diff_stat(ctx.sandbox, "HEAD") if previous is not None else None,
         )
+        tags = {"thread": ctx.thread_id, "step": step.id}
+        before = tree_snapshot(ctx.sandbox)
         try:
-            result = loop.run(msg, tags={"thread": ctx.thread_id, "step": step.id})
+            first = loop.run(msg, tags=tags)
+            session = resume_if_capped(ctx, loop, first, before, tags=tags, raised=raised)
         except BudgetExceeded as exc:
             entry = fact(f"budget exhausted during implement: {exc.message}", source=Role.SYSTEM)
             return {"exit_reason": ExitReason.BUDGET, "task_ledger": [entry], **ctx.budget_update()}
-        return _after_worker(
-            ctx,
-            state,
-            result.output,
-            role=Role.CODER,
-            tool_calls=result.tool_calls,
-            stop=result.stop,
-            transcript=result.transcript(),
-        )
+        return _after_worker(ctx, state, session, role=Role.CODER)
 
     return node
 
@@ -169,7 +357,8 @@ def debug(ctx: RunContext) -> Node:
         toolbox = ToolBox(
             ctx.sandbox, WRITER_TOOLS, human_gate=False, role="debugger", context=ctx.tool_context
         )
-        loop = make_worker(ctx, toolbox, "debugger")
+        raised = raised_cap_due(state)
+        loop = make_worker(ctx, toolbox, "debugger", cap_factor=RAISED_CAP_FACTOR if raised else 1)
         previous = previous_on_step(state)
         msg = debug_message(
             state.current_step(),
@@ -182,22 +371,15 @@ def debug(ctx: RunContext) -> Node:
             tree=diff_stat(ctx.sandbox, "HEAD") if previous is not None else None,
             attempt=state.progress.attempts_on_step + 1,
         )
+        tags = {"thread": ctx.thread_id, "debug": str(state.progress.iterations)}
+        before = tree_snapshot(ctx.sandbox)
         try:
-            result = loop.run(
-                msg, tags={"thread": ctx.thread_id, "debug": str(state.progress.iterations)}
-            )
+            first = loop.run(msg, tags=tags)
+            session = resume_if_capped(ctx, loop, first, before, tags=tags, raised=raised)
         except BudgetExceeded as exc:
             entry = fact(f"budget exhausted during debug: {exc.message}", source=Role.SYSTEM)
             return {"exit_reason": ExitReason.BUDGET, "task_ledger": [entry], **ctx.budget_update()}
-        return _after_worker(
-            ctx,
-            state,
-            result.output,
-            role=Role.DEBUGGER,
-            tool_calls=result.tool_calls,
-            stop=result.stop,
-            transcript=result.transcript(),
-        )
+        return _after_worker(ctx, state, session, role=Role.DEBUGGER)
 
     return node
 

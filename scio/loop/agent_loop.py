@@ -39,6 +39,9 @@ class LoopResult:
     tool_calls: int
     model_calls: int
     messages: list[Message] = field(default_factory=list)
+    session_id: str | None = None
+    """The Claude Code session the turn ran in, which ``--resume`` can continue (issue #116).
+    None for ``AgentLoop``, whose turns have no session to resume."""
 
     def transcript(self) -> str:
         lines: list[str] = []

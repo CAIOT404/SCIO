@@ -95,6 +95,14 @@ def advance(
 
     ``signature_fn`` is the toolchain's error-signature parser (ADR 0009); the default is
     the Python one, so callers without a toolchain keep the pre-M6 behaviour.
+
+    ``progress.stall_exempt`` (issue #116) marks the iteration whose session ran out of turns
+    without editing and earned the step's raised turn cap. It changed nothing, so it is
+    neither a stall nor a fix attempt: an unchanged fingerprint does not count toward a
+    stall, the same error signature does not count one more attempt, and the flag is
+    cleared. The iteration and the fingerprint still advance (ADR 0006 amendment). Counting
+    the attempt let ``advisor_cap`` halt the step before its raised-cap session ran, against
+    the owner's "halt only after that fails".
     """
     p = progress.model_copy()
     p.iterations += 1
@@ -103,11 +111,16 @@ def advance(
         p.fix_attempts_on_error = 0
     else:
         sig = signature_fn(error_text)
-        p.fix_attempts_on_error = (
-            p.fix_attempts_on_error + 1 if sig == p.last_error_signature else 1
-        )
+        if sig != p.last_error_signature:
+            p.fix_attempts_on_error = 1
+        elif not p.stall_exempt:
+            p.fix_attempts_on_error += 1
         p.last_error_signature = sig
     fp = progress_fingerprint(p, feature_list)
-    p.stall_count = p.stall_count + 1 if fp == p.last_fingerprint else 0
+    if fp != p.last_fingerprint:
+        p.stall_count = 0
+    elif not p.stall_exempt:
+        p.stall_count += 1
+    p.stall_exempt = False
     p.last_fingerprint = fp
     return p

@@ -8,7 +8,7 @@ to the unmodified ``claude`` binary on the user's subscription. Both expose ``ru
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -18,6 +18,19 @@ from scio.loop.agent_loop import SUMMARY_PROMPT, AgentLoop, LoopResult
 
 RUNNER_OVERRIDE: Any = None
 """Tests inject a canned ``claude`` runner here; None runs the real binary."""
+
+RESUME_TURN_CAP = 10
+"""Ladder step 1 (issue #116): the Claude Code turns a capped session that edited nothing
+gets when it is resumed to write the fix it diagnosed. The session's context is loaded, so
+the turns pay for edits and a test run, not reconnaissance. In the graphcalc run the
+documenter sessions that edited spanned at most 7 turns from first edit to last
+(``DOCUMENTER_TURN_CAP``); 10 = that span + one test run + the closing turn. ``--max-turns``
+counts from zero on each ``-p`` call, resumed or not (measured live, issue #116)."""
+
+RAISED_CAP_FACTOR = 2
+"""Ladder step 3 (issue #116): the next coder or debugger session on a step whose capped
+session still edited nothing after its resume gets this multiple of the role's turn cap,
+once per step (Claude Code turns on ``claude_code``, model calls on ``aci``)."""
 
 DOCUMENTER_TURN_CAP = 20
 """The documenter's cap on the claude_code backend, in Claude Code turns (I-153). Its tool cap
@@ -62,12 +75,38 @@ class Worker(Protocol):
     ) -> LoopResult: ...
 
 
+@runtime_checkable
+class ResumableWorker(Protocol):
+    """A worker whose turn ran in a session it can continue (``ClaudeCodeWorker``; issue
+    #116, ladder step 1). ``AgentLoop`` has no sessions, so it is never resumed."""
+
+    def resume_typed[T: BaseModel](
+        self,
+        session_id: str,
+        prompt: str,
+        output_model: type[T],
+        *,
+        max_turns: int,
+        summary_prompt: str = SUMMARY_PROMPT,
+        tags: dict[str, str] | None = None,
+    ) -> LoopResult: ...
+
+
 def make_worker(
-    ctx: RunContext, toolbox: ToolBox, role: str, *, max_model_calls: int | None = None
+    ctx: RunContext,
+    toolbox: ToolBox,
+    role: str,
+    *,
+    max_model_calls: int | None = None,
+    cap_factor: int = 1,
 ) -> Worker:
-    """The configured backend for ``role``; ``toolbox`` names the tools either way."""
+    """The configured backend for ``role``; ``toolbox`` names the tools either way.
+
+    ``cap_factor`` multiplies the role's turn cap: ``RAISED_CAP_FACTOR`` for the one session
+    a step is granted by the capped-session ladder (issue #116), else 1.
+    """
     if ctx.settings.worker_backend == "claude_code":
-        from scio.loop.claude_code_worker import ClaudeCodeWorker
+        from scio.loop.claude_code_worker import DEFAULT_MAX_TURNS, ClaudeCodeWorker
 
         if ctx.settings.sandbox_backend != "local":
             # The binary runs on the host in the sandbox root; a Docker or E2B root is not a
@@ -76,6 +115,7 @@ def make_worker(
                 "SCIO_WORKER_BACKEND=claude_code needs SCIO_SANDBOX_BACKEND=local; "
                 f"got {ctx.settings.sandbox_backend!r}"
             )
+        turns = claude_code_max_turns(role, toolbox, max_model_calls) or DEFAULT_MAX_TURNS
         return ClaudeCodeWorker(
             ctx.harness,
             ctx.sandbox,
@@ -83,11 +123,18 @@ def make_worker(
             role,
             toolchain=ctx.toolchain,
             tool_names=tuple(toolbox.tools),
-            max_turns=claude_code_max_turns(role, toolbox, max_model_calls),
+            max_turns=turns * cap_factor,
             binary=ctx.settings.claude_code_bin,
             runner=RUNNER_OVERRIDE,
             timeout_s=max(ctx.settings.request_timeout_s, 600.0) * 3,
         )
     if max_model_calls is not None:
-        return AgentLoop(ctx.harness, toolbox, ctx.prompts, role, max_model_calls=max_model_calls)
-    return AgentLoop(ctx.harness, toolbox, ctx.prompts, role)
+        loop = AgentLoop(ctx.harness, toolbox, ctx.prompts, role, max_model_calls=max_model_calls)
+    else:
+        loop = AgentLoop(ctx.harness, toolbox, ctx.prompts, role)
+    # SCIO's own loop stops at its model-call cap (``model_cap``), or at the toolbox's
+    # tool-call cap when one is set (T0): both are its turn cap.
+    loop.max_model_calls *= cap_factor
+    if toolbox.max_calls is not None:
+        toolbox.max_calls *= cap_factor
+    return loop
