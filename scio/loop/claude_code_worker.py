@@ -22,13 +22,16 @@ Claude Code turn. Cost is Claude Code's own estimate, folded into the harness le
 budget through :meth:`scio.harness.core.Harness.account`; each call's latency is its own
 share of the session's cumulative ``duration_api_ms`` (I-210). Every call runs with
 :func:`worker_env`, so the turn's Bash commands find the product's interpreter first (I-114).
+The arguments of 1 and 3 come from :func:`worker_argv` and :func:`resume_argv`, which
+``scripts/dev/claude_probe.py`` imports, so a probe runs with exactly the worker's flags
+(issue #122, W-31).
 """
 
 from __future__ import annotations
 
 import json
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -113,6 +116,101 @@ def allowed_tools_for(tool_names: tuple[str, ...], toolchain: Toolchain) -> list
         test_bin = toolchain.test_argv(filter=None, path=None)[0]
         rules += [f"Bash({test_bin} *)", f"Bash({toolchain.lint_argv('.')[0]} *)"]
     return list(dict.fromkeys(rules))
+
+
+def session_name(role: str) -> str:
+    """The ``--name`` of a worker session for ``role``."""
+    return f"scio-{role}"
+
+
+def worker_system_prompt(prompts: PromptRegistry, role: str, toolchain: Toolchain) -> str:
+    """The system prompt of a worker turn: the role's static prompt plus :data:`BACKEND_NOTE`
+    naming the toolchain's test command."""
+    test_cmd = " ".join(toolchain.test_argv(filter=None, path=None))
+    return prompts.get(role).render() + BACKEND_NOTE.format(test_cmd=test_cmd)
+
+
+def _tool_turn_argv(
+    *,
+    model: str,
+    session: list[str],
+    allowed_tools: Sequence[str],
+    max_turns: int,
+    budget_cap: float | None,
+    name: list[str],
+) -> list[str]:
+    cap = [] if budget_cap is None else ["--max-budget-usd", f"{max(budget_cap, 0.01):.2f}"]
+    return [
+        "-p",
+        SAFE_MODE,  # never the machine's CLAUDE.md (I-171)
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--model",
+        model,
+        *session,
+        "--allowedTools",
+        ",".join(allowed_tools),
+        "--permission-mode",
+        "acceptEdits",
+        "--permission-prompts",
+        "none",
+        "--max-turns",
+        str(max_turns),
+        *cap,
+        *name,
+    ]
+
+
+def worker_argv(
+    *,
+    model: str,
+    system_path: Path | str,
+    allowed_tools: Sequence[str],
+    max_turns: int,
+    budget_cap: float | None,
+    name: str,
+) -> list[str]:
+    """The ``claude`` arguments (binary excluded) of a tool-using worker turn that starts a new
+    session: :meth:`ClaudeCodeWorker.run_typed` passes exactly these, and so does
+    ``scripts/dev/claude_probe.py`` (issue #122, W-31).
+
+    ``allowed_tools`` are Claude Code permission rules (:func:`allowed_tools_for`).
+    ``budget_cap`` is the remaining budget in dollars when the budget binds, else None: a
+    budget that does not bind never caps or shortens a session (issue #115). ``name`` is the
+    session's ``--name`` (:func:`session_name`).
+    """
+    return _tool_turn_argv(
+        model=model,
+        session=["--system-prompt-file", str(system_path)],
+        allowed_tools=allowed_tools,
+        max_turns=max_turns,
+        budget_cap=budget_cap,
+        name=["--name", name],
+    )
+
+
+def resume_argv(
+    *,
+    model: str,
+    session_id: str,
+    allowed_tools: Sequence[str],
+    max_turns: int,
+    budget_cap: float | None,
+) -> list[str]:
+    """The ``claude`` arguments of a tool-using ``--resume`` of ``session_id``
+    (:meth:`ClaudeCodeWorker.resume_typed`, issue #116). Every flag of :func:`worker_argv` is
+    passed again: ``--permission-mode`` is not inherited on a ``-p`` resume (sessions docs,
+    measured on issue #116). The session keeps its system prompt and its ``--name``, so neither
+    is sent again."""
+    return _tool_turn_argv(
+        model=model,
+        session=["--resume", session_id],
+        allowed_tools=allowed_tools,
+        max_turns=max_turns,
+        budget_cap=budget_cap,
+        name=[],
+    )
 
 
 @dataclass
@@ -252,15 +350,21 @@ class ClaudeCodeWorker:
         tags: dict[str, str] | None = None,
     ) -> LoopResult:
         model = self.harness.config.role(self.role).model
-        test_cmd = " ".join(self.toolchain.test_argv(filter=None, path=None))
-        system = self.prompts.get(self.role).render() + BACKEND_NOTE.format(test_cmd=test_cmd)
+        system = worker_system_prompt(self.prompts, self.role, self.toolchain)
         # Built per turn, not in __init__: the install phase sets ``sandbox.python`` after the
         # worker exists (a resumed build, a lazy install_deps).
         env = worker_env(self.sandbox)
         with tempfile.TemporaryDirectory(prefix="scio-claude-") as tmp:
             system_path = Path(tmp) / "system.md"
             system_path.write_text(system, encoding="utf-8", newline="\n")
-            argv = self._turn_argv(model, self.max_turns, system_path=system_path)
+            argv = worker_argv(
+                model=model,
+                system_path=system_path,
+                allowed_tools=allowed_tools_for(self.tool_names, self.toolchain),
+                max_turns=self.max_turns,
+                budget_cap=self._budget_cap(),
+                name=session_name(self.role),
+            )
             turn, stop, session_id = self._stream(
                 argv, user_message, self.max_turns, model, tags, env
             )
@@ -285,51 +389,26 @@ class ClaudeCodeWorker:
         no-tools ``--json-schema`` summary call), and counts ``--max-turns`` from zero."""
         model = self.harness.config.role(self.role).model
         env = worker_env(self.sandbox)
-        argv = self._turn_argv(model, max_turns, resume=session_id)
+        argv = resume_argv(
+            model=model,
+            session_id=session_id,
+            allowed_tools=allowed_tools_for(self.tool_names, self.toolchain),
+            max_turns=max_turns,
+            budget_cap=self._budget_cap(),
+        )
         turn, stop, sid = self._stream(argv, prompt, max_turns, model, tags, env)
         return self._close(
             turn, stop, sid or session_id, prompt, output_model, summary_prompt, model, tags, env
         )
 
-    def _turn_argv(
-        self,
-        model: str,
-        max_turns: int,
-        *,
-        system_path: Path | None = None,
-        resume: str | None = None,
-    ) -> list[str]:
-        """The flags of a tool-using call, a new session or a ``--resume``. A resume passes
-        every flag again: ``--permission-mode`` is not inherited on a ``-p`` resume (sessions
-        docs, measured on issue #116). Its system prompt is kept by the session, so it is not
-        sent again, and the session keeps its ``--name``."""
+    def _budget_cap(self) -> float | None:
+        """The remaining dollars for ``--max-budget-usd``, read at call time (a resume sees what
+        the session already spent); None when the budget does not bind (issue #115)."""
         guard = self.harness.budget
-        snap = guard.snapshot()  # at call time: a resume sees what the session already spent
-        remaining = snap.usd_max - snap.usd_used
-        # Issue #115: a budget that does not bind never caps or shortens a session.
-        budget_cap = ["--max-budget-usd", f"{max(remaining, 0.01):.2f}"] if guard.binding else []
-        session = ["--resume", resume] if resume else ["--system-prompt-file", str(system_path)]
-        name = [] if resume else ["--name", f"scio-{self.role}"]
-        return [
-            "-p",
-            SAFE_MODE,  # never the machine's CLAUDE.md (I-171)
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--model",
-            model,
-            *session,
-            "--allowedTools",
-            ",".join(allowed_tools_for(self.tool_names, self.toolchain)),
-            "--permission-mode",
-            "acceptEdits",
-            "--permission-prompts",
-            "none",
-            "--max-turns",
-            str(max_turns),
-            *budget_cap,
-            *name,
-        ]
+        if not guard.binding:
+            return None
+        snap = guard.snapshot()
+        return snap.usd_max - snap.usd_used
 
     def _stream(
         self,
