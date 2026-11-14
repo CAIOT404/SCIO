@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
+
+## [0.10.0] - 2026-11-14
 ### Added
 - The external recovery supervisor, `python -m recovery` (ADR 0019, issue #95). It runs a `scio build` as its parent process, outside SCIO, with the standard library only. When the build fails because of a SCIO harness fault, it does the following:
   - Saves the build's state, including database backups taken before any repair.
