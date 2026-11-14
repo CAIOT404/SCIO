@@ -1867,3 +1867,12 @@ Template:
 - Sweep: the new check, run over the whole ledger (I-001 to I-203), found exactly these two.
 - Guard: `check_ledger_statuses`, `test_every_ledger_entry_says_whether_it_is_open_or_resolved`. Guardrail 84.
 - Resolved: 2026-11-14 · Status: resolved
+
+### I-205 · The release worktree's first gate failed mypy on 20 imports nobody changed: the worktree was never synced as CI syncs
+- Found: 2026-11-14 · cutting v0.10.0 in `.claude/worktrees/release-0.10.0`, gate run `20261114T120647Z` · `scripts/gate.py`
+- Symptom: the gate's mypy step reported `Found 20 errors in 5 files`, including `Cannot find implementation or library stub for module named "uvicorn"` (`scio/cli.py:494`) and `Untyped decorator makes function "graphs" untyped` (`scio/dashboard/app.py:341`). The release commit changed no Python. After `uv sync --frozen --all-extras --group dev`, the same tree passed mypy in the next run, 47 s later (`20261114T120734Z`).
+- Root cause: the worktree's first `uv run` created its `.venv` with the default groups only, so the `dashboard` extra (FastAPI, uvicorn) and the other extras were missing. Guardrail 54 (I-156) says to sync a fresh worktree first, but its guard was `manual:`, and this time the orchestrator itself skipped it. Nothing ran that could catch the miss.
+- Fix: the gate checks first, before any step, that the environment has every distribution in `pyproject.toml`'s optional extras and `dev` group (`missing_distributions`). If any is missing, it names them and the sync to run, and exits 1. Guardrail 54's guard becomes that symbol and its test, in place of `manual:`.
+- Sweep: `grep -rn "uv sync"` over the repository, excluding the ledger. CI's three jobs and the nightly suite sync `--all-extras --group dev`. The recovery supervisor's repair worktree syncs `--frozen --all-extras --group dev` before the session starts (`recovery/repair.py`, ADR 0019). The README, OBSERVABILITY and ADR 0017 all say `--all-extras` (guardrail 21). The gate was the one check entry point that ran without a sync, and every session and worktree agent runs its checks through it. No requirement in the extras or the `dev` group has an environment marker, which the check does not evaluate (its docstring says so, and the test runs it against the real `pyproject.toml` on CI's Linux runner).
+- Guard: `missing_distributions`, `test_a_gate_in_an_environment_without_cis_extras_stops_before_any_step`. Guardrail 54, reworded.
+- Resolved: 2026-11-14 · Status: resolved
