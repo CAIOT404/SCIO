@@ -21,3 +21,22 @@ ADR 0001 fixed the policy: a Sonnet worker escalates to an Opus advisor on speci
 - Thresholds (3, 2, 8, K per tier) live in `configs/budgets.yaml` under `escalation` and are the M5 tuning surface.
 - Plan drift is only evaluated after a failing verify. A drifted patch that passes every check is accepted; the Reviewer and the gate see the diff. Revisit if evals show silent scope creep.
 - Patch sampling (signal 5) is wired but off by default; the sampling step itself is an M5 item measured against its token cost.
+
+## Amendment (2026-11-14, issue #116): a capped session that edited nothing climbs a ladder before it can stall
+In the graphcalc run, P26 attempt 3's T1 coder session (Claude Code backend) spent its whole turn cap on a correct diagnosis: `33 tool calls, stop=tool_cap`, `files_touched: []`, 17 minutes. SCIO then started a fresh debugger session, which redid the reconnaissance before it edited. The worker's stop reached only a ledger line, so `verify` and `triage` could not tell a session that ran out of turns from one that chose to stop, and the empty iteration counted toward a stall.
+
+- **The state records it (the contract).** `LoopResult.session_id` names the Claude Code session (None for `AgentLoop`). `ProgressLedger` gains `last_worker_stop`, `last_worker_edited`, `last_worker_resumed`, `raised_cap_step`, `raised_cap_pending` and `stall_exempt`, all with defaults, so older checkpoints load.
+- **Edits are judged from git, never from the worker's report.** `implement.tree_snapshot` writes a git tree of every file git does not ignore, through a throwaway index (`GIT_INDEX_FILE`), so the repository's own index is untouched. The snapshot is taken before the session, after its first call, and after a resume. `changed_since_head` cannot answer the question: on a step's second attempt the first session's uncommitted edits are still in the tree. The toolchain's cache excludes (`prepare_repo`) keep a test run from counting as an edit. When git cannot answer, the ladder does nothing.
+- **The ladder (the owner's order, cheapest step first), in `implement` and `debug`.** A session is capped when its stop is `tool_cap` (Claude Code's `--max-turns`, SCIO's tool cap) or `model_cap` (SCIO's own loop on T1/T2). A capped session with no edit takes the next unused step:
+  1. **Continue the same session.** `ClaudeCodeWorker.resume_typed` runs `claude -p --resume <session>` with every flag again (`--permission-mode` is not inherited on a `-p` resume) and no system prompt file (the session keeps it). It runs for `RESUME_TURN_CAP` = 10 turns: the longest measured edit span (7 turns), plus a test run and a closing turn. The prompt points at the summary the session just wrote ("You have diagnosed it; now write the fix"). The typed summary is then taken again. This happens inside the same node, before verify. The `aci` backend has no session, so it skips this step.
+  2. **Carry the findings forward.** Unchanged: I-154, `previous_on_step`.
+  3. **More turns.** If the resumed session still edited nothing, the next coder or debugger session on the same plan step gets `RAISED_CAP_FACTOR` = 2 times the role's cap. That is 60 Claude Code turns at T1/T2, or 24 model calls on `aci`. It is granted once per step, keyed `v<plan version>:<step id>` so a replan's reused ids start afresh. The iteration that earned it counts no stall (ADR 0006 amendment).
+  4. **Then halt as before.** If the raised-cap session also ends capped with no edit, after its own resume, stall counting proceeds as before.
+- **Measured before relying on it** (Claude Code 2.1.325, Haiku, 2026-11-14, on #116):
+  - A `-p --resume` keeps the session id and runs tools when the tool flags are passed again. It does so even after the no-tools `--json-schema` summary call: a capped call, then the summary, then a tool resume finished the remaining steps.
+  - `--max-turns` and `num_turns` count per call.
+  - `duration_api_ms` and `total_cost_usd` are cumulative over the session. Each call's ledger latency is now its own share (I-210). The `usage` block, which SCIO prices, was always per call.
+  - The tool resume read the cached prefix (74,496 cache-read tokens) although the summary call before it read none.
+- **Out of scope, possible later steps.**
+  - Moving a step up a tier mid-feature (T0 to T1, T1 to T2) instead of raising its cap.
+  - T0's `t0_loop`, which keeps today's behaviour: its capped-empty sessions still count toward a stall.
