@@ -1413,7 +1413,7 @@ Template:
 - Symptom: none yet; for a python product, a T1 UI step whose explorer names `graphcalc/static/app.js` or `index.html` would still drift on them (the python profile's sources are `.py`), as P7 did on `cli.py`
 - Root cause: the filter that keeps PRODUCT.md, README.md, pyproject.toml and progress.json out of `files_expected` is "source", and a python product's static assets are not source to the python profile
 - Fix: not yet; widening it (any tracked file outside `.scio/`, docs and dependency files) changes what drift flags, which is the escalation policy's call
-- Status: open
+- Resolved: - · Status: open
 
 ### I-160 · The drift check's path normaliser stripped the dot of a dot-directory
 - Found: 2026-11-04 · issue #79, the S8 agent's sweep of `scio/loop/escalation.py`
@@ -1784,6 +1784,7 @@ Template:
 - Fix: `run_tree` raises a new `TimeoutExpired(cmd, timeout, output=, stderr=)` with the drained text, whose constructor takes text, `from None`. Its callers read `exc.stdout` and `exc.stderr` through `_text`, which takes either type.
 - Sweep: `grep -rn "\.stdout, .*\.stderr = \|exc\.stdout =\|exc\.stderr =" scio/ recovery/` finds no other assignment.
 - Guard: guardrail 74 (`symbol:run_tree`); the gate's `mypy` step refuses the construct.
+- Resolved: 2026-11-14 · Status: resolved
 
 ### I-193 · The commit gate never linted the first file `git status` listed, because the hook stripped its leading space
 - Found: 2026-11-14 · issue #100, by the agent rewriting the commit gate · `scripts/hooks/push_gate.py::_run`
@@ -1853,4 +1854,16 @@ Template:
 
     Every other hit writes a fence and does not read one.
 - Guard: `test_an_indented_code_block_is_code_too` (a link inside an indented block is ignored, and its code is read). `test_a_logon_trigger_without_its_user_is_refused` now passes the list-item form. Guardrail 82.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-204 · Two ledger entries had no `- Resolved: … · Status: …` line, so the guardrails check could not see them
+- Found: 2026-11-14 · resolving the ledger conflict when `main` was merged into #100's branch. I-192, written by the drill's repair session (#105), ended at its Guard line. · `docs/ISSUE_LEDGER.md`
+- Symptom: `check_guardrails` takes an entry as resolved only from its `Status: resolved`. An entry with no status line is neither open nor resolved, so a resolved fix could skip its Always/Never rule and nothing would say so. I-192 happens to be cited by guardrail 74.
+- Root cause: the closing line is a convention that nothing checked. A writer who ends at the Guard line, a session or a person, leaves the entry without a state.
+- Fix:
+  - I-192 gains `- Resolved: 2026-11-14 · Status: resolved`.
+  - I-159's bare `- Status: open` becomes `- Resolved: - · Status: open`.
+  - The new `check_ledger_statuses` in the docs check fails on any entry without the line.
+- Sweep: the new check, run over the whole ledger (I-001 to I-203), found exactly these two.
+- Guard: `check_ledger_statuses`, `test_every_ledger_entry_says_whether_it_is_open_or_resolved`. Guardrail 84.
 - Resolved: 2026-11-14 · Status: resolved

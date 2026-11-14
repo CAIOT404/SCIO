@@ -212,3 +212,18 @@ def test_an_indented_code_block_is_code_too(tmp_path: Path) -> None:
     )
     assert cd.links_in(doc) == []
     assert "missing.md" in cd.markdown_code(doc.read_text(encoding="utf-8"))
+
+
+def test_every_ledger_entry_says_whether_it_is_open_or_resolved() -> None:
+    """I-204: I-192 had no status line and I-159 had a bare ``- Status: open``. Neither
+    counted as resolved, so ``check_guardrails`` never asked them for a rule."""
+    cd = _load()
+    ledger = (
+        "### I-001 · a\n- Fix: x\n- Resolved: 2026-01-01 · Status: resolved\n\n"
+        "### I-002 · b\n- Fix: not yet\n- Resolved: - · Status: open\n\n"
+        "### I-003 · c\n- Guard: guardrail 74\n\n"
+        "### I-004 · d\n- Status: open\n"
+    )
+    problems = cd.ledger_status_problems(ledger)
+    assert [p.split()[0] for p in problems] == ["I-003", "I-004"]
+    assert cd.check_ledger_statuses() == []

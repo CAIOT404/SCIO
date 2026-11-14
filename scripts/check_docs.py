@@ -296,6 +296,28 @@ def resolved_ledger_ids(ledger: str, start: int = GUARDRAILS_FROM) -> list[str]:
     return [i for i, n, body in entries if int(n) >= start and "Status: resolved" in body]
 
 
+STATUS_LINE_RE = re.compile(r"^- Resolved: [^\n]*· Status: \S", re.MULTILINE)
+
+
+def ledger_status_problems(ledger: str) -> list[str]:
+    """Every ledger entry has its ``- Resolved: <date or -> · Status: <status>`` line. An
+    entry without one is neither open nor resolved, so ``check_guardrails`` never asks it
+    for a rule (I-204)."""
+    parts = LEDGER_ENTRY_RE.split(ledger)
+    entries = zip(parts[1::3], parts[2::3], parts[3::3], strict=True)
+    return [
+        f"{lid} has no '- Resolved: <date or -> . Status: <status>' line"
+        for lid, _n, body in entries
+        if not STATUS_LINE_RE.search(body)
+    ]
+
+
+def check_ledger_statuses() -> list[str]:
+    """Every entry in docs/ISSUE_LEDGER.md says whether it is open or resolved (I-204)."""
+    ledger = (ROOT / "docs" / "ISSUE_LEDGER.md").read_text(encoding="utf-8")
+    return [f"docs/ISSUE_LEDGER.md: {e}" for e in ledger_status_problems(ledger)]
+
+
 def guardrail_problems(
     rules: list[str], resolved: list[str], exists: Callable[[str, str], bool]
 ) -> list[str]:
@@ -376,6 +398,7 @@ def main() -> int:
         + check_graph_sections()
         + check_guardrails()
         + check_scheduled_task_recipes()
+        + check_ledger_statuses()
     )
     for e in errors:
         print(f"docs-check: {e}")

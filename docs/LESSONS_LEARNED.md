@@ -87,6 +87,7 @@ Every bug and every correction becomes one rule here (the owner's rule, 2026-10-
 80. **Never** require a commit that GitHub made to exist in the local clone before using its full SHA. `gh pr update-branch` makes commits remotely (I-199). Guard: `test:test_a_full_sha_made_on_github_is_taken_as_given`
 81. **Never** register a Task Scheduler logon trigger without naming its user. `-AtLogOn` alone fires at any user's logon, which only an administrator may register, so the recovery tick's recipe was refused. A measurement that skips one trigger of a recipe has not measured the recipe (I-200). Guard: `check:check_scheduled_task_recipes`, `test:test_a_logon_trigger_without_its_user_is_refused`
 82. **Always** run a new check once against the defect it guards, and see it fail, before trusting its pass. A check that reads nothing passes everything: I-200's first draft read no code from an indented block (I-201). Guard: `test:test_an_indented_code_block_is_code_too`, `test:test_a_logon_trigger_without_its_user_is_refused`
+84. **Always** close a ledger entry with its `- Resolved: <date or -> · Status: <status>` line. An entry without it is neither open nor resolved, and the guardrails check cannot ask it for a rule (I-204). Guard: `check:check_ledger_statuses`, `test:test_every_ledger_entry_says_whether_it_is_open_or_resolved`
 
 ## Standing pre-flight list (apply at the start of every milestone)
 
