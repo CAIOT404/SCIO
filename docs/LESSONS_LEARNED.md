@@ -777,3 +777,50 @@ On the final commit `dda626f` all three pass, one trial each, run in parallel: $
 - The live check of the new hook found two things. The session had restarted outside the repository and was running no hooks at all (I-178, open, the owner's decision). Fed by hand, the hook script also showed that its push and commit gates had failed open on every `cd /c/...` line: 8 commits unlinted and 3 pushes unchecked in this pass, each with a warning nobody read (I-179, fixed).
 - Verified live on 2026-11-13, in a session started in the SCIO directory: a `printf %s 'x\\y'`, a backslash heredoc and a piped `mypy | tail -1` were each denied with the hook's message. That confirms I-176's premise, that the hook sees a command before the Bash tool halves it. After `cd /c/...`, a `git push --dry-run` went through with no "could not check" warning (I-179).
 - I-178 resolved by the owner's decision (issue #93): the user settings run the hook from `.scio/live-wt` in every session. A `claude -p` session started in a non-repository folder had its bare `git stash` denied.
+
+## The self-healing supervisor and its live drill (2026-11-14, issue #95, PRs #96, #108, #110, #111, #112)
+
+### Lessons applied
+- Pre-flight 8 (measure before building) shaped ADR 0019 §12a. Process survival, Task Scheduler's PATH (no `sh`, I-183) and the job object were measured with throwaway tasks before any supervisor code was written.
+- I-104 and guardrail 63 meant every CI wait watched its own head by SHA. When GitHub made a commit (`gh pr update-branch`), the watcher's local lookup crashed, so watch_ci now takes a full SHA as given (I-199).
+- Guardrail 17 held twice where it was tested: the hook refused a backslash heredoc (I-191, I-203) before anything was written.
+
+### What succeeded
+- **The drill passed end to end, on the real defect (I-180) and without anyone typing a tick.**
+  - 09:48:41: the M2 planner's `claude -p` call hung under an injected 1 s timeout, and `scio build` ended in a `TimeoutExpired` traceback.
+  - 09:48:56 to 09:49:01: the supervisor detected it, preserved 11 items, classified it `harness_suspect` at `claude_code.py:run`, opened issue #105 and started repair attempt 1.
+  - 10:40:26: the repair session ended with PR #110. It fixed I-180 and I-182, its sweep found I-190 to I-192, and it had green CI, a test and a ledger entry. The supervisor checked those claims on GitHub (`pr_verified`) and waited.
+  - 11:23:37: the owner's pre-approved merge.
+  - 11:32:01: the scheduled tick saw the merge and held for main's CI.
+  - 11:42:03 to 11:42:07: the next tick moved live-wt from `1019c21` to `e84e6a8`, passed the health check, and replayed `build --product product` with `--decision` dropped.
+  - 11:48:23: the replay built M2 (P4, P5) and stopped at M2's merge stop. The incident went `verified`, then `closed`.
+- The product's history is clean. `main` holds exactly one `[scio:merge:M1]` and one `[scio:progress:M1]`, and each M1 feature once. `milestone/2` added P4 and P5 once each. The replay cost $3.68.
+- The scheduled tick was registered (issue #98) and ran from Task Scheduler with `LastTaskResult` 0. It, not a person, carried the incident from `awaiting_merge` to `closed`.
+- `python -m recovery watch --follow` (#107) showed every state change live, so the drill needed no polling of the store by hand.
+
+### What failed
+- The repair session's figures in the incident timeline are wrong: 4 turns and 34 s, against 51.3 minutes, 127 turns and 154 tool calls in its transcript (I-195, open).
+- The repair session's sweep found I-190 to I-192, but its I-192 entry had no status line (I-204). Ledger hygiene is not in the repair brief's checks.
+- CI caught what the Windows gate could not: `recovery watch` split a Windows path with PosixPath on Linux (I-194).
+- `watch_ci.py` crashed on a commit GitHub had made (I-199).
+- The documented tick recipe was refused without an administrator (I-200), because the measurement in §12a skipped its logon trigger. The first draft of its guard read nothing (I-201).
+- A gate failed on a dashboard test that passes alone. Its root cause was a race in the `/ws` loop, which cancelled its read of the socket every poll (I-202).
+
+### Actions
+- `recovery/` (ADR 0019, #96), `python -m recovery watch` (#108), `scio/proctree.py::run_tree` and `harness_stop_line` (#110, I-180, I-182, I-189), the commit gate's scope (#111, I-186, I-193), and `scripts/watch_ci.py` taking GitHub's SHA as given (I-199).
+- The dashboard's recovery view and `_until_disconnect` (#112, I-196, I-197, I-202).
+- The scheduled task "SCIO recovery tick" is registered on the dev machine. Its recipe, `check_scheduled_task_recipes`, the wider `FENCE_RE` and `check_ledger_statuses` are on the #98 branch (I-200, I-201, I-204).
+- I-195 is recorded, open.
+- Guardrails 69 to 80 and 83 are on `main`. 81, 82 and 84 are on the #98 branch.
+
+### Bottleneck audit
+- **Slowest steps:**
+  - The repair session: 51.3 minutes.
+  - CI's tests job: the last four runs took 9.7, 13.1, 13.6 and about 13 minutes.
+  - The local gate: 6.4 to 7.0 minutes, five times.
+  - From the merge to the tick moving live-wt: 18.4 minutes. That is main's CI, 13.6, plus 4.7 waiting for the next tick.
+- **Serial work that could have run in parallel:** the merge queue. The ruleset requires a branch to be up to date with `main`, so every merge (#110, #111, #112, the release) cost the next PR a merge of main, a full gate and a CI run, about 20 minutes each, one after another. Gates and CI did overlap where they could: one PR's gate ran beside another's CI, and the I-202 repro ran beside a gate, where the load reproduced it.
+- **Repeated friction:** the same three files conflicted at every merge: `ISSUE_LEDGER.md`, `LESSONS_LEARNED.md` and `CHANGELOG.md`. A small resolver, which keeps both sides' ledger entries in id order, was written once and used three times.
+- **Improvements:**
+  1. Move the ledger resolver into `scripts/` with a test, so a merge's ledger conflict is one command.
+  2. Fix I-195, so the next repair session's cost and length are read from its transcript.
