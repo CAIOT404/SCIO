@@ -22,6 +22,8 @@ SCIO is a model-agnostic LangGraph framework that takes a software task from spe
 - An agent reports open questions, never owner decisions. Every invariant the owner stated becomes a named acceptance test in the agent's brief (W-08).
 - When a change depends on how a provider, the `claude` CLI or GitHub behaves, pair it with a research agent that checks the documentation or runs a probe, never memory (W-09).
 - Save each agent's final report to `.scio/agents/<issue>.md`; the PR body, the ledger entry and the review are built from that file, not from the conversation (W-34).
+- Start a session with `uv run python scripts/session_state.py`: the pinned checkouts, every worktree, the PRs, the live-run issues, the recovery incidents, the next ids and the open checklist items, in one command. Take ledger ids and guardrail numbers from it (or `scripts/next_ids.py`), never from memory. The `Stop` hook writes the same facts to `.scio/session-state.md` for the handoff (W-20, W-21, W-28).
+- Land a PR with `uv run python scripts/land.py N`: it retargets, updates, requires a gate stamp, watches CI by commit, marks the PR ready, and prints the merge command only for an approved PR. After the merge, run `land.py N --after-merge`. Move live-wt with `scripts/move_live_wt.py --when-idle`, never mid-build (W-22 to W-27).
 
 ## Engineering rules
 

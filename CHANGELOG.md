@@ -5,6 +5,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 ### Added
+- Session tools (issue #122, W-20 to W-29):
+  - `scripts/session_state.py` is the state-first inspection in one command; with `--markdown` it gives the handoff's facts, which a `Stop` hook writes to `.scio/session-state.md`.
+  - `scripts/next_ids.py` reads the next ledger id and guardrail from every branch and worktree.
+  - `scripts/land.py` takes a PR up to the merge: retarget, update, require a gate stamp, watch CI by commit, mark ready. It prints the merge only for a PR that `.scio/approvals.md` approves. It also has `--body`, `--after-merge` and `--next`.
+  - `scripts/move_live_wt.py --when-idle` moves live-wt only while no supervised build runs.
 - `docs/WORKFLOW_V2.md`, the standing checklist of every change from the 2026-11-14 workflow teardown (issue #122). `scripts/workflow_status.py` computes each item's status from the evidence it names (a test, a symbol, a file or a CLAUDE.md line), so nothing is ticked by hand. A `SessionStart` hook puts the count and the next open items into every session, and the docs check fails on a malformed checklist. CLAUDE.md gains the process rules W-01 to W-09 and W-34.
 
 ### Changed
