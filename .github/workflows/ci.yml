@@ -4,6 +4,11 @@ on:
   pull_request:
   push:
     branches: [main]
+  # The merge queue (issue #122, W-37): a queued group gets its own run, and without this
+  # trigger the required `checks` status is never reported for it, so the queue cannot merge.
+  # The ruleset turns the queue on later (W-44).
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -14,21 +19,64 @@ env:
   PYTHONUTF8: "1"
 
 jobs:
-  # The ruleset `protect-main` requires the status `checks`: it is the job at the end, which
-  # passes only when `tests` and `evals` both passed. The two run side by side (issue #88):
-  # one after the other they took 459 s and 179 s of the old job's 11.5 min.
+  # The ruleset `protect-main` requires the status `checks`: it is the job at the end. It runs
+  # always, because a required job skipped by a condition reports "Success". It passes only
+  # when the change detection and every test shard succeeded, and the regression evals
+  # succeeded or were skipped because the change detection found no code changed (issue
+  # #122, W-35 and W-36). Skipped test shards never pass: the shards always run.
   checks:
-    needs: [tests, evals]
+    needs: [changes, tests, evals]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Tests and regression evals both passed
+      - name: Every test shard passed, and the evals passed or had no code to check
+        shell: python
+        env:
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          echo "tests: ${{ needs.tests.result }}, evals: ${{ needs.evals.result }}"
-          test "${{ needs.tests.result }}" = success && test "${{ needs.evals.result }}" = success
+          import json
+          import os
+          import sys
 
+          needs = json.loads(os.environ["NEEDS"])
+          result = {job: needs.get(job, {}).get("result", "missing") for job in ("changes", "tests", "evals")}
+          code = needs.get("changes", {}).get("outputs", {}).get("code", "")
+          print(", ".join(f"{job}: {r}" for job, r in result.items()) + f"; code changed: {code or '?'}")
+          # The jobs that always run pass only by succeeding: failed, cancelled or skipped fail.
+          failed = [job for job in ("changes", "tests") if result[job] != "success"]
+          # The evals pass by succeeding, or skipped when the change detection found no code.
+          if not (result["evals"] == "success" or (result["evals"] == "skipped" and code == "false")):
+              failed.append("evals")
+          print(f"failed: {', '.join(failed)}" if failed else "passed")
+          sys.exit(1 if failed else 0)
+
+  # Whether the evals must run (W-36): only a pull request whose diff touches no code path
+  # (scio/, evals/, configs/, prompts/, pyproject.toml, uv.lock, .github/workflows/) skips
+  # them. A push to main, the merge queue and an unreadable diff run everything.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the pull request's base commit, to diff the merge commit against
+
+      - name: Does the change touch code?
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/ci_changes.py
+
+  # A job condition, never a workflow `paths:` filter: a workflow skipped by its filter leaves
+  # the required `checks` pending. Every event but a pull request runs the evals whatever the
+  # change detection said.
   evals:
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -49,12 +97,42 @@ jobs:
         if: always()
         run: cat evals/results/*.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
 
+  # The suite in three shards on three runners (issue #122, W-35): the single job's tests took
+  # 499 to 813 s over the 14 green runs of 2026-11-14 (4 cores, 8 workers); 91% of the tests
+  # were done after about 2 min, the rest was a tail of product builds. Each shard is a list
+  # of files and directories; together they hold every test file under tests/ exactly once,
+  # tests/live included as it always was (the dashboard's browser tests run here; the docker
+  # ones run here on the plain image and skip what needs the built one).
+  # `tests/unit/test_ci_config.py` checks the partition, so a new test file outside these
+  # directories fails the suite until it is placed. The split follows the slowest tests of
+  # those 14 runs: the product builds of test_product_build_fake.py; the other graph runs and
+  # the recovery tests; the unit tests with test_evals_runner.py's 116 s test. Each shard
+  # prints its 30 slowest tests to rebalance by.
   tests:
+    name: tests (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     # A runaway guard, not a speed target (I-094): the old single job measured 12.9 to 15.2 min
     # over M11 (tests 512 to 615 s, regression evals about 265 s); the tests alone ran 459 s
     # on 2026-11-07.
     timeout-minutes: 25
+    strategy:
+      fail-fast: false  # a failing shard never cancels the others: every shard reports
+      matrix:
+        include:
+          - shard: 1
+            paths: tests/graph/test_product_build_fake.py tests/durability
+          - shard: 2
+            paths: >-
+              tests/graph/test_claude_code_backend_t0.py
+              tests/graph/test_gate_replan.py
+              tests/graph/test_parallel_features.py
+              tests/graph/test_product_evals_fake.py
+              tests/graph/test_product_new_fake.py
+              tests/graph/test_t0_fake.py
+              tests/graph/test_t1_t2_fake.py
+              tests/recovery
+          - shard: 3
+            paths: tests/unit tests/live
     steps:
       - uses: actions/checkout@v4
 
@@ -72,17 +150,20 @@ jobs:
       - name: Install
         run: uv sync --all-extras --group dev
 
-      # p003's hidden tests drive the web product in a real browser (M11); without Chromium
-      # they skip, so this step is what makes them count.
+      # p003's hidden tests drive the web product in a real browser (M11), and so do the
+      # dashboard's page tests; without Chromium they skip, so every shard installs it.
       - name: Browser for the product evals
         run: uv run python -m playwright install --with-deps chromium
 
+      # Lint, types, docs and the API docs once per run, on the first shard.
       - name: Lint
+        if: matrix.shard == 1
         run: |
           uv run ruff check .
           uv run ruff format --check .
 
       - name: Type-check
+        if: matrix.shard == 1
         run: uv run mypy
 
       # In parallel (issue #58): the product builds dominate and mostly wait on subprocesses
@@ -90,17 +171,23 @@ jobs:
       # v0.7.0. Locally 8 workers gave the serial counts exactly (341 passed, 16 skipped), and
       # 16 workers gave the same counts on two runs at issue #88 (563 passed, 18 skipped).
       - name: Tests (Fake provider, offline)
+        env:
+          SHARD_PATHS: ${{ matrix.paths }}
         run: |
-          echo "runner cores: $(nproc)"
-          uv run pytest -n "$(( $(nproc) * 2 ))" --cov=scio --cov=evals --cov-report=term-missing --durations=15
+          echo "runner cores: $(nproc); shard ${{ matrix.shard }}: $SHARD_PATHS"
+          # SHARD_PATHS unquoted on purpose: one argument per path
+          uv run pytest $SHARD_PATHS -n "$(( $(nproc) * 2 ))" --cov=scio --cov=evals --cov-report=term-missing --durations=30
 
       - name: Docs checks
+        if: matrix.shard == 1
         run: uv run python scripts/check_docs.py
 
       - name: API docs
+        if: matrix.shard == 1
         run: uv run python scripts/gen_api_docs.py
 
       - uses: actions/upload-artifact@v4
+        if: matrix.shard == 1  # one artifact name per run: a second upload of it would fail
         with:
           name: api-docs
           path: docs/api
