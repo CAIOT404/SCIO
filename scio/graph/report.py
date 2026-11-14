@@ -225,6 +225,8 @@ class RunReport(BaseModel):
     usd_used: float
     tokens_max: int
     usd_max: float
+    budget_binding: bool = True
+    """False when the caps were a recorded metric, not a stop (issue #115)."""
     advisor_calls: str
     iterations: int
     tool_calls: int
@@ -245,13 +247,18 @@ class RunReport(BaseModel):
     def to_markdown(self) -> str:
         pr = f"#{self.pr_number}" if self.pr_number else "-"
         duration = f" · {self.duration_s:.0f}s" if self.duration_s is not None else ""
+        spend = (
+            f"tokens {self.tokens_used:,} / {self.tokens_max:,} · "
+            f"${self.usd_used:.4f} / ${self.usd_max:.2f}"
+            if self.budget_binding
+            else f"tokens {self.tokens_used:,} · ${self.usd_used:.4f} (tracked, no cap)"
+        )
         head = [
             f"# Run {self.thread_id}: {self.title}",
             "",
             f"tier **{self.tier or '-'}** · phase **{self.phase}** · "
             f"exit **{self.exit_reason or '-'}** · branch `{self.branch or '-'}` · PR {pr}",
-            f"tokens {self.tokens_used:,} / {self.tokens_max:,} · "
-            f"${self.usd_used:.4f} / ${self.usd_max:.2f} · advisor {self.advisor_calls} · "
+            f"{spend} · advisor {self.advisor_calls} · "
             f"iterations {self.iterations} · tool calls {self.tool_calls}{duration}",
             "",
             "## Features",
@@ -328,6 +335,7 @@ def build_report(
         usd_used=state.budgets.usd_used,
         tokens_max=state.budgets.tokens_max,
         usd_max=state.budgets.usd_max,
+        budget_binding=state.budgets.binding,
         advisor_calls=f"{state.budgets.advisor_calls_used}/{state.budgets.advisor_calls_max}",
         iterations=state.progress.iterations,
         tool_calls=state.progress.tool_calls,

@@ -4,6 +4,9 @@ All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Changed
+- On the Claude subscription the budget is a metric, not a stop (issue #115, the owner's correction, I-208). The new `SCIO_BUDGET_MODE` setting is `auto` by default, with `enforce` and `track` also accepted. `auto` only records the budget when the worker backend and the provider are both `claude_code`; any setup that can bill an API key keeps its caps. A budget that does not bind never refuses a call or ends a run with `budget`, and Claude Code sessions get no `--max-budget-usd`. Dollars and tokens are still recorded in the ledger, `scio report`, `scio status` and the dashboard, which show "(tracked, no cap)". The iteration, stall, turn, tool and advisor caps are unchanged (ADR 0012 amendment).
+
 ### Fixed
 - The scheduled recovery tick's recipe in `docs/RECOVERY.md` registers without an administrator. Its logon trigger now names the user, since a trigger on any user's logon is refused with "Access is denied". The docs check now fails on any logon trigger without `-User` in a Markdown code block or a script under `scripts/`, and the recipe's `$py` skips the Microsoft Store alias (I-200, issue #98). It also counts a code block indented in a list item as code, so a link inside one is no longer checked (I-201).
 - The docs check fails on a ledger entry that does not close with its `- Resolved: … · Status: …` line. Such an entry is neither open nor resolved, so the guardrails check could not ask it for a rule. I-192 and I-159 gained theirs (I-204).

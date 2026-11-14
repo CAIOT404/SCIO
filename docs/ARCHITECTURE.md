@@ -544,9 +544,12 @@ class Budget(BaseModel):
     advisor_calls_on_step: dict[str, int] = Field(default_factory=dict)  # ≤1 per step
     max_iters: int = 30
     max_stall: int = 2
+    binding: bool = True  # False: the caps are a recorded metric, not a stop (#115)
 
     @property
     def exhausted(self) -> bool:
+        if not self.binding:  # on the Claude subscription by default (SCIO_BUDGET_MODE)
+            return False
         return self.tokens_used >= self.tokens_max or self.usd_used >= self.usd_max
 
 

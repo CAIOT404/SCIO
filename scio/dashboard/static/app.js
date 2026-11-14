@@ -968,8 +968,11 @@
         ["Tool calls", int(t.tool_calls)],
         ["Branch", t.branch ? mono(t.branch) : "—"],
         ["PR", t.pr_number ? "#" + t.pr_number : "—"],
-        ["Tokens", int(t.tokens_used) + " of " + int(t.tokens_max)],
-        ["Budget", usd(t.usd_used) + " of " + usd(t.usd_max)],
+        // issue #115: a budget that does not bind is a metric, so it shows no cap
+        ["Tokens", t.budget_binding === false ? int(t.tokens_used) + " (tracked, no cap)"
+          : int(t.tokens_used) + " of " + int(t.tokens_max)],
+        ["Budget", t.budget_binding === false ? usd(t.usd_used) + " (tracked, no cap)"
+          : usd(t.usd_used) + " of " + usd(t.usd_max)],
         ["Advisor calls", dash(t.advisor_calls)],
         ["Started", t.started_at ? timeEl(t.started_at) : "—"],
         ["Finished", t.finished_at ? timeEl(t.finished_at) : "—"],

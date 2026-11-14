@@ -39,7 +39,7 @@ from scio.graph.nodes.common import decision, git_out
 from scio.graph.nodes.common import fact as ledger_fact
 from scio.graph.run import resume_graph, run_graph, thread_started
 from scio.graph.run_context import T0_TOOL_CAP, RunContext, product_sandbox_backend
-from scio.harness.budget import BudgetGuard, BudgetLimits, BudgetsConfig
+from scio.harness.budget import BudgetGuard, BudgetLimits, BudgetsConfig, budget_binding
 from scio.harness.failures import BudgetExceeded, HarnessError
 from scio.harness.types import Message
 from scio.loop.exits import LoopLimits
@@ -347,9 +347,11 @@ def feature_context(ctx: RunContext, thread_id: str, tier: str) -> RunContext:
     artifact directory; no GitHub client (the milestone PR is the only one)."""
     budgets = BudgetsConfig.for_settings(ctx.settings)
     lim = budgets.tiers[tier]
+    binding = budget_binding(ctx.settings)  # issue #115: a metric, not a stop, on Max
     guard = BudgetGuard(
         BudgetLimits(tokens_max=lim.tokens_max, usd_max=lim.usd_max),
         reserve_output_fraction=budgets.reserve_output_fraction,
+        binding=binding,
     )
     harness = ctx.harness.child(budget=guard)
     parent_ledger = ctx.harness.ledger.persist_path
@@ -374,6 +376,7 @@ def feature_context(ctx: RunContext, thread_id: str, tier: str) -> RunContext:
             advisor_calls_max=lim.advisor_calls_max,
             max_iters=lim.max_iters,
             max_stall=lim.max_stall,
+            binding=binding,
         ),
         github=None,
         escalation=ctx.escalation,

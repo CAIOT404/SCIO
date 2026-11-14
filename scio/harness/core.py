@@ -15,7 +15,7 @@ import yaml
 from pydantic import BaseModel
 
 from scio.harness.accounting import CostLedger
-from scio.harness.budget import BudgetGuard, BudgetLimits, BudgetsConfig
+from scio.harness.budget import BudgetGuard, BudgetLimits, BudgetsConfig, budget_binding
 from scio.harness.caching import estimate_tokens
 from scio.harness.config import ModelConfig, ModelsConfig, ProviderRegistry
 from scio.harness.failures import RefusalError
@@ -92,7 +92,9 @@ class Harness:
             roles = data.get("roles")
             config = config.with_role_overrides(dict(roles) if isinstance(roles, dict) else data)
         if budget is None and tier is not None:
-            budget = BudgetsConfig.for_settings(settings).guard_for(tier)
+            budget = BudgetsConfig.for_settings(settings).guard_for(
+                tier, binding=budget_binding(settings)
+            )
         return cls(config, ProviderRegistry(config, settings), settings=settings, budget=budget)
 
     # -- request construction ------------------------------------------------

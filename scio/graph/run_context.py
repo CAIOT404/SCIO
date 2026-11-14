@@ -17,7 +17,7 @@ from scio.aci.sandbox.base import Limits, Sandbox
 from scio.aci.sandbox.local import LocalSandbox
 from scio.context.artifacts import ArtifactStore
 from scio.graph.effects import EffectLog
-from scio.harness.budget import BudgetGuard, BudgetLimits, BudgetsConfig
+from scio.harness.budget import BudgetGuard, BudgetLimits, BudgetsConfig, budget_binding
 from scio.harness.core import Harness
 from scio.harness.github.client import GitHubClient
 from scio.loop.escalation import EscalationConfig
@@ -191,17 +191,20 @@ class RunContext:
         settings = settings or get_settings()
         budgets = BudgetsConfig.for_settings(settings)
         lim = budget_limits or budgets.tiers[tier]
+        binding = budget_binding(settings)  # issue #115: a metric, not a stop, on Max
         budget = Budget(
             tokens_max=lim.tokens_max,
             usd_max=lim.usd_max,
             advisor_calls_max=lim.advisor_calls_max,
             max_iters=lim.max_iters,
             max_stall=lim.max_stall,
+            binding=binding,
         )
         if harness is None:
             guard = BudgetGuard(
                 BudgetLimits(tokens_max=lim.tokens_max, usd_max=lim.usd_max),
                 reserve_output_fraction=budgets.reserve_output_fraction,
+                binding=binding,
             )
             harness = Harness.from_settings(settings, budget=guard)
         work = Path(work_dir) if work_dir else Path(".scio")
