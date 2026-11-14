@@ -81,3 +81,34 @@ def test_the_watcher_lists_runs_of_one_workflow_on_one_branch(
     assert argv[argv.index("--branch") + 1] == "feat/x"
     assert argv[argv.index("--workflow") + 1] == "ci"
     assert Path(REPO_ROOT / "scripts" / "watch_ci.py").is_file()
+
+
+def test_without_a_branch_the_run_is_found_by_its_commit_not_the_checkouts_branch(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """I-211: `watch_ci.py --sha <#117's head>` run from the main checkout filtered runs by
+    `--branch main`, the checkout's own branch, and gave up after 300 s on a run that was in
+    progress on `feat/115-budget-metric`. With no `--branch`, the run is looked up by its
+    commit, wherever it was pushed."""
+    wc = _load()
+    head = "cd" * 20
+    seen: list[list[str]] = []
+
+    def out(argv: list[str]) -> str:
+        seen.append(argv)
+        if argv[:3] == ["gh", "run", "list"]:
+            return json.dumps([{"databaseId": 7, "headSha": head, "url": "u"}])
+        if argv[:3] == ["gh", "run", "view"]:
+            return json.dumps({"conclusion": "success", "jobs": []})
+        raise AssertionError(f"unexpected command: {argv}")  # never `git rev-parse` for a branch
+
+    class Done:
+        returncode = 0
+
+    monkeypatch.setattr(wc, "_out", out)
+    monkeypatch.setattr(wc.subprocess, "run", lambda *a, **k: Done())
+    monkeypatch.setattr("sys.argv", ["watch_ci.py", "--sha", head])
+    assert wc.main() == 0
+    listed = seen[0]
+    assert "--branch" not in listed and listed[listed.index("--commit") + 1] == head
+    assert "by commit" in capsys.readouterr().out

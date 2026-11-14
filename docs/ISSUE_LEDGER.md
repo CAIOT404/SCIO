@@ -1972,3 +1972,56 @@ Template:
   - The stopgap: graphcalc's `scio.sh` sets both factors to 1000 (the owner's OK). It comes out once this merges and live-wt moves.
 - Guard: the 15 cases in `tests/unit/test_budget_binding.py`. With the five changed spots disabled, 8 of them fail: every non-binding case. The 7 that pass are the cases that should bind. Guardrail 85.
 - Resolved: 2026-11-14 · Status: resolved
+
+### I-209 · A worker session that ran out of turns while diagnosing counted as a lost iteration, and SCIO could not tell it from a session that chose to stop
+- Found: 2026-11-14 · graphcalc P26 attempt 3 (`build-graphcalc-m3-p26-a3`), issue #116 (the owner's proposal) · `scio/graph/nodes/implement.py` (`_after_worker`), `scio/state/signatures.py` (`advance`), `scio/loop/claude_code_worker.py`
+- Symptom: the T1 coder session spent its whole turn cap on a correct diagnosis, 18:48:46 to 19:05:35 UTC: `33 tool calls, stop=tool_cap, confidence=medium`, `files_touched: []`. Verify answered `no_changes`, and SCIO started a fresh debugger session (15.5 min, `40 tool calls, stop=tool_cap`). It got coder 1's report (I-154), but redid the reconnaissance before it edited. S9 (P8 a1, 2026-10-31) had the same shape five times over: four fresh sessions with `files_touched: []`, a `stall` halt, and 6 h waiting for the owner.
+- Root cause: the worker's stop reached only a ledger text line (`[N tool calls, stop=…]`), never the state, so `verify` and `triage` could not tell "ran out of turns" from "chose to stop". A capped session with no edit was one more failed iteration. The cheap step, continuing the session whose context held the diagnosis, did not exist.
+- Fix (the owner's ladder, cheapest step first, ADR 0005 and 0006 amendments):
+  - The state records the last session's stop and whether git saw an edit. `tree_snapshot` writes a git tree through a throwaway index before the session, after it, and after a resume.
+  - Step 1: a capped session with no edit resumes the same Claude Code session once, with its tools, for 10 turns (`resume_typed`, every flag passed again).
+  - Step 2: the findings are carried as before (I-154).
+  - Step 3: if it still edited nothing, the next session on the plan step gets twice the turn cap, once per step. That iteration counts neither a stall nor a fix attempt (`stall_exempt`).
+  - Step 4: after that, stalls count as before. The `aci` backend skips step 1, since it has no session.
+- Sweep:
+  - `\.stop\b|stop=|tool_cap` over `scio/`. `t0_loop` keeps today's behaviour, recorded in the ADR 0005 amendment as a possible later step.
+  - `stall_count|max_stall|ExitReason.STALL`. Every reader reads `advance`'s output.
+  - `make_worker(` and `advance(`. No other callers.
+  - `stop=|tool calls,` in `evals/`, `scripts/` and the dashboard. None, so the ledger line's format is unchanged.
+  - The orchestrator's review found one gap in the first draft: the exempt iteration still counted a fix attempt, which let `advisor_cap` halt before the raised-cap session ran. Fixed in `advance`.
+- Measured live before relying on it (Haiku, Claude Code 2.1.325, comments on #116):
+  - A `-p --resume` call continues the session with tools, also after the no-tools `--json-schema` summary.
+  - `--max-turns` counts per call.
+  - A PowerShell tool on Windows wrote a file in the working directory with only `Bash(...)` rules allowed. That is `acceptEdits` allowing a file write, as Edit and Write already may. A `git commit` through PowerShell was denied like through Bash, so it is not a way around the allow list.
+- Guard: `test_a_capped_session_that_edited_nothing_is_resumed_once_with_its_tools`, `test_a_resume_that_still_edits_nothing_doubles_the_next_turn_cap_and_counts_no_stall`, `test_after_the_raised_cap_a_capped_session_that_edits_nothing_counts_a_stall_as_before` and `test_an_exempt_iteration_is_no_fix_attempt_so_advisor_cap_waits_for_the_raised_cap`, among the 12 in `tests/unit/test_capped_session_ladder.py`. All 11 of the first draft failed on the old code. Guardrail 86.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-210 · A resumed Claude Code call recorded the whole session's API time as its own latency
+- Found: 2026-11-14 · reading graphcalc's ledger for #116 (`build-graphcalc-m3-p26-a3.jsonl`) · `scio/loop/claude_code_worker.py` (`_account`)
+- Symptom: coder 1's main call recorded `latency_ms` 982,121, and its summary call, a `--resume` on the same session, recorded 1,001,625. The summary took about 20 s. Measured live: `duration_api_ms` is 2,826 ms on a call and 5,271 ms on its resume.
+- Root cause: `_account` took `latency_ms` from the result's `duration_api_ms`, which Claude Code reports cumulatively over the session on a resumed call, as it does `total_cost_usd`. The `usage` block, which SCIO prices, is per call, so the dollars were always right.
+- Fix: the worker tracks each session's last cumulative figure and records the difference, for the summary call and for the ladder's resume.
+- Sweep: `duration_api_ms|latency_ms` over `scio/`, `evals/` and `recovery/`.
+  - `ClaudeCodeProvider` (tool-less roles) never resumes a session.
+  - Only the ledger records `latency_ms`, and nothing in `scio/` or `evals/` sums it. The evals time their own wall clock.
+  - The recovery supervisor reads its repair session's figures from the result envelope (I-195, open), a different case: one long process, not a resume.
+- Guard: `test_the_summary_and_resume_calls_record_their_own_latency_not_the_sessions`. Guardrail 87.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-211 · `watch_ci.py --sha` looked for the run on the current checkout's branch, and timed out on a run that existed
+- Found: 2026-11-14 · watching PR #117's head `4311f97` from the main checkout · `scripts/watch_ci.py`
+- Symptom: `no ci run for 4311f975a78d on main within 300 s` (exit 2), while run 43635989371 for that head was in progress on `feat/115-budget-metric`.
+- Root cause: with no `--branch`, the watcher filtered `gh run list` by `git rev-parse --abbrev-ref HEAD`, the checkout it ran in. A `--sha` names a commit that may live on any branch. GitHub made this one with `gh pr update-branch`, on the PR's branch.
+- Fix: with no `--branch`, the run is looked up by its commit (`gh run list --commit <sha>`). `--branch` still narrows the lookup when given.
+- Sweep: `gh run list` and `--branch` over `scripts/`, `recovery/` and `.github/`. `recovery/github.py` already looks a head's runs up by commit (`gh run list -R <R> --commit SHA`), the shape of this fix. No other caller.
+- Guard: `test_without_a_branch_the_run_is_found_by_its_commit_not_the_checkouts_branch`. It failed on the old code (`unexpected command: ['git', 'rev-parse', '--abbrev-ref', 'HEAD']`). Guardrail 88.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-212 · A fourth inline script with `\n` escapes, in the same session as I-207's entry
+- Found: 2026-11-14 · probing the PowerShell question for #116 · the session, not the code
+- Symptom: a `python - <<'EOF'` script that printed stream-json lines with `.replace("\n", " ")` was refused under guardrail 17. Nothing ran.
+- Root cause: the lapse of I-191, I-203 and I-207. A quick inspection went inline out of habit, an hour after I-207 recorded the same lapse.
+- Fix: the script went to a file (`read_stream.py` in the session's scratchpad) and ran from there. Every later script this session did the same.
+- Sweep: none needed. The hook refuses every such command, so none got through.
+- Guard: guardrail 17 (`hook:push_gate`), which held. Its rule now cites this id too. Four recurrences confirm that the hook is the guard that works.
+- Resolved: 2026-11-14 · Status: resolved

@@ -27,16 +27,20 @@ def _out(argv: list[str]) -> str:
     return subprocess.run(argv, capture_output=True, text=True, check=True).stdout.strip()
 
 
-def run_for_head(branch: str, sha: str, workflow: str) -> dict[str, object] | None:
-    """The newest run of ``workflow`` on ``branch`` whose head is ``sha``, if any yet."""
+def run_for_head(branch: str | None, sha: str, workflow: str) -> dict[str, object] | None:
+    """The newest run of ``workflow`` whose head is ``sha``, if any yet: on ``branch`` when
+    one is named, else looked up by the commit itself, on whatever branch it was pushed to.
+    The current checkout's branch is no default: run from the main checkout, it named
+    ``main`` for another branch's head, and the watcher timed out on a run that existed
+    (I-211)."""
+    where = ["--branch", branch] if branch else ["--commit", sha]
     rows = json.loads(
         _out(
             [
                 "gh",
                 "run",
                 "list",
-                "--branch",
-                branch,
+                *where,
                 "--workflow",
                 workflow,
                 "--limit",
@@ -68,7 +72,9 @@ def full_sha(rev: str | None) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--sha", help="the pushed commit, full or short (default: HEAD)")
-    ap.add_argument("--branch", help="the pushed branch (default: the current one)")
+    ap.add_argument(
+        "--branch", help="the pushed branch (default: none; the run is found by its commit, I-211)"
+    )
     ap.add_argument("--workflow", default="ci", help="the workflow's name (default: ci)")
     args = ap.parse_args()
     try:
@@ -80,17 +86,18 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    branch = args.branch or _out(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    branch = args.branch or None
+    where = f"on {branch}" if branch else "by commit"
     deadline = time.monotonic() + APPEAR_TIMEOUT_S
     run = run_for_head(branch, sha, args.workflow)
     while run is None:
         if time.monotonic() > deadline:
-            print(f"no {args.workflow} run for {sha[:12]} on {branch} within {APPEAR_TIMEOUT_S} s")
+            print(f"no {args.workflow} run for {sha[:12]} {where} within {APPEAR_TIMEOUT_S} s")
             return 2
         time.sleep(POLL_S)
         run = run_for_head(branch, sha, args.workflow)
     run_id = str(run["databaseId"])
-    print(f"watching run {run_id} for {sha[:12]} on {branch}: {run.get('url')}", flush=True)
+    print(f"watching run {run_id} for {sha[:12]} {where}: {run.get('url')}", flush=True)
     watched = subprocess.run(
         ["gh", "run", "watch", run_id, "--exit-status", "--interval", "30"],
         stdout=subprocess.DEVNULL,
