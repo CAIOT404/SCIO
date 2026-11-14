@@ -1932,3 +1932,12 @@ Template:
 - Sweep: `grep -rn "uv sync"` over the repository, excluding the ledger. CI's three jobs and the nightly suite sync `--all-extras --group dev`. The recovery supervisor's repair worktree syncs `--frozen --all-extras --group dev` before the session starts (`recovery/repair.py`, ADR 0019). The README, OBSERVABILITY and ADR 0017 all say `--all-extras` (guardrail 21). The gate was the one check entry point that ran without a sync, and every session and worktree agent runs its checks through it. No requirement in the extras or the `dev` group has an environment marker, which the check does not evaluate (its docstring says so, and the test runs it against the real `pyproject.toml` on CI's Linux runner).
 - Guard: `missing_distributions`, `test_a_gate_in_an_environment_without_cis_extras_stops_before_any_step`. Guardrail 54, reworded.
 - Resolved: 2026-11-14 · Status: resolved
+
+### I-206 · Resolving a ledger conflict by whole entries dropped I-203's status line, which git kept outside the conflict block
+- Found: 2026-11-14 · merging `main` (v0.10.0) into `fix/98-tick-recipe` · the orchestrator's conflict resolution, not the code
+- Symptom: after a script reordered the conflicting entries into id order (I-200 to I-205), I-203 had no `- Resolved: … · Status: …` line. I-205 had a blank line before its own. Both were caught by reading the ledger's diff before the commit.
+- Root cause: both sides' last entry ended with the same line, `- Resolved: 2026-11-14 · Status: resolved`. git left that shared last line after `>>>>>>>`, outside the block, so each side's last entry inside the block lacked it. The script split the block into entries and assumed each entry was whole.
+- Fix: I-203 gained its line back, and the stray blank line went. `git diff origin/main -- docs/ISSUE_LEDGER.md` removes only I-159's old `- Status: open` (I-204's fix).
+- Sweep: the merged ledger, I-001 to I-205, through `check_ledger_statuses`: 0 problems. The same check, run on the ledger as the script left it, names exactly I-203 (`I-203 has no '- Resolved: <date or -> . Status: <status>' line`). So I-204's guard already catches this shape, and the docs check runs before every push.
+- Guard: `check_ledger_statuses` (I-204), cited by guardrail 84. Run the docs check on a resolved conflict before committing the merge.
+- Resolved: 2026-11-14 · Status: resolved
