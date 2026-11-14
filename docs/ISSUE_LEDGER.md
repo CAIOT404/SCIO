@@ -1941,3 +1941,14 @@ Template:
 - Sweep: the merged ledger, I-001 to I-205, through `check_ledger_statuses`: 0 problems. The same check, run on the ledger as the script left it, names exactly I-203 (`I-203 has no '- Resolved: <date or -> . Status: <status>' line`). So I-204's guard already catches this shape, and the docs check runs before every push.
 - Guard: `check_ledger_statuses` (I-204), cited by guardrail 84. Run the docs check on a resolved conflict before committing the merge.
 - Resolved: 2026-11-14 · Status: resolved
+
+### I-207 · Two more shell scripts held `\n` escapes, and the push-gate hook refused both: the third recurrence of I-191's lapse
+- Found: 2026-11-14 · the v0.10.0 session, on `fix/98-tick-recipe` · the session, not the code
+- Symptom: two commands were denied under guardrail 17, and nothing ran or was written:
+  - a `python -c` check that `check_ledger_statuses` catches I-203 without its line; its `str.replace` literals held `\n`;
+  - a `python - <<'EOF'` edit of the session's memory index that split on `\n`.
+- Root cause: the same lapse as I-191 and I-203. A quick check or a small edit went into an inline script out of habit, and its string literals needed newlines. The rule was known; the habit won twice in one pass.
+- Fix: the check went into a script file written with the Write tool (`check_i206.py` in the session's scratchpad), and the memory edit went through the Edit tool.
+- Sweep: none needed. The hook refuses every such command, so none got through.
+- Guard: guardrail 17 (`hook:push_gate`), which held both times. Its rule now cites this id too. Three recurrences say the hook, not the habit, is the guard that works; it stays.
+- Resolved: 2026-11-14 · Status: resolved
