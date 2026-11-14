@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- The scheduled recovery tick's recipe in `docs/RECOVERY.md` registers without an administrator. Its logon trigger now names the user, since a trigger on any user's logon is refused with "Access is denied". The docs check now fails on any logon trigger without `-User` in a Markdown code block or a script under `scripts/`, and the recipe's `$py` skips the Microsoft Store alias (I-200, issue #98). It also counts a code block indented in a list item as code, so a link inside one is no longer checked (I-201).
+- The docs check fails on a ledger entry that does not close with its `- Resolved: … · Status: …` line. Such an entry is neither open nor resolved, so the guardrails check could not ask it for a rule. I-192 and I-159 gained theirs (I-204).
+- `scripts/gate.py` refuses to start in an environment that lacks a distribution CI installs (an optional extra or the `dev` group) and prints the `uv sync` to run. A fresh worktree's first `uv run` installs the default groups only, so its gate used to fail mypy on imports nobody changed (I-205).
 
 ## [0.10.0] - 2026-11-14
 ### Added

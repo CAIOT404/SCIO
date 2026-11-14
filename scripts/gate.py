@@ -17,10 +17,13 @@ and the tail of a failed step's log, and exits 1 if any step failed.
 
 from __future__ import annotations
 
+import importlib.metadata
 import io
+import re
 import subprocess
 import sys
 import time
+import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -68,6 +71,36 @@ def steps() -> list[tuple[str, list[str]]]:
     return [*FIRST, *TOGETHER, *LAST]
 
 
+SYNC = "UV_SYSTEM_CERTS=1 uv sync --frozen --all-extras --group dev"
+"""CI's sync. A fresh worktree's first ``uv run`` installs the default groups only, and the
+type check imports the extras (I-156, I-205)."""
+_NAME_END = re.compile(r"[\s\[<>=!~;@]")
+
+
+def missing_distributions(pyproject: Path) -> list[str]:
+    """The distributions named by ``pyproject``'s optional extras and its ``dev`` group that
+    this interpreter's environment lacks; none when there is no ``pyproject``. CI installs all
+    of them, so a gate without them fails on code nobody changed (I-156, I-205).
+
+    A requirement's environment marker is not evaluated: the name before it is wanted on every
+    platform. None of SCIO's extras carries one today, and the test runs this against the real
+    ``pyproject.toml`` on CI's runner, so a marker added later shows up there first."""
+    if not pyproject.is_file():
+        return []
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    extras = data.get("project", {}).get("optional-dependencies", {})
+    wanted = [r for reqs in extras.values() for r in reqs]
+    wanted += [r for r in data.get("dependency-groups", {}).get("dev", []) if isinstance(r, str)]
+    missing: set[str] = set()
+    for req in wanted:
+        name = _NAME_END.split(req.strip(), maxsplit=1)[0]
+        try:
+            importlib.metadata.distribution(name)
+        except importlib.metadata.PackageNotFoundError:
+            missing.add(name)
+    return sorted(missing)
+
+
 @dataclass
 class Step:
     name: str
@@ -107,6 +140,11 @@ def _report(step: Step) -> None:
 def main() -> int:
     if isinstance(sys.stdout, io.TextIOWrapper):  # a cp1252 console cannot print every log line
         sys.stdout.reconfigure(errors="replace")
+    missing = missing_distributions(ROOT / "pyproject.toml")
+    if missing:
+        print(f"gate: this environment lacks what CI installs: {', '.join(missing)}")
+        print(f"gate: run `{SYNC}` here first (I-205)")
+        return 1
     logs = ROOT / ".scio" / "gate" / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     logs.mkdir(parents=True, exist_ok=True)
     start = time.monotonic()

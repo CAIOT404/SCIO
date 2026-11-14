@@ -46,7 +46,8 @@ def _skip(p: Path) -> bool:
     return any(rel == s or rel.startswith(s + "/") for s in SKIP_DIRS)
 
 
-FENCE_RE = re.compile(r"^```.*?^```[ \t]*$", re.MULTILINE | re.DOTALL)
+FENCE_RE = re.compile(r"^[ \t]*```.*?^[ \t]*```[ \t]*$", re.MULTILINE | re.DOTALL)
+"""A fenced code block, indented ones in a list item included (I-201)."""
 INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 
 
@@ -237,6 +238,43 @@ def check_graph_sections() -> list[str]:
     return gen_mermaid.check()
 
 
+SCHEDULED_TRIGGER_RE = re.compile(r"New-ScheduledTaskTrigger\b[^\n]*")
+
+
+def logon_trigger_problems(label: str, text: str) -> list[str]:
+    """A Task Scheduler logon trigger in a PowerShell recipe names its user (I-200).
+    Without ``-User`` it fires at any user's logon, which only an administrator may
+    register. A line continued with a backtick is read as one line."""
+    joined = text.replace("`\r\n", " ").replace("`\n", " ")
+    return [
+        f"{label}: a logon trigger without -User is refused outside an administrator's "
+        "shell; name the user, as docs/RECOVERY.md does (I-200)"
+        for m in SCHEDULED_TRIGGER_RE.finditer(joined)
+        if "-AtLogOn" in m.group(0) and "-User" not in m.group(0)
+    ]
+
+
+def markdown_code(text: str) -> str:
+    """The fenced code blocks of a Markdown text, joined; prose is left out."""
+    return "\n".join(m.group(0) for m in FENCE_RE.finditer(text))
+
+
+def check_scheduled_task_recipes() -> list[str]:
+    """Every Task Scheduler recipe in a Markdown code block or a script registers without an
+    administrator (I-200). This file is not scanned: its pattern is not a recipe."""
+    errors: list[str] = []
+    for md in ROOT.rglob("*.md"):
+        if not _skip(md):
+            text = md.read_text(encoding="utf-8", errors="replace")
+            label = md.relative_to(ROOT).as_posix()
+            errors.extend(logon_trigger_problems(label, markdown_code(text)))
+    for py in (ROOT / "scripts").rglob("*.py"):
+        if py.name != "check_docs.py" and not _skip(py):
+            text = py.read_text(encoding="utf-8", errors="replace")
+            errors.extend(logon_trigger_problems(py.relative_to(ROOT).as_posix(), text))
+    return errors
+
+
 GUARDRAILS_FROM = 104  # every resolved ledger entry from here on is owed a rule (issue #61)
 LEDGER_ENTRY_RE = re.compile(r"^### (I-(\d+)) ", re.MULTILINE)
 GUARDRAIL_START_RE = re.compile(r"^\d+\. \*\*(Always|Never)\*\* ")
@@ -256,6 +294,28 @@ def resolved_ledger_ids(ledger: str, start: int = GUARDRAILS_FROM) -> list[str]:
     parts = LEDGER_ENTRY_RE.split(ledger)
     entries = zip(parts[1::3], parts[2::3], parts[3::3], strict=True)
     return [i for i, n, body in entries if int(n) >= start and "Status: resolved" in body]
+
+
+STATUS_LINE_RE = re.compile(r"^- Resolved: [^\n]*· Status: \S", re.MULTILINE)
+
+
+def ledger_status_problems(ledger: str) -> list[str]:
+    """Every ledger entry has its ``- Resolved: <date or -> · Status: <status>`` line. An
+    entry without one is neither open nor resolved, so ``check_guardrails`` never asks it
+    for a rule (I-204)."""
+    parts = LEDGER_ENTRY_RE.split(ledger)
+    entries = zip(parts[1::3], parts[2::3], parts[3::3], strict=True)
+    return [
+        f"{lid} has no '- Resolved: <date or -> . Status: <status>' line"
+        for lid, _n, body in entries
+        if not STATUS_LINE_RE.search(body)
+    ]
+
+
+def check_ledger_statuses() -> list[str]:
+    """Every entry in docs/ISSUE_LEDGER.md says whether it is open or resolved (I-204)."""
+    ledger = (ROOT / "docs" / "ISSUE_LEDGER.md").read_text(encoding="utf-8")
+    return [f"docs/ISSUE_LEDGER.md: {e}" for e in ledger_status_problems(ledger)]
 
 
 def guardrail_problems(
@@ -337,6 +397,8 @@ def main() -> int:
         + check_ignored_sources()
         + check_graph_sections()
         + check_guardrails()
+        + check_scheduled_task_recipes()
+        + check_ledger_statuses()
     )
     for e in errors:
         print(f"docs-check: {e}")

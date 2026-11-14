@@ -71,6 +71,33 @@ def test_a_gate_whose_steps_all_pass_passes(
     assert "gate: passed" in capsys.readouterr().out
 
 
+def test_a_gate_in_an_environment_without_cis_extras_stops_before_any_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """I-205 (and I-156 before it): a fresh worktree's first `uv run` installed the default
+    groups only, and the release branch's gate failed mypy on 20 imports nobody changed. The
+    gate now names what is missing and the sync to run, before any step."""
+    gate = _load()
+    ran = tmp_path / "ruff-ran"
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "x"\n[project.optional-dependencies]\n'
+        'web = ["no-such-distribution-i205[standard]>=1", "pytest>=8"]\n'
+        '[dependency-groups]\ndev = ["mypy>=1.14", {include-group = "web"}]\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    monkeypatch.setattr(gate, "FIRST", [("ruff check", _touch(ran))])
+    monkeypatch.setattr(gate, "TOGETHER", [])
+    monkeypatch.setattr(gate, "LAST", [])
+    assert gate.main() == 1
+    assert not ran.exists()
+    out = capsys.readouterr().out
+    assert "no-such-distribution-i205" in out and "uv sync --frozen --all-extras" in out
+    assert gate.missing_distributions(tmp_path / "pyproject.toml") == ["no-such-distribution-i205"]
+    assert gate.missing_distributions(REPO_ROOT / "pyproject.toml") == []  # this env is CI's
+
+
 def test_the_gates_regression_evals_are_cis() -> None:
     """The suite, provider, trials, threshold and trial concurrency are written in two places,
     `scripts/gate.py` and CI's `evals` job; CI adds only `--out` for its job summary."""

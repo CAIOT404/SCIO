@@ -34,16 +34,22 @@ The supervisor never merges. It never answers a human stop (merge, gate, release
 3. **Register the scheduled tick.** The tick advances incidents and picks up builds orphaned by a reboot or by a dead supervisor. It runs at logon and every 10 minutes. Use PowerShell, not `schtasks` (I-045):
    ```powershell
    $wt = "C:/Users/<you>/OneDrive/Desktop/projects/SCIO/.scio/recovery-wt"
-   $py = (Get-Command python).Source
+   $py = (Get-Command python -All | Where-Object Source -notlike "*WindowsApps*" | Select-Object -First 1).Source
    $action = New-ScheduledTaskAction -Execute $py -Argument "-m recovery tick" -WorkingDirectory $wt
    $triggers = @(
-     (New-ScheduledTaskTrigger -AtLogOn),
+     (New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"),
      (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 10))
    )
    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
      -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 4)
    Register-ScheduledTask -TaskName "SCIO recovery tick" -Action $action -Trigger $triggers -Settings $settings
    ```
+   `$py` skips the Microsoft Store alias under `WindowsApps`, which a PATH may list beside the real Python. Check that it names a real `python.exe`, or set it to that path yourself.
+
+   The logon trigger names your user. Without `-User`, it fires at any user's logon, and Windows lets only an administrator register that: a normal shell gets "Access is denied." (I-200).
+
+   Check the task once: `Start-ScheduledTask "SCIO recovery tick"`. When `Get-ScheduledTask "SCIO recovery tick"` reads `Ready` again, `Get-ScheduledTaskInfo "SCIO recovery tick"` shows `LastTaskResult` 0, and `state.sqlite` in the state folder (below) has a new write time. The repeating trigger's `Repetition.Duration` is empty, which means it repeats without end.
+
    The task's PATH has no `sh`. A replay therefore runs with the environment recorded from the original run, and every program is looked up on that environment's PATH (I-183).
 
    The 4-hour limit covers one tick running both repair attempts back to back, 2 × 90 minutes. A tick that is busy with a repair holds the tick lease, so the next scheduled ticks return at once (`IgnoreNew`).

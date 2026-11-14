@@ -1413,7 +1413,7 @@ Template:
 - Symptom: none yet; for a python product, a T1 UI step whose explorer names `graphcalc/static/app.js` or `index.html` would still drift on them (the python profile's sources are `.py`), as P7 did on `cli.py`
 - Root cause: the filter that keeps PRODUCT.md, README.md, pyproject.toml and progress.json out of `files_expected` is "source", and a python product's static assets are not source to the python profile
 - Fix: not yet; widening it (any tracked file outside `.scio/`, docs and dependency files) changes what drift flags, which is the escalation policy's call
-- Status: open
+- Resolved: - · Status: open
 
 ### I-160 · The drift check's path normaliser stripped the dot of a dot-directory
 - Found: 2026-11-04 · issue #79, the S8 agent's sweep of `scio/loop/escalation.py`
@@ -1784,6 +1784,7 @@ Template:
 - Fix: `run_tree` raises a new `TimeoutExpired(cmd, timeout, output=, stderr=)` with the drained text, whose constructor takes text, `from None`. Its callers read `exc.stdout` and `exc.stderr` through `_text`, which takes either type.
 - Sweep: `grep -rn "\.stdout, .*\.stderr = \|exc\.stdout =\|exc\.stderr =" scio/ recovery/` finds no other assignment.
 - Guard: guardrail 74 (`symbol:run_tree`); the gate's `mypy` step refuses the construct.
+- Resolved: 2026-11-14 · Status: resolved
 
 ### I-193 · The commit gate never linted the first file `git status` listed, because the hook stripped its leading space
 - Found: 2026-11-14 · issue #100, by the agent rewriting the commit gate · `scripts/hooks/push_gate.py::_run`
@@ -1854,6 +1855,41 @@ Template:
 - Guard: `test_a_full_sha_made_on_github_is_taken_as_given` (the old code raised `CalledProcessError`) and `test_an_unresolvable_short_sha_ends_with_a_message_not_a_traceback`. Guardrail 80.
 - Resolved: 2026-11-14 · Status: resolved
 
+### I-200 · The documented recipe for the scheduled recovery tick was refused: a logon trigger without `-User` needs an administrator
+- Found: 2026-11-14 · issue #98, registering the `SCIO recovery tick` task on the owner's request · `docs/RECOVERY.md`, set-up step 3
+- Symptom: `Register-ScheduledTask`, run from a normal (not elevated) shell with the recipe as written, failed with "Access is denied." No task was created.
+- Root cause: `New-ScheduledTaskTrigger -AtLogOn` with no `-User` is a trigger on any user's logon, and Windows lets only an administrator register one. Three temporary tasks, each deleted afterwards, isolated it:
+  - a repeating time trigger alone registered;
+  - `-AtLogOn` alone was refused;
+  - `-AtLogOn -User` with the current user registered.
+
+  The Task Scheduler measurement in ADR 0019 §12a registered a task without a logon trigger, so it never met this.
+- Fix: the recipe binds the logon trigger to the current user (`-User "$env:USERDOMAIN\$env:USERNAME"`) and says how to check the task once.
+  - The recipe's `$py` now skips the Microsoft Store alias, since this machine's PATH lists `WindowsApps\python.exe` after the real one.
+  - The task was then registered with the fixed recipe. `$py` was set to the real Python 3.12 path by hand, and the rest was as written. Its repeating trigger reads `PT10M` with an empty duration (indefinite), and the logon trigger names the user.
+  - A run started by hand ended `Ready` with `LastTaskResult` 0 and wrote the supervisor's `state.sqlite`. The drill's incident stayed `awaiting_merge` on PR #110, as it should before the merge.
+- Sweep: `grep -rn "AtLogOn\|New-ScheduledTaskTrigger\|Register-ScheduledTask"` over the repository, outside `.scio/` and other worktrees, finds this recipe and `scripts/nightly_live.py`'s. That one uses a `-Daily` trigger, which needs no administrator.
+- Guard: `check_scheduled_task_recipes` in the docs check fails on a logon trigger without `-User` in any Markdown code block in the repository or any script under `scripts/`. `test_a_logon_trigger_without_its_user_is_refused`. Guardrail 81. Run against `origin/main`'s recipe, the check names it, but only after I-201's fix.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-201 · The docs check's fence pattern skipped indented code blocks, so I-200's first guard passed without reading the recipe
+- Found: 2026-11-14 · issue #98, when I-200's new check was run against `origin/main`'s unfixed `docs/RECOVERY.md` · `scripts/check_docs.py::FENCE_RE`
+- Symptom: the new check returned no problem for the recipe it was written to catch. Its own test also passed, since it asserted only that the repository was clean.
+- Root cause: `FENCE_RE` matched a fence only at column 0. RECOVERY.md's recipe sits in a fenced block inside a numbered list item, indented three spaces, so the check read no code from it.
+- Fix: `FENCE_RE` allows leading whitespace before both fences, and `markdown_code` gives the joined code blocks of a text. The test now feeds the refused recipe, in its list-item form, through `markdown_code`.
+- Sweep:
+  - `grep -n "FENCE_RE" scripts/` finds its one other user, `_strip_code`. The link check strips code before it reads links, so a link inside an indented block was checked as a link. The wider pattern fixes both, and the docs check still reports 0 problems over the repository.
+  - A search for three backticks in every `*.py` file finds the other fence readers, and each one is safe:
+    - `recovery/brief.py` strips leading whitespace first.
+    - `scio/product/release_checks.py::readme_run_commands` strips each line first.
+    - `scio/prompt/repair.py::_strip_fences` strips the whole reply before its anchored match.
+    - `scio/graph/mermaid.py` is not anchored to a column.
+    - The awk in `scio/product/scaffold.py`'s CI reads the run block that SCIO itself writes at column 0.
+
+    Every other hit writes a fence and does not read one.
+- Guard: `test_an_indented_code_block_is_code_too` (a link inside an indented block is ignored, and its code is read). `test_a_logon_trigger_without_its_user_is_refused` now passes the list-item form. Guardrail 82.
+- Resolved: 2026-11-14 · Status: resolved
+
 ### I-202 · The dashboard's `/ws` loop cancelled its read of the socket at every poll, and a cancel could lose the client's disconnect
 - Found: 2026-11-14 · issue #102, the gate on the branch with `main` merged in · `scio/dashboard/app.py::_push_changes`
 - Symptom: in the 16-worker gate, `test_ws_stops_polling_once_the_client_leaves` failed with "the server kept polling after the client left": the poll count still moved 5 s after `ws.close()`. Run alone it passed 3 times out of 3. #102 did not touch that path, since the test's fixture source has no recovery store.
@@ -1874,4 +1910,45 @@ Template:
 - Fix: the three imports went in through the Edit tool.
 - Sweep: none needed. The hook refuses every such command, so none got through.
 - Guard: guardrail 17 (`hook:push_gate`), which held. Its rule now cites this id too.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-204 · Two ledger entries had no `- Resolved: … · Status: …` line, so the guardrails check could not see them
+- Found: 2026-11-14 · resolving the ledger conflict when `main` was merged into #100's branch. I-192, written by the drill's repair session (#105), ended at its Guard line. · `docs/ISSUE_LEDGER.md`
+- Symptom: `check_guardrails` takes an entry as resolved only from its `Status: resolved`. An entry with no status line is neither open nor resolved, so a resolved fix could skip its Always/Never rule and nothing would say so. I-192 happens to be cited by guardrail 74.
+- Root cause: the closing line is a convention that nothing checked. A writer who ends at the Guard line, a session or a person, leaves the entry without a state.
+- Fix:
+  - I-192 gains `- Resolved: 2026-11-14 · Status: resolved`.
+  - I-159's bare `- Status: open` becomes `- Resolved: - · Status: open`.
+  - The new `check_ledger_statuses` in the docs check fails on any entry without the line.
+- Sweep: the new check, run over the whole ledger (I-001 to I-203), found exactly these two.
+- Guard: `check_ledger_statuses`, `test_every_ledger_entry_says_whether_it_is_open_or_resolved`. Guardrail 84.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-205 · The release worktree's first gate failed mypy on 20 imports nobody changed: the worktree was never synced as CI syncs
+- Found: 2026-11-14 · cutting v0.10.0 in `.claude/worktrees/release-0.10.0`, gate run `20261114T120647Z` · `scripts/gate.py`
+- Symptom: the gate's mypy step reported `Found 20 errors in 5 files`, including `Cannot find implementation or library stub for module named "uvicorn"` (`scio/cli.py:494`) and `Untyped decorator makes function "graphs" untyped` (`scio/dashboard/app.py:341`). The release commit changed no Python. After `uv sync --frozen --all-extras --group dev`, the same tree passed mypy in the next run, 47 s later (`20261114T120734Z`).
+- Root cause: the worktree's first `uv run` created its `.venv` with the default groups only, so the `dashboard` extra (FastAPI, uvicorn) and the other extras were missing. Guardrail 54 (I-156) says to sync a fresh worktree first, but its guard was `manual:`, and this time the orchestrator itself skipped it. Nothing ran that could catch the miss.
+- Fix: the gate checks first, before any step, that the environment has every distribution in `pyproject.toml`'s optional extras and `dev` group (`missing_distributions`). If any is missing, it names them and the sync to run, and exits 1. Guardrail 54's guard becomes that symbol and its test, in place of `manual:`.
+- Sweep: `grep -rn "uv sync"` over the repository, excluding the ledger. CI's three jobs and the nightly suite sync `--all-extras --group dev`. The recovery supervisor's repair worktree syncs `--frozen --all-extras --group dev` before the session starts (`recovery/repair.py`, ADR 0019). The README, OBSERVABILITY and ADR 0017 all say `--all-extras` (guardrail 21). The gate was the one check entry point that ran without a sync, and every session and worktree agent runs its checks through it. No requirement in the extras or the `dev` group has an environment marker, which the check does not evaluate (its docstring says so, and the test runs it against the real `pyproject.toml` on CI's Linux runner).
+- Guard: `missing_distributions`, `test_a_gate_in_an_environment_without_cis_extras_stops_before_any_step`. Guardrail 54, reworded.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-206 · Resolving a ledger conflict by whole entries dropped I-203's status line, which git kept outside the conflict block
+- Found: 2026-11-14 · merging `main` (v0.10.0) into `fix/98-tick-recipe` · the orchestrator's conflict resolution, not the code
+- Symptom: after a script reordered the conflicting entries into id order (I-200 to I-205), I-203 had no `- Resolved: … · Status: …` line. I-205 had a blank line before its own. Both were caught by reading the ledger's diff before the commit.
+- Root cause: both sides' last entry ended with the same line, `- Resolved: 2026-11-14 · Status: resolved`. git left that shared last line after `>>>>>>>`, outside the block, so each side's last entry inside the block lacked it. The script split the block into entries and assumed each entry was whole.
+- Fix: I-203 gained its line back, and the stray blank line went. `git diff origin/main -- docs/ISSUE_LEDGER.md` removes only I-159's old `- Status: open` (I-204's fix).
+- Sweep: the merged ledger, I-001 to I-205, through `check_ledger_statuses`: 0 problems. The same check, run on the ledger as the script left it, names exactly I-203 (`I-203 has no '- Resolved: <date or -> . Status: <status>' line`). So I-204's guard already catches this shape, and the docs check runs before every push.
+- Guard: `check_ledger_statuses` (I-204), cited by guardrail 84. Run the docs check on a resolved conflict before committing the merge.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-207 · Two more shell scripts held `\n` escapes, and the push-gate hook refused both: the third recurrence of I-191's lapse
+- Found: 2026-11-14 · the v0.10.0 session, on `fix/98-tick-recipe` · the session, not the code
+- Symptom: two commands were denied under guardrail 17, and nothing ran or was written:
+  - a `python -c` check that `check_ledger_statuses` catches I-203 without its line; its `str.replace` literals held `\n`;
+  - a `python - <<'EOF'` edit of the session's memory index that split on `\n`.
+- Root cause: the same lapse as I-191 and I-203. A quick check or a small edit went into an inline script out of habit, and its string literals needed newlines. The rule was known; the habit won twice in one pass.
+- Fix: the check went into a script file written with the Write tool (`check_i206.py` in the session's scratchpad), and the memory edit went through the Edit tool.
+- Sweep: none needed. The hook refuses every such command, so none got through.
+- Guard: guardrail 17 (`hook:push_gate`), which held both times. Its rule now cites this id too. Three recurrences say the hook, not the habit, is the guard that works; it stays.
 - Resolved: 2026-11-14 · Status: resolved
