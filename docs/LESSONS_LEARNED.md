@@ -22,12 +22,12 @@ Every bug and every correction becomes one rule here (the owner's rule, 2026-10-
 14. **Always** read a checkpoint with the model of the graph that wrote it; every kind of thread (task, `scio new`, `scio build`) has a report (I-108). Guard: `symbol:load_product_state`, `test:test_cli_build_status_and_report`
 15. **Always** record a thread's spend across processes: a resume carries the checkpoint's spend into the new process, and the guard still caps each process (I-110). Guard: `symbol:carry_spend`, `test:test_a_thread_records_the_spend_of_every_invocation`
 16. **Always** match a Python definition by name with its generic form too (`def name[T](`), not only `def name(` (I-111). Guard: `test:test_guard_exists_looks_in_the_repository`
-17. **Always** make an edit whose text contains a backslash with the Edit or Write tool, never through a shell-embedded script; a script edit asserts its anchor count before it writes; a read-only one-liner with a regex counts too; a parallel agent's brief repeats this rule in its first lines; a batch of edits in which one has a backslash goes through the Edit tool whole, and a `\n` in the script's own string literals counts (I-071, I-072, I-112, I-117, I-131, I-157, I-162, I-167, I-176, I-177, I-191). Since issue #88 the push-gate hook refuses two kinds of command: a heredoc body or `python -c` script that holds a backslash, and any command with a double backslash, which the Bash tool halves before the shell runs (I-176). It cannot tell a mangled backslash from an intended one, so it refuses both, and such text goes through the file tools. Guard: `hook:push_gate`, `test:test_a_backslash_in_a_heredoc_or_a_python_c_script_is_refused`, `test:test_the_hook_refuses_a_backslash_heredoc_without_any_git_in_it`, `test:test_a_double_backslash_anywhere_is_refused`
+17. **Always** make an edit whose text contains a backslash with the Edit or Write tool, never through a shell-embedded script; a script edit asserts its anchor count before it writes; a read-only one-liner with a regex counts too; a parallel agent's brief repeats this rule in its first lines; a batch of edits in which one has a backslash goes through the Edit tool whole, and a `\n` in the script's own string literals counts (I-071, I-072, I-112, I-117, I-131, I-157, I-162, I-167, I-176, I-177, I-191, I-203). Since issue #88 the push-gate hook refuses two kinds of command: a heredoc body or `python -c` script that holds a backslash, and any command with a double backslash, which the Bash tool halves before the shell runs (I-176). It cannot tell a mangled backslash from an intended one, so it refuses both, and such text goes through the file tools. Guard: `hook:push_gate`, `test:test_a_backslash_in_a_heredoc_or_a_python_c_script_is_refused`, `test:test_the_hook_refuses_a_backslash_heredoc_without_any_git_in_it`, `test:test_a_double_backslash_anywhere_is_refused`
 18. **Never** let a test fake accept what the real service refuses; a fake GitHub refuses a missing label or milestone, and SCIO creates a resource before it names it (I-113). Guard: `symbol:ensure_label`, `test:test_an_issue_label_is_created_once_and_an_existing_one_is_left_alone`
 19. **Never** end a CLI command with a traceback when an external service refuses a step; say what failed and how to resume from the checkpoint (I-100, I-113). Guard: `test:test_a_github_refusal_stops_scio_build_with_a_resume_hint_not_a_traceback`
 20. **Always** count a thread's pending writes when detecting that it changed: a stop, a crash or a parallel task's result lands on an existing checkpoint, so the checkpoint id alone never moves (I-120). Guard: `test:test_a_stop_arriving_changes_the_writes_count_not_the_checkpoint`, `test:test_ws_pushes_a_stop_that_adds_no_checkpoint`
 21. **Never** tell a user to run `uv sync --extra X` alone; it uninstalls every extra it does not name, so say `--all-extras` or add the extra to their usual sync (I-124). Guard: `test:test_the_dashboard_without_the_extra_says_how_to_install_it`
-22. **Always** check a third-party tool's ports, paths and versions against its docs or its installed code before writing them into a brief or a doc (I-125). Guard: `manual:` prose about another project has nothing in this repository to check it against; each brief tells its agent to verify such facts at the source
+22. **Always** check a third-party tool's ports, paths and versions against its docs or its installed code, and the location of anything in SCIO's own code against the source, before writing them into a brief or a doc (I-125, I-196). Guard: `manual:` prose in a brief has nothing in this repository to check it against; each brief tells its agent to verify such facts at the source
 23. **Always** pass `newline=` to every text write (`Path.write_text` with an encoding, `open(..., "w")`) in the code directories, or Windows writes CRLF (I-006, I-126). Guard: `test:test_every_text_write_in_the_code_directories_passes_newline`
 24. **Always** read a file a live run appends to as complete lines only: a reader racing the writer sees the last line half written (I-127). Guard: `test:test_a_torn_last_ledger_line_is_left_out_and_a_corrupt_one_still_raises`
 25. **Always** give Starlette's `TestClient.websocket_connect` an absolute `ws://127.0.0.1/...` URL; it ignores `base_url`, so a relative one sends `Host: testserver` (I-128). Guard: `test:test_ws_says_hello_first_with_nothing_in_it`
@@ -84,9 +84,11 @@ Every bug and every correction becomes one rule here (the owner's rule, 2026-10-
 76. **Always** lint exactly what a commit can contain: the staged files plus the paths the command line names, and the whole tree on any doubt. One session's unfinished files must never block another session's finished commit (I-186). Guard: `test:test_the_commit_gate_lints_what_the_commit_can_hold`, `test:test_work_tree_paths_reads_git_add_and_git_commit`
 77. **Never** strip leading whitespace from `git status --porcelain` output before parsing it by column. The status code's first column is often a space (I-193). Guard: `test:test_the_commit_gate_lints_what_the_commit_can_hold`
 78. **Never** take pathlib parts (`.name`, `.parts`, `.parent`) from a path string written by another OS. On Linux, a Windows path is one name. Split such a path on both separators (I-194). Guard: `test:test_a_windows_worktree_path_finds_its_transcript_on_any_os`
+79. **Never** build a change signal from a SQLite file's metadata without treating an empty WAL as absent. A read-only reader creates one, and the signal would then change when nothing changed (I-197). Guard: `test:test_the_store_version_changes_with_every_supervisor_write`
 80. **Never** require a commit that GitHub made to exist in the local clone before using its full SHA. `gh pr update-branch` makes commits remotely (I-199). Guard: `test:test_a_full_sha_made_on_github_is_taken_as_given`
 81. **Never** register a Task Scheduler logon trigger without naming its user. `-AtLogOn` alone fires at any user's logon, which only an administrator may register, so the recovery tick's recipe was refused. A measurement that skips one trigger of a recipe has not measured the recipe (I-200). Guard: `check:check_scheduled_task_recipes`, `test:test_a_logon_trigger_without_its_user_is_refused`
 82. **Always** run a new check once against the defect it guards, and see it fail, before trusting its pass. A check that reads nothing passes everything: I-200's first draft read no code from an indented block (I-201). Guard: `test:test_an_indented_code_block_is_code_too`, `test:test_a_logon_trigger_without_its_user_is_refused`
+83. **Never** cancel a pending ASGI `receive()` to make a poll interval. A cancel can lose the message handed to it in the same loop iteration, and a lost disconnect leaves the loop polling forever. Keep one read alive for the connection and wait on it with a timeout (I-202). Guard: `test:test_the_poll_loop_never_cancels_a_pending_receive`
 84. **Always** close a ledger entry with its `- Resolved: <date or -> · Status: <status>` line. An entry without it is neither open nor resolved, and the guardrails check cannot ask it for a rule (I-204). Guard: `check:check_ledger_statuses`, `test:test_every_ledger_entry_says_whether_it_is_open_or_resolved`
 
 ## Standing pre-flight list (apply at the start of every milestone)
@@ -778,3 +780,50 @@ On the final commit `dda626f` all three pass, one trial each, run in parallel: $
 - The live check of the new hook found two things. The session had restarted outside the repository and was running no hooks at all (I-178, open, the owner's decision). Fed by hand, the hook script also showed that its push and commit gates had failed open on every `cd /c/...` line: 8 commits unlinted and 3 pushes unchecked in this pass, each with a warning nobody read (I-179, fixed).
 - Verified live on 2026-11-13, in a session started in the SCIO directory: a `printf %s 'x\\y'`, a backslash heredoc and a piped `mypy | tail -1` were each denied with the hook's message. That confirms I-176's premise, that the hook sees a command before the Bash tool halves it. After `cd /c/...`, a `git push --dry-run` went through with no "could not check" warning (I-179).
 - I-178 resolved by the owner's decision (issue #93): the user settings run the hook from `.scio/live-wt` in every session. A `claude -p` session started in a non-repository folder had its bare `git stash` denied.
+
+## The self-healing supervisor and its live drill (2026-11-14, issue #95, PRs #96, #108, #110, #111, #112)
+
+### Lessons applied
+- Pre-flight 8 (measure before building) shaped ADR 0019 §12a. Process survival, Task Scheduler's PATH (no `sh`, I-183) and the job object were measured with throwaway tasks before any supervisor code was written.
+- I-104 and guardrail 63 meant every CI wait watched its own head by SHA. When GitHub made a commit (`gh pr update-branch`), the watcher's local lookup crashed, so watch_ci now takes a full SHA as given (I-199).
+- Guardrail 17 held twice where it was tested: the hook refused a backslash heredoc (I-191, I-203) before anything was written.
+
+### What succeeded
+- **The drill passed end to end, on the real defect (I-180) and without anyone typing a tick.**
+  - 09:48:41: the M2 planner's `claude -p` call hung under an injected 1 s timeout, and `scio build` ended in a `TimeoutExpired` traceback.
+  - 09:48:56 to 09:49:01: the supervisor detected it, preserved 11 items, classified it `harness_suspect` at `claude_code.py:run`, opened issue #105 and started repair attempt 1.
+  - 10:40:26: the repair session ended with PR #110. It fixed I-180 and I-182, its sweep found I-190 to I-192, and it had green CI, a test and a ledger entry. The supervisor checked those claims on GitHub (`pr_verified`) and waited.
+  - 11:23:37: the owner's pre-approved merge.
+  - 11:32:01: the scheduled tick saw the merge and held for main's CI.
+  - 11:42:03 to 11:42:07: the next tick moved live-wt from `1019c21` to `e84e6a8`, passed the health check, and replayed `build --product product` with `--decision` dropped.
+  - 11:48:23: the replay built M2 (P4, P5) and stopped at M2's merge stop. The incident went `verified`, then `closed`.
+- The product's history is clean. `main` holds exactly one `[scio:merge:M1]` and one `[scio:progress:M1]`, and each M1 feature once. `milestone/2` added P4 and P5 once each. The replay cost $3.68.
+- The scheduled tick was registered (issue #98) and ran from Task Scheduler with `LastTaskResult` 0. It, not a person, carried the incident from `awaiting_merge` to `closed`.
+- `python -m recovery watch --follow` (#107) showed every state change live, so the drill needed no polling of the store by hand.
+
+### What failed
+- The repair session's figures in the incident timeline are wrong: 4 turns and 34 s, against 51.3 minutes, 127 turns and 154 tool calls in its transcript (I-195, open).
+- The repair session's sweep found I-190 to I-192, but its I-192 entry had no status line (I-204). Ledger hygiene is not in the repair brief's checks.
+- CI caught what the Windows gate could not: `recovery watch` split a Windows path with PosixPath on Linux (I-194).
+- `watch_ci.py` crashed on a commit GitHub had made (I-199).
+- The documented tick recipe was refused without an administrator (I-200), because the measurement in §12a skipped its logon trigger. The first draft of its guard read nothing (I-201).
+- A gate failed on a dashboard test that passes alone. Its root cause was a race in the `/ws` loop, which cancelled its read of the socket every poll (I-202).
+
+### Actions
+- `recovery/` (ADR 0019, #96), `python -m recovery watch` (#108), `scio/proctree.py::run_tree` and `harness_stop_line` (#110, I-180, I-182, I-189), the commit gate's scope (#111, I-186, I-193), and `scripts/watch_ci.py` taking GitHub's SHA as given (I-199).
+- The dashboard's recovery view and `_until_disconnect` (#112, I-196, I-197, I-202).
+- The scheduled task "SCIO recovery tick" is registered on the dev machine. Its recipe, `check_scheduled_task_recipes`, the wider `FENCE_RE` and `check_ledger_statuses` are on the #98 branch (I-200, I-201, I-204).
+- I-195 is recorded, open.
+- Guardrails 69 to 80 and 83 are on `main`. 81, 82 and 84 are on the #98 branch.
+
+### Bottleneck audit
+- **Slowest steps:**
+  - The repair session: 51.3 minutes.
+  - CI's tests job: the last four runs took 9.7, 13.1, 13.6 and about 13 minutes.
+  - The local gate: 6.4 to 7.0 minutes, five times.
+  - From the merge to the tick moving live-wt: 18.4 minutes. That is main's CI, 13.6, plus 4.7 waiting for the next tick.
+- **Serial work that could have run in parallel:** the merge queue. The ruleset requires a branch to be up to date with `main`, so every merge (#110, #111, #112, the release) cost the next PR a merge of main, a full gate and a CI run, about 20 minutes each, one after another. Gates and CI did overlap where they could: one PR's gate ran beside another's CI, and the I-202 repro ran beside a gate, where the load reproduced it.
+- **Repeated friction:** the same three files conflicted at every merge: `ISSUE_LEDGER.md`, `LESSONS_LEARNED.md` and `CHANGELOG.md`. A small resolver, which keeps both sides' ledger entries in id order, was written once and used three times.
+- **Improvements:**
+  1. Move the ledger resolver into `scripts/` with a test, so a merge's ledger conflict is one command.
+  2. Fix I-195, so the next repair session's cost and length are read from its transcript.
