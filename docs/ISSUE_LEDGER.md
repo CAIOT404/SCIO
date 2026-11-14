@@ -1724,10 +1724,11 @@ Template:
 
   The Task Scheduler measurement in ADR 0019 §12a registered a task without a logon trigger, so it never met this.
 - Fix: the recipe binds the logon trigger to the current user (`-User "$env:USERDOMAIN\$env:USERNAME"`) and says how to check the task once.
-  - The task was then registered with that recipe. Its repeating trigger reads `PT10M` with an empty duration (indefinite), and the logon trigger names the user.
+  - The recipe's `$py` now skips the Microsoft Store alias, since this machine's PATH lists `WindowsApps\python.exe` after the real one.
+  - The task was then registered with the fixed recipe. `$py` was set to the real Python 3.12 path by hand, and the rest was as written. Its repeating trigger reads `PT10M` with an empty duration (indefinite), and the logon trigger names the user.
   - A run started by hand ended `Ready` with `LastTaskResult` 0 and wrote the supervisor's `state.sqlite`. The drill's incident stayed `awaiting_merge` on PR #110, as it should before the merge.
 - Sweep: `grep -rn "AtLogOn\|New-ScheduledTaskTrigger\|Register-ScheduledTask"` over the repository, outside `.scio/` and other worktrees, finds this recipe and `scripts/nightly_live.py`'s. That one uses a `-Daily` trigger, which needs no administrator.
-- Guard: `check_scheduled_task_recipes` in the docs check fails on a logon trigger without `-User` in any Markdown code block or script. `test_a_logon_trigger_without_its_user_is_refused`. Guardrail 81. Run against `origin/main`'s recipe, the check names it, but only after I-201's fix.
+- Guard: `check_scheduled_task_recipes` in the docs check fails on a logon trigger without `-User` in any Markdown code block in the repository or any script under `scripts/`. `test_a_logon_trigger_without_its_user_is_refused`. Guardrail 81. Run against `origin/main`'s recipe, the check names it, but only after I-201's fix.
 - Resolved: 2026-11-14 · Status: resolved
 
 ### I-201 · The docs check's fence pattern skipped indented code blocks, so I-200's first guard passed without reading the recipe
@@ -1735,6 +1736,15 @@ Template:
 - Symptom: the new check returned no problem for the recipe it was written to catch. Its own test also passed, since it asserted only that the repository was clean.
 - Root cause: `FENCE_RE` matched a fence only at column 0. RECOVERY.md's recipe sits in a fenced block inside a numbered list item, indented three spaces, so the check read no code from it.
 - Fix: `FENCE_RE` allows leading whitespace before both fences, and `markdown_code` gives the joined code blocks of a text. The test now feeds the refused recipe, in its list-item form, through `markdown_code`.
-- Sweep: `grep -n "FENCE_RE" scripts/` finds its one other user, `_strip_code`. The link check strips code before it reads links, so a link inside an indented block was checked as a link. The wider pattern fixes both, and the docs check still reports 0 problems over the repository.
+- Sweep:
+  - `grep -n "FENCE_RE" scripts/` finds its one other user, `_strip_code`. The link check strips code before it reads links, so a link inside an indented block was checked as a link. The wider pattern fixes both, and the docs check still reports 0 problems over the repository.
+  - A search for three backticks in every `*.py` file finds the other fence readers, and each one is safe:
+    - `recovery/brief.py` strips leading whitespace first.
+    - `scio/product/release_checks.py::readme_run_commands` strips each line first.
+    - `scio/prompt/repair.py::_strip_fences` strips the whole reply before its anchored match.
+    - `scio/graph/mermaid.py` is not anchored to a column.
+    - The awk in `scio/product/scaffold.py`'s CI reads the run block that SCIO itself writes at column 0.
+
+    Every other hit writes a fence and does not read one.
 - Guard: `test_an_indented_code_block_is_code_too` (a link inside an indented block is ignored, and its code is read). `test_a_logon_trigger_without_its_user_is_refused` now passes the list-item form. Guardrail 82.
 - Resolved: 2026-11-14 · Status: resolved
