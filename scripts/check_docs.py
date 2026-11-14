@@ -13,6 +13,7 @@ they name exists.
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import sys
 from collections.abc import Callable
@@ -386,6 +387,26 @@ def check_guardrails() -> list[str]:
     ]
 
 
+def check_workflow_checklist() -> list[str]:
+    """The Workflow v2 checklist (issue #122) is well formed. Its status is computed from each
+    item's evidence by ``scripts/workflow_status.py``, never ticked, so the only thing to
+    check here is its shape: contiguous ids, a closer on every item, known evidence kinds,
+    and a ``Done:`` line only on a manual item."""
+    spec = importlib.util.spec_from_file_location(
+        "workflow_status", ROOT / "scripts" / "workflow_status.py"
+    )
+    assert spec is not None and spec.loader is not None
+    ws = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = ws  # a dataclass resolves its module through sys.modules
+    spec.loader.exec_module(ws)
+    path = ROOT / "docs" / "WORKFLOW_V2.md"
+    if not path.is_file():
+        return ["docs/WORKFLOW_V2.md is missing (issue #122)"]
+    return [
+        f"docs/WORKFLOW_V2.md: {e}" for e in ws.problems(ws.parse(path.read_text(encoding="utf-8")))
+    ]
+
+
 def main() -> int:
     errors = (
         check_links()
@@ -399,6 +420,7 @@ def main() -> int:
         + check_guardrails()
         + check_scheduled_task_recipes()
         + check_ledger_statuses()
+        + check_workflow_checklist()
     )
     for e in errors:
         print(f"docs-check: {e}")

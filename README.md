@@ -283,7 +283,9 @@ In progress:
 Proposed next (each one on the [board](https://github.com/users/NewMe505/projects/1)):
 - run graphcalc under the supervisor ([#98](https://github.com/NewMe505/SCIO/issues/98); the tick is registered, and graphcalc's M3 runs supervised since 2026-11-14)
 - on the Claude subscription the budget is a metric, never a stop ([#115](https://github.com/NewMe505/SCIO/issues/115), done, on `main` for the next release)
-- a capped worker session that edited nothing escalates cheapest step first: resume it, carry its findings, twice the turns once, then halt as before ([#116](https://github.com/NewMe505/SCIO/issues/116), done with this PR; a tier change mid-feature stays a possible later step)
+- a capped worker session that edited nothing escalates cheapest step first: resume it, carry its findings, twice the turns once, then halt as before ([#116](https://github.com/NewMe505/SCIO/issues/116), done, on `main`; a tier change mid-feature stays a possible later step)
+- Workflow v2: every change from the 2026-11-14 workflow teardown, tracked item by item in [docs/WORKFLOW_V2.md](docs/WORKFLOW_V2.md), whose status is computed from the code ([#122](https://github.com/NewMe505/SCIO/issues/122))
+- keep verified work across a retry ([#119](https://github.com/NewMe505/SCIO/issues/119)), give a bug-fix feature's brief its bug issue ([#120](https://github.com/NewMe505/SCIO/issues/120)), and ground a feature's plan in the repository ([#121](https://github.com/NewMe505/SCIO/issues/121)), from graphcalc's P26
 - guard every orchestrator node's harness errors, I-182 ([#99](https://github.com/NewMe505/SCIO/issues/99))
 - move the nightly live suite to the Claude Code backend, or retire it, I-181 ([#101](https://github.com/NewMe505/SCIO/issues/101))
 - the dashboard's last two follow-ups: Claude Code spans (I-122) and the thread id in telemetry (I-123) ([#102](https://github.com/NewMe505/SCIO/issues/102))
