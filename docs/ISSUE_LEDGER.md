@@ -2044,3 +2044,26 @@ Template:
 - Sweep: `grep -rn "files_expected\|explorer_summaries" scio evals` and `grep -rln localize .`. No hits in `recovery/`, `scripts/` or the product docs. Three tests in `test_t1_t2_fake.py` now expect the grounded list.
 - Guard: the 27 tests in `tests/unit/test_grounded_plan.py`. 24 of them failed on the old code. Guardrail 89.
 - Resolved: 2026-11-14 · Status: resolved
+
+### I-216 · A feature retry started over from the milestone head and redid the work its previous attempt had verified and committed
+- Found: 2026-11-14 · graphcalc P26 attempt 4, issue #119 (graphcalc's P26 retrospective, also #124) · `scio/product/build.py` (the fresh-attempt path), `scio/graph/nodes/prepare.py`
+- Symptom: attempt 3 reached `verify: all checks passed (iteration 3, stall 0)` and `committed F1+F3 as 8b8e8b4f6d59`, then halted (on the budget, since fixed in #115). The retry logged `repository ready on branch agent/18-p26-… at 2cacd08af4e0`, the milestone head, and spent 19:49 to 20:21 UTC rebuilding the same F1 and F3 (`committed F1+F3 as 05be7dff55ad`): about 32 minutes.
+- Root cause: every fresh attempt began with `clean_tree()` on the milestone branch, and `prepare_repo` then ran `checkout -B` on the feature branch, which orphaned the previous attempt's verified checkpoint commits. That was right for uncommitted leftovers (I-067), and wrong for committed, verified work.
+- Fix:
+  - `verified_start` finds the newest commit `git_checkpoint` made in the chain of retried attempts. It reads their checkpointed task state (`FeatureItem.commit_sha`), never ledger text, and follows only runs answered `retry` in this milestone.
+  - When that commit sits on the milestone head and the criteria are unchanged, the new attempt starts from it (`TaskSpec.start_commit`), and its verified features are carried as passing (`TaskSpec.carried`).
+  - Otherwise it starts from the head as before, with a ledger note.
+  - Uncommitted leftovers are still discarded.
+  - The ADR 0011 amendment.
+- Sweep: `grep -rnE '"-B"|base_branch|startswith\("retry"\)|"retry"' scio recovery scripts`. `prepare.py` is fixed. The `_run_batch` SHA base, the release cut and `_ensure_pr` are unaffected. A retry never batches. `recovery/` never answers retry.
+- Guard: the 9 tests in `tests/unit/test_retry_keeps_verified.py`. With `verified_start` forced to None, 5 fail; the idle and stop cases pass by design. Guardrail 92.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-217 · The checkpoint node returns early, without advancing the plan step, when a verify passes and no feature is newly passing
+- Found: 2026-11-14 · building #119 (its agent) · `scio/graph/nodes/checkpoint_gate.py` (`checkpoint`: `if not pending: return {"phase": "document"}`)
+- Symptom: none observed live yet. When a plan step's verify passes and every passing feature already has its `commit_sha`, the checkpoint commits nothing and routes to `document`. It never advances `current_step_id`, so a plan with steps left could go to documentation before its later steps ran. #119 met it: carried features with `commit_sha` set would make the next checkpoint a no-op. So #119 carries them with `commit_sha` unset, and they are committed with the attempt's next checkpoint.
+- Root cause: `checkpoint` decides "nothing to do" from the features alone and ignores the plan.
+- Fix: not yet. When a step passes with nothing new to commit, the checkpoint should still advance to the next unfinished step, or document only when none is left. Needs a test first: a two-step plan whose first step passes with no newly passing feature.
+- Sweep: not yet.
+- Guard: not yet.
+- Resolved: - · Status: open
