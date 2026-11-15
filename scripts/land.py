@@ -1,28 +1,39 @@
-"""Land a PR up to the merge, and finish the tail after it (issue #122, W-22 to W-26, W-29).
+"""Land a PR up to the merge, and finish the tail after it (issue #122, W-22 to W-26, W-29;
+issue #141).
 
-    uv run python scripts/land.py N                # land N up to the owner's merge
+    uv run python scripts/land.py N                # land N up to its merge line
     uv run python scripts/land.py N --next         # ... and gate the next queued branch meanwhile
     uv run python scripts/land.py N --body         # only: write the PR body from the gate stamp
-    uv run python scripts/land.py N --after-merge  # after the owner merged N: the tail
+    uv run python scripts/land.py N --after-merge  # after N merged: the tail, then main's CI
+    uv run python scripts/land.py N --after-merge --no-watch-main  # ... without main's CI
 
 Landing N, in this order:
 1. read the PR (``gh pr view``), and fetch ``origin``;
 2. when its base is another branch whose own PR is merged, retarget it to ``main``;
-3. when it is behind ``main``, ``gh pr update-branch``. The new head's tree must equal a tree
-   the gate passed, or it stops: "re-gate: the update changed content";
+3. when GitHub reports it conflicting (``mergeable`` CONFLICTING or ``mergeStateStatus``
+   DIRTY), it stops and says so. A branch behind ``main`` is not updated: the ruleset no
+   longer requires it (#141), and main's own CI after the merge is the check;
 4. a gate stamp (``.scio/gate/last-pass.json`` in any worktree) must hold the head's tree,
    or it stops: "the head was never gated";
 5. with ``--next``, it starts ``scripts/gate.py`` in the worktree of the next branch in
    ``.scio/queue``, in the background, so that gate runs while this PR's CI does;
 6. it watches CI for the head's commit (``watch_ci.py --sha``, found by commit, I-211);
 7. a draft is marked ready, only after CI passed;
-8. it prints the merge command when ``.scio/approvals.md`` approves N, and otherwise that it
-   waits for the owner. It never merges: the merge is the owner's.
+8. it prints the merge line, first match wins: ``.scio/approvals.md`` approves N; N is a
+   fast revert (title ``revert:``, body ``Reverts #M``, M merged, only M's files), labelled
+   ``revert``; N is low risk (``risk_of``: docs and tests only), labelled ``low-risk``.
+   Otherwise it waits for the owner and says which paths need the review. It never merges.
+   ``main`` requires a merge queue, so the line ``gh pr merge N --merge`` enqueues N, and
+   the queue merges it after its own ``merge_group`` CI run passes.
 
-``--after-merge`` checks ``mergedAt`` in its own call first (I-087), then pulls the main
+``--after-merge`` checks ``mergedAt`` in its own call first (I-087). While N is still in the
+merge queue (GraphQL ``isInMergeQueue``) it polls until the queue merges it, for
+``--queue-timeout`` minutes (30); an open PR out of the queue stops it. Then it pulls the main
 checkout, retargets the PRs based on N's branch to ``main`` and requeues them, says when
 live-wt should move (N touched runtime code), tags a ``chore(release): X.Y.Z`` PR's merge
-and checks its release, and regenerates ``.scio/session-state.md``.
+and checks its release, and regenerates ``.scio/session-state.md``. Then it watches main's
+``ci`` run for N's merge commit, by its SHA. When that run failed, it opens one ``red-main``
+issue (``main is red after #N``, with the run's URL), prints the revert recipe, and exits 1.
 
 The shared files live in the main checkout's ``.scio/``: ``approvals.md`` (one line per
 approval, ``<UTC time> | <the owner's words> | <refs>``, refs being ``PR <n>``, ``issue <n>``
@@ -39,15 +50,57 @@ import os
 import re
 import shutil
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, Literal
 
 SCRIPTS = Path(__file__).resolve().parent
 ROOT = SCRIPTS.parent
-PR_FIELDS = "number,headRefName,headRefOid,baseRefName,mergeStateStatus,isDraft,body,title,state"
+PR_FIELDS = (
+    "number,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,isDraft,body,title,"
+    "state,labels"
+)
 AFTER_FIELDS = "number,title,headRefName,baseRefName,mergeCommit,files"
+RUN_FIELDS = "databaseId,headSha,headBranch,event,status,conclusion,url"
+LOW_RISK_DIRS = ("docs/", "changes/", "tests/")
+"""Low risk (#141): every changed path is under these, or is Markdown outside the next list."""
+HIGH_RISK_DIRS = (
+    ".claude/",
+    ".github/",
+    "scio/",
+    "scripts/",
+    "recovery/",
+    "evals/",
+    "configs/",
+    "prompts/",
+)
+"""Never low, Markdown or not: the agents' settings and CI, the runtime and its prompt
+templates (``scio/prompt/templates/**.md``), the tools and hooks, the evals' fixtures."""
+LOW_RISK, REVERT, RED_MAIN = "low-risk", "revert", "red-main"
+LABELS = {
+    LOW_RISK: ("0E8A16", "Docs/tests only: merged when green without the owner's review (#141)"),
+    REVERT: ("FBCA04", "A fast revert of a merge that turned main red (#141)"),
+    RED_MAIN: ("B60205", "main's CI failed after a merge: revert it (#141)"),
+}
+"""The labels land.py puts on GitHub, made with ``gh label create`` when missing, never reset."""
+RED_CONCLUSIONS = ("failure", "timed_out", "startup_failure")
+ENQUEUES = "# adds it to the merge queue"
+"""``main`` requires a merge queue: ``gh pr merge N`` (``--merge`` only warns) enqueues a PR
+whose checks passed, and the queue merges it after its own ``merge_group`` run passes. A
+shell comment, so the line can be pasted as it is. Never ``--admin``: it bypasses the queue."""
+QUEUE_TIMEOUT_MIN = 30.0
+QUEUE_POLL_S = 30.0
+QUEUE_QUERY = (
+    "query($owner: String!, $name: String!, $number: Int!) "
+    "{ repository(owner: $owner, name: $name) { pullRequest(number: $number) "
+    "{ isInMergeQueue } } }"
+)
+"""Whether a PR is queued: GraphQL only, no ``gh pr view --json`` field has it."""
+REVERT_TITLE_RE = re.compile(r"^revert:", re.IGNORECASE)
+REVERTS_RE = re.compile(r"\breverts\s+#(\d+)\b", re.IGNORECASE)
+ISSUE_URL_RE = re.compile(r"/issues/(\d+)\b")
 RUNTIME_PREFIXES = ("scio/", "configs/", "scripts/hooks/", "prompts/")
 """What live-wt runs: a merge that touched these is not live until live-wt moves (W-27)."""
 RELEASE_RE = re.compile(r"^chore\(release\):\s*v?(\d+\.\d+\.\d+)\s*$")
@@ -57,8 +110,6 @@ AGENTS = Path(".scio") / "agents"
 EVIDENCE = "## Test evidence"
 SUMMARY = "## Summary"
 GENERATED = "<!-- written by scripts/land.py --body from .scio/gate/last-pass.json -->"
-NEW_HEAD_TRIES = 10
-NEW_HEAD_WAIT_S = 3.0
 CLOSING_RE = re.compile(r"\b(?:closes|fixes|resolves)\s+#(\d+)\b", re.IGNORECASE)
 LINK_LINE_RE = re.compile(r"^\s*(?:closes|fixes|resolves|refs|part of)\s+#\d+", re.IGNORECASE)
 BRANCH_ISSUE_RE = re.compile(r"^[\w.-]+/(\d+)-")
@@ -131,14 +182,29 @@ def approval_for(number: int, body: str, approvals: list[Approval]) -> Approval 
     return None
 
 
-def merge_line(number: int, body: str, approvals_text: str) -> str:
-    approval = approval_for(number, body, read_approvals(approvals_text))
-    if approval is None:
-        return f'waiting for the owner\'s "merge {number}"'
-    return (
-        f"approved by the owner: gh pr merge {number} --merge\n"
-        f'  ({approval.at}: "{approval.words}")'
-    )
+# Risk (#141): "Auto-merge low-risk PRs when green (docs-only, tests-only), with your review
+# reserved for scio/ runtime and hooks."
+
+
+def _low_risk(path: str) -> bool:
+    path = path.replace("\\", "/").removeprefix("./")
+    if path.rsplit("/", 1)[-1].lower() == "claude.md" or path.startswith(HIGH_RISK_DIRS):
+        return False
+    return path.startswith(LOW_RISK_DIRS) or path.endswith(".md")
+
+
+def high_risk_paths(paths: Iterable[str]) -> list[str]:
+    """The changed paths that need the owner's review."""
+    return [p for p in paths if not _low_risk(p)]
+
+
+def risk_of(paths: Iterable[str]) -> Literal["low", "high"]:
+    """``low`` when every changed path is under ``docs/``, ``changes/`` or ``tests/``, or is a
+    ``*.md`` file, except a ``CLAUDE.md`` at any depth and anything under ``HIGH_RISK_DIRS``
+    (the runtime's Markdown prompts and the evals' fixtures are code). Everything else is
+    ``high``, and so is an empty change list: there is nothing to vouch for."""
+    paths = list(paths)
+    return "low" if paths and not high_risk_paths(paths) else "high"
 
 
 # The PR body (W-24).
@@ -290,27 +356,35 @@ class Lander:
         found = self.ss.find_stamp(self.root, self.runner, tree)
         return found if found else None
 
-    def behind(self, pr: dict[str, Any]) -> bool:
-        """Whether the head lacks ``origin/main``. ``mergeStateStatus`` is only a hint: it is
-        ``UNKNOWN`` right after a push and ``DRAFT`` on a draft, so git decides."""
-        if pr.get("mergeStateStatus") == "BEHIND":
-            return True
-        proc = self.runner.run(
-            [
-                "git",
-                "-C",
-                str(self.root),
-                "merge-base",
-                "--is-ancestor",
-                "origin/main",
-                str(pr["headRefOid"]),
-            ]
-        )
-        return bool(proc.returncode == 1)
+    def changed_paths(self, head: str) -> list[str]:
+        """The PR's changed paths as GitHub's diff has them, from its merge base with
+        ``origin/main`` to ``head``. ``--no-renames`` lists a rename's old path too: moving
+        runtime code into ``docs/`` is not a docs-only change."""
+        out = self.git("diff", "--name-only", "--no-renames", "-z", f"origin/main...{head}")
+        return [p for p in out.split("\0") if p.strip()]
 
-    def watch(self, sha: str, workflow: str = "ci") -> int:
-        """``watch_ci.py`` for this exact commit, by commit (never the cwd's branch, I-211)."""
+    def label(self, n: int, name: str) -> None:
+        """Put ``name`` on PR ``n``, making the label first when GitHub lacks it."""
+        self.make_label(name)
+        self.gh("pr", "edit", str(n), "--add-label", name)
+        print(f"#{n} labelled {name}")
+
+    def make_label(self, name: str) -> None:
+        """Create the label when GitHub lacks it. An existing label is left as it is, so a
+        colour or description someone set on GitHub is never reset."""
+        color, about = LABELS[name]
+        try:
+            self.gh("label", "create", name, "--color", color, "--description", about)
+        except Stop as exc:
+            if "already exists" not in str(exc):
+                raise
+
+    def watch(self, sha: str, workflow: str = "ci", branch: str | None = None) -> int:
+        """``watch_ci.py`` for this exact commit, by commit (never the cwd's branch, I-211).
+        ``branch`` only for main's own run: the merge queue's ``merge_group`` run tests the
+        same commit on a ``gh-readonly-queue/`` branch and must not stand in for it."""
         argv = [sys.executable, str(SCRIPTS / "watch_ci.py"), "--sha", sha, "--workflow", workflow]
+        argv += ["--branch", branch] if branch else []
         return int(self.runner.run(argv, cwd=self.root, timeout=None, stream=True).returncode)
 
     # Landing (W-22, W-23, W-29).
@@ -339,20 +413,15 @@ class Lander:
             self.gh("pr", "edit", str(n), "--base", "main")
             print(f"retargeted #{n} from {base} to main (#{merged[0]['number']} merged)")
             pr = self.view(n)
-        if self.behind(pr):
-            old = str(pr["headRefOid"])
-            gated_before = self.gated(self.tree(old))
-            self.gh("pr", "update-branch", str(n))
-            pr = self.new_head(n, old)
-            self.fetch()
-            tree = self.tree(str(pr["headRefOid"]))
-            if self.gated(tree) is None:
-                raise Stop(
-                    "re-gate: the update changed content. Pull "
-                    f"{pr['headRefName']} into its worktree, run the gate there, then land "
-                    f"again{'' if gated_before else ' (its old head was never gated either)'}"
-                )
-            print(f"updated #{n} with main: {pr['headRefOid'][:12]}, a tree the gate passed")
+        # No update-branch step: the ruleset no longer requires an up-to-date branch (#141).
+        # UNKNOWN (still computing) and BEHIND go on; only a real conflict stops.
+        mergeable, status = pr.get("mergeable"), pr.get("mergeStateStatus")
+        if mergeable == "CONFLICTING" or status == "DIRTY":
+            raise Stop(
+                f"#{n} conflicts with main (mergeable {mergeable}, mergeStateStatus {status}): "
+                f"merge origin/main into {pr['headRefName']} in its worktree, resolve, run the "
+                "gate, push, and land again"
+            )
         head = str(pr["headRefOid"])
         tree = self.tree(head)
         found = self.gated(tree)
@@ -371,17 +440,59 @@ class Lander:
         if pr.get("isDraft"):
             self.gh("pr", "ready", str(n))
             print(f"#{n} marked ready for review")
-        print(merge_line(n, str(pr.get("body") or ""), self.approvals()))
+        print(self.verdict(n, pr, head))
         return 0
 
-    def new_head(self, n: int, old: str) -> dict[str, Any]:
-        """The PR once GitHub has moved its head off ``old`` after an update."""
-        for _ in range(NEW_HEAD_TRIES):
-            pr = self.view(n)
-            if pr.get("headRefOid") != old:
-                return pr
-            self.runner.sleep(NEW_HEAD_WAIT_S)
-        raise Stop(f"#{n}'s head did not move off {old[:12]} after gh pr update-branch")
+    def verdict(self, n: int, pr: dict[str, Any], head: str) -> str:
+        """The merge line for a PR whose CI passed (#141). First match wins: the owner's
+        approval, a fast revert, low risk; else it waits for the owner. A ``low-risk`` label
+        left from an earlier landing comes off a PR that is high risk now."""
+        body = str(pr.get("body") or "")
+        paths = self.changed_paths(head)
+        high = high_risk_paths(paths)
+        labels = {str(lab.get("name")) for lab in pr.get("labels") or [] if isinstance(lab, dict)}
+        if risk_of(paths) == "high" and LOW_RISK in labels:
+            self.gh("pr", "edit", str(n), "--remove-label", LOW_RISK)
+            print(f"#{n}: removed its {LOW_RISK} label")
+        approval = approval_for(n, body, read_approvals(self.approvals()))
+        merge = f"gh pr merge {n} --merge  {ENQUEUES}"
+        if approval is not None:
+            return f'approved by the owner: {merge}\n  ({approval.at}: "{approval.words}")'
+        reverted = self.reverts(n, pr, paths)
+        if reverted is not None:
+            self.label(n, REVERT)
+            return f"fast revert of #{reverted} (the owner's rule, #141): {merge}"
+        if risk_of(paths) == "low":
+            print(f"#{n} changes {len(paths)} path(s), all docs or tests")
+            self.label(n, LOW_RISK)
+            return f"low risk (docs/tests only; the owner's rule, #141): {merge}"
+        shown = ", ".join(high[:3]) + (f", and {len(high) - 3} more" if len(high) > 3 else "")
+        print(f"#{n} is high risk ({shown or 'no changed paths'}): it waits for the owner's review")
+        return f'waiting for the owner\'s "merge {n}"'
+
+    def reverts(self, n: int, pr: dict[str, Any], paths: list[str]) -> int | None:
+        """The PR that ``n`` reverts under the fast-revert policy (#141): its title starts
+        ``revert:``, its body says ``Reverts #M``, M is merged, and ``n`` changes only M's
+        files. Otherwise None, and ``n`` is judged by its risk like any other PR."""
+        m = REVERTS_RE.search(str(pr.get("body") or ""))
+        if not REVERT_TITLE_RE.match(str(pr.get("title") or "")) or m is None:
+            return None
+        target = int(m.group(1))
+        try:
+            info = self.gh_json("pr", "view", str(target), "--json", "mergedAt,files")
+        except Stop as why:
+            print(f"#{n} says it reverts #{target}, which gh cannot read ({why}): judged by risk")
+            return None
+        if not isinstance(info, dict) or not info.get("mergedAt"):
+            print(f"#{n} says it reverts #{target}, which is not merged: judged by its risk")
+            return None
+        theirs = {str(f.get("path", "")) for f in info.get("files") or [] if isinstance(f, dict)}
+        extra = [p for p in paths if p not in theirs]
+        if not paths or extra:
+            shown = ", ".join(extra[:3]) or "nothing"
+            print(f"#{n} reverts #{target} but changes {shown} beyond it: judged by its risk")
+            return None
+        return target
 
     def approvals(self) -> str:
         try:
@@ -453,11 +564,10 @@ class Lander:
 
     # After the merge (W-25, W-26).
 
-    def after_merge(self, n: int) -> int:
-        merged = self.gh_json("pr", "view", str(n), "--json", "mergedAt")
-        merged_at = merged.get("mergedAt") if isinstance(merged, dict) else None
-        if not merged_at:
-            raise Stop(f"PR {n} is not merged (mergedAt is null); nothing after it runs")
+    def after_merge(
+        self, n: int, *, watch_main: bool = True, queue_timeout_s: float = QUEUE_TIMEOUT_MIN * 60
+    ) -> int:
+        merged_at = self.wait_merged(n, queue_timeout_s)
         print(f"#{n} merged at {merged_at}")
         pr = self.gh_json("pr", "view", str(n), "--json", AFTER_FIELDS)
         branch = self.git("branch", "--show-current", cwd=self.main)
@@ -495,14 +605,168 @@ class Lander:
                 f"#{n} touched runtime code ({', '.join(runtime)}): move live-wt when no "
                 "supervised build runs: uv run python scripts/move_live_wt.py --when-idle"
             )
+        merge = (pr.get("mergeCommit") or {}).get("oid")
         m = RELEASE_RE.match(str(pr.get("title") or ""))
         if m:
-            merge = (pr.get("mergeCommit") or {}).get("oid")
             if not merge:
                 raise Stop(f"#{n} is merged but GitHub gave no merge commit")
             self.release(m.group(1), str(merge))
         self.session_state()
+        if watch_main:
+            if not merge:
+                raise Stop(f"#{n} is merged but GitHub gave no merge commit: main's CI unwatched")
+            self.watch_main(n, str(merge))
         return 0
+
+    def wait_merged(self, n: int, timeout_s: float) -> str:
+        """N's ``mergedAt``, read in its own call before any other step (I-087). The merge
+        line only enqueues, so while N is open and in the merge queue this polls until the
+        queue merges it, or ``timeout_s`` passes. An open PR that is not queued (it left the
+        queue unmerged, its ``merge_group`` run failed, or it never joined) stops, as does a
+        closed one."""
+        deadline = self.runner.now() + timeout_s
+        while True:
+            info = self.gh_json("pr", "view", str(n), "--json", "state,mergedAt")
+            info = info if isinstance(info, dict) else {}
+            if info.get("mergedAt"):
+                return str(info["mergedAt"])
+            state = info.get("state")
+            if state != "OPEN" or not self.in_queue(n):
+                raise Stop(
+                    f"PR {n} is not merged (mergedAt is null) and not in the merge queue (state "
+                    f"{state}): it left the queue unmerged or never joined it, so nothing after "
+                    f"it runs. Look at its checks and the queue's run, then: gh pr merge {n} "
+                    "--merge"
+                )
+            left = deadline - self.runner.now()
+            if left <= 0:
+                raise Stop(
+                    f"PR {n} is still queued after {timeout_s / 60:g} min: run land.py {n} "
+                    "--after-merge again once the queue merges it"
+                )
+            print(
+                f"#{n} queued: waiting for the merge queue ({left / 60:.1f} min left)", flush=True
+            )
+            self.runner.sleep(min(QUEUE_POLL_S, left))
+
+    def in_queue(self, n: int) -> bool:
+        data = self.gh_json(
+            "api",
+            "graphql",
+            "-F",
+            "owner={owner}",
+            "-F",
+            "name={repo}",
+            "-F",
+            f"number={n}",
+            "-f",
+            f"query={QUEUE_QUERY}",
+        )
+        repo = ((data or {}).get("data") or {}).get("repository") or {}
+        return bool((repo.get("pullRequest") or {}).get("isInMergeQueue"))
+
+    # Main's CI after the merge, and the fast-revert policy (#141).
+
+    def watch_main(self, n: int, merge: str) -> None:
+        """Watch main's ``ci`` run for the merge commit, by its SHA. The run's own record
+        decides, not the watcher's exit code alone: only a finished run that failed opens a
+        ``red-main`` issue; no run, an unfinished one, or a cancelled one says so and stops."""
+        code = self.watch(merge, "ci", branch="main")
+        if code == 0:
+            print(f"main's ci passed for #{n}'s merge {merge[:12]}")
+            return
+        rows = self.gh_json(
+            "run",
+            "list",
+            "--commit",
+            merge,
+            "--workflow",
+            "ci",
+            "--limit",
+            "20",
+            "--json",
+            RUN_FIELDS,
+        )
+        run = next(
+            (
+                r
+                for r in rows or []
+                if str(r.get("headSha")) == merge
+                and r.get("headBranch") == "main"
+                and r.get("event") == "push"
+            ),
+            None,
+        )
+        retry = f"uv run python scripts/watch_ci.py --sha {merge} --branch main"
+        if run is None:
+            raise Stop(
+                f"no ci run for #{n}'s merge {merge[:12]} on main (watch_ci exit {code}); no "
+                f"{RED_MAIN} issue opened. Watch it: {retry}"
+            )
+        status, conclusion, url = run.get("status"), run.get("conclusion"), str(run.get("url"))
+        if status == "completed" and conclusion == "success":
+            print(f"main's ci passed for #{n}'s merge {merge[:12]} (watch_ci exit {code}): {url}")
+            return
+        if status != "completed" or conclusion not in RED_CONCLUSIONS:
+            raise Stop(
+                f"main's ci run for #{n}'s merge {merge[:12]} is {status}/{conclusion}, not "
+                f"judged red; no {RED_MAIN} issue opened. Look at {url}, or watch it: {retry}"
+            )
+        issue, issue_url = self.red_main_issue(n, merge, url, str(conclusion))
+        print(f"main is red after #{n}: {url}")
+        print(f"{RED_MAIN} issue: {issue_url}")
+        print(self.revert_recipe(n, merge, url, issue))
+        raise Stop(f"main is red after #{n}: revert it with the recipe above (#141)")
+
+    def red_main_issue(self, n: int, merge: str, run: str, conclusion: str) -> tuple[int, str]:
+        """The open ``red-main`` issue for N, opened when there is none (one per merge)."""
+        title = f"main is red after #{n}"
+        self.make_label(RED_MAIN)
+        found = self.gh_json(
+            "issue",
+            "list",
+            "--label",
+            RED_MAIN,
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            "number,title,url",
+        )
+        for issue in found or []:
+            if issue.get("title") == title:
+                return int(issue["number"]), str(issue["url"])
+        body = (
+            f"main's `ci` run for the merge of #{n} (`{merge}`) ended `{conclusion}`: {run}\n\n"
+            f"The fast-revert policy (#141): revert #{n} first, with the recipe "
+            f"`scripts/land.py {n} --after-merge` printed, then fix forward on a new branch."
+        )
+        out = self.gh("issue", "create", "--title", title, "--label", RED_MAIN, "--body", body)
+        url = next((ln.strip() for ln in out.splitlines() if ISSUE_URL_RE.search(ln)), "")
+        m = ISSUE_URL_RE.search(url)
+        if m is None:
+            raise Stop(f"gh issue create printed no issue URL: {out.strip()[:200]}")
+        return int(m.group(1)), url
+
+    def revert_recipe(self, n: int, merge: str, run: str, issue: int) -> str:
+        wt = (self.main / ".claude" / "worktrees" / f"revert-{n}").as_posix()
+        body = f"Reverts #{n}: main's ci went red after it ({run}). Closes #{issue}"
+        return "\n".join(
+            [
+                f"revert it (the fast-revert policy, #141), from {self.main.as_posix()}:",
+                "  git fetch origin",
+                f'  git worktree add -b revert/{n} "{wt}" origin/main',
+                f'  cd "{wt}"',
+                f"  git revert --no-edit -m 1 {merge}",
+                "  UV_SYSTEM_CERTS=1 uv sync --frozen --all-extras --group dev  # a new worktree",
+                "  UV_SYSTEM_CERTS=1 uv run python scripts/gate.py",
+                f"  git push -u origin revert/{n}",
+                f'  gh pr create --base main --head revert/{n} --title "revert: #{n}" '
+                f'--body "{body}"',
+                "  uv run python scripts/land.py <the revert PR>  # a revert gets its merge line",
+            ]
+        )
 
     def release(self, version: str, merge: str) -> None:
         """Tag the release PR's merge (annotated), push the tag, wait for release.yml's run
@@ -554,12 +818,28 @@ def main(argv: list[str] | None = None, runner: Any = None) -> int:
     mode.add_argument("--next", action="store_true", help="also gate the next queued branch")
     mode.add_argument("--body", action="store_true", help="only write the PR body")
     mode.add_argument("--after-merge", action="store_true", help="the tail after the merge")
+    ap.add_argument(
+        "--no-watch-main",
+        action="store_true",
+        help="with --after-merge: do not watch main's CI run for the merge commit",
+    )
+    ap.add_argument(
+        "--queue-timeout",
+        type=float,
+        default=QUEUE_TIMEOUT_MIN,
+        metavar="MIN",
+        help=f"with --after-merge: minutes to wait for the queue (default {QUEUE_TIMEOUT_MIN:g})",
+    )
     ap.add_argument("--root", type=Path, default=ROOT, help="any checkout of the repository")
     args = ap.parse_args(argv)
     lander = Lander(args.root, runner or ss.Runner(), ss)
     try:
         if args.after_merge:
-            return lander.after_merge(args.pr)
+            return lander.after_merge(
+                args.pr,
+                watch_main=not args.no_watch_main,
+                queue_timeout_s=args.queue_timeout * 60,
+            )
         if args.body:
             return lander.body(args.pr)
         return lander.land(args.pr, next_gate=args.next)
