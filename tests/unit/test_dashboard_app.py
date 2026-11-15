@@ -1,7 +1,7 @@
 """The dashboard's server (issue #68, ADR 0017) over the fixture source: every endpoint serves
 the contract's JSON, one unreadable root hides no other, ``/ws`` says hello and then pushes
-only real changes, every route is a read, a foreign ``Host`` or ``Origin`` is refused, and no
-site can frame the page."""
+only real changes, every route is a read but ``POST /api/answer`` (ADR 0020), a foreign ``Host``
+or ``Origin`` is refused, and no site can frame the page."""
 
 from __future__ import annotations
 
@@ -249,17 +249,21 @@ def test_the_poll_interval_must_be_positive(source: FixtureDataSource) -> None:
 
 
 def test_every_route_is_a_read(source: FixtureDataSource, tmp_path: Path) -> None:
-    """The read-only guarantee's structural guard: no route accepts a write method."""
+    """The read-only guarantee's structural guard: no route accepts a write method but
+    ``POST /api/answer``, the answer box's (ADR 0020, which amends ADR 0017 decision 10; its
+    own guards are in tests/unit/test_dashboard_questions.py)."""
     (tmp_path / "app.js").write_text("", encoding="utf-8", newline="\n")
     app: FastAPI = create_app(source, static_dir=tmp_path)
     checked: set[str] = set()
+    writes: set[tuple[str, str]] = set()
     for route in app.routes:
         assert isinstance(route, APIRoute | APIWebSocketRoute | Mount), route
         methods = getattr(route, "methods", None)
         if methods is None:
             continue
-        assert set(methods) <= {"GET", "HEAD"}, (route.path, methods)
+        writes |= {(route.path, m) for m in set(methods) - {"GET", "HEAD"}}
         checked.add(route.path)
+    assert writes == {("/api/answer", "POST")}
     assert checked >= {
         "/",
         "/api/roots",

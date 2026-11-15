@@ -8,6 +8,11 @@
  * GET /api/recovery (the recovery supervisor's runs and open incidents, issue #102) is read
  * only once a /ws hello said the server has it (ChangeEvent.recovery), and from then on with
  * every refresh: a server without it is never asked.
+ *
+ * GET /api/questions (the parked features' design questions, ADR 0020) is read the same way,
+ * once a hello said so (ChangeEvent.questions). Its answer box is the page's one write:
+ * POST /api/answer, with the launch token the server put in the scio-answer-token meta tag.
+ * A draft answer lives in state, so a live redraw never loses it.
  */
 "use strict";
 
@@ -56,6 +61,13 @@
     recoveryOn: false, // the /ws hello said the server reads a recovery supervisor store
     recovery: null, // the last RecoveryView
     recoveryError: null, // why the last /api/recovery fetch failed
+    questionsOn: false, // the /ws hello said the server lists open questions
+    questions: null, // the last list of OpenQuestion
+    questionsError: null, // why the last /api/questions fetch failed
+    drafts: new Map(), // question key -> the answer being written
+    sending: new Set(), // question keys whose answer is on its way
+    sent: new Map(), // question key -> AnswerResult, for this page's life
+    answerErrors: new Map(), // question key -> why its answer was not sent
   };
 
   // ---------------------------------------------------------------- DOM helpers
@@ -448,6 +460,163 @@
     );
   }
 
+  // ---------------------------------------------------------------- open questions (ADR 0020)
+
+  const ANSWER_HEADER = "X-SCIO-Answer-Token";
+
+  function answerToken() {
+    const meta = document.querySelector('meta[name="scio-answer-token"]');
+    return meta ? meta.getAttribute("content") || "" : "";
+  }
+
+  function questionKey(q) {
+    return JSON.stringify([q.root, q.thread_id, q.question_id]);
+  }
+
+  // listed and neither answered in its file nor sent from this page: they need the owner
+  function unanswered() {
+    return list(state.questions).filter((q) => !q.answered && !state.sent.has(questionKey(q)));
+  }
+
+  function plural(n, one, many) {
+    return n + " " + (n === 1 ? one : many);
+  }
+
+  function questionIssue(q) {
+    if (q.issue_url) return externalLink(q.issue_url, "issue #" + q.issue_number);
+    if (q.issue_number !== null && q.issue_number !== undefined) {
+      return el("span", { title: "the build has no GitHub repository", text: "issue file #" + q.issue_number });
+    }
+    return el("span", { class: "muted", text: "no issue" });
+  }
+
+  // an AnswerResult as a line: posted and recorded, saved with the post's failure, or saved
+  function sentText(r) {
+    const issue = r && r.issue_number !== null && r.issue_number !== undefined ? "issue #" + r.issue_number : "the issue";
+    if (r && r.posted) return "Posted to " + issue + (r.saved ? "; recorded locally" : "");
+    if (r && r.gh_error) return (r.saved ? "Saved locally; " : "") + "posting to " + issue + " failed: " + r.gh_error;
+    if (r && r.saved) return "Saved to " + r.saved;
+    return "Sent";
+  }
+
+  function answerBox(q, k) {
+    const sending = state.sending.has(k);
+    const area = el("textarea", {
+      class: "q-answer",
+      rows: "3",
+      "data-qkey": k,
+      placeholder: "Your answer; the build gives " + q.feature_id + " a new attempt with it",
+      disabled: sending,
+    });
+    area.value = state.drafts.get(k) || "";
+    area.addEventListener("input", () => state.drafts.set(k, area.value));
+    const button = el("button", { type: "button", class: "q-send", disabled: sending, text: sending ? "Sending..." : "Send" });
+    button.addEventListener("click", () => sendAnswer(q, k));
+    const where = q.gh_repo && q.issue_number !== null && q.issue_number !== undefined
+      ? "posts an answer: comment on issue #" + q.issue_number + " and records it locally"
+      : "writes the answer file " + dash(q.answer_file);
+    const error = state.answerErrors.get(k);
+    return el("div", { class: "q-box" }, [
+      el("label", { class: "q-label" }, [el("span", { class: "q-label-text", text: "Answer " + q.question_id }), area]),
+      el("div", { class: "q-actions" }, [button, el("span", { class: "meta q-where", text: where })]),
+      el("p", { class: "q-error", role: "status", "aria-live": "polite", text: error || "" }),
+    ]);
+  }
+
+  function questionCard(q) {
+    const k = questionKey(q);
+    const sent = state.sent.get(k);
+    const card = el("article", { class: "question-card" + (q.answered || sent ? " q-done" : ""), "data-question": q.question_id, "data-root": q.root }, [
+      el("p", { class: "q-head" }, [
+        el("strong", { class: "q-feature", text: q.feature_id }),
+        " attempt " + q.attempt + (q.milestone ? " · " + q.milestone : "") + (q.product ? " · product " + q.product : "") + " · ",
+        el("a", { class: "tid", href: threadHref(q.root, q.thread_id), text: q.thread_id }),
+      ]),
+      el("p", { class: "q-text", text: q.question || "The attempt recorded no question text." }),
+      el("p", { class: "meta q-meta" }, ["asked ", q.asked_at ? timeEl(q.asked_at) : el("span", { text: "at an unknown time" }), " · ", questionIssue(q)]),
+    ]);
+    // what this page sent says more than the file's answered flag: a failed post stays shown
+    if (sent) card.append(el("p", { class: "q-state" + (sent.gh_error ? " q-warn" : ""), text: sentText(sent) + "; waiting for the build's next pass" }));
+    else if (q.answered) card.append(el("p", { class: "q-state", text: "answered, waiting for the build's next pass" }));
+    else card.append(answerBox(q, k));
+    return card;
+  }
+
+  function questionsSection() {
+    const rows = list(state.questions);
+    if (!rows.length && !state.questionsError) return null;
+    const open = unanswered().length;
+    const section = el("section", { class: "questions-section", "data-questions": String(rows.length) }, [
+      el("h2", { class: "root-name" }, [
+        el("span", { text: "Open questions" }),
+        el("span", { class: "root-path", text: plural(open, "needs", "need") + " an answer · the build reads answers on its next pass" }),
+      ]),
+    ]);
+    if (state.questionsError) section.append(el("p", { class: "error-box", text: "Could not fetch the questions (" + state.questionsError + "); showing the last ones." }));
+    for (const q of rows) section.append(questionCard(q));
+    return section;
+  }
+
+  // the open questions of this build thread, or this feature attempt's
+  function questionsNote(summary) {
+    const mine = list(state.questions).filter(
+      (q) => q.root === summary.root && (q.thread_id === summary.thread_id || q.feature_thread === summary.thread_id),
+    );
+    if (!mine.length) return null;
+    const open = mine.filter((q) => !q.answered && !state.sent.has(questionKey(q))).length;
+    return el("p", { class: "questions-note" }, [
+      el("span", { class: "badge s-waiting", text: plural(mine.length, "open question", "open questions") }),
+      " " + (open ? open + " unanswered: " : "all answered, waiting for the build's next pass · "),
+      el("a", { href: "#/", text: "answer on the threads page" }),
+    ]);
+  }
+
+  function redrawQuestions() {
+    if (state.route.view === "list") renderList(true);
+  }
+
+  async function sendAnswer(q, k) {
+    const text = (state.drafts.get(k) || "").trim();
+    if (!text) {
+      state.answerErrors.set(k, "Write an answer first.");
+      redrawQuestions();
+      return;
+    }
+    if (state.sending.has(k)) return;
+    state.sending.add(k);
+    state.answerErrors.delete(k);
+    redrawQuestions();
+    let ok = false;
+    try {
+      const res = await fetch("/api/answer", {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json", Accept: "application/json", [ANSWER_HEADER]: answerToken() },
+        body: JSON.stringify({ root: q.root, thread: q.thread_id, question_id: q.question_id, text: text }),
+      });
+      let body = null;
+      try {
+        body = await res.json();
+      } catch (err) {
+        body = null;
+      }
+      if (res.ok) {
+        ok = true;
+        state.sent.set(k, body || {});
+        state.drafts.delete(k);
+      } else {
+        const detail = body && typeof body.detail === "string" ? body.detail : "the server answered " + res.status;
+        state.answerErrors.set(k, "Not sent: " + detail);
+      }
+    } catch (err) {
+      state.answerErrors.set(k, "Not sent: " + (err && err.message ? err.message : String(err)));
+    } finally {
+      state.sending.delete(k);
+      redrawQuestions();
+    }
+    if (ok) requestRefresh({}); // an answer file reads as answered on the next fetch
+  }
+
   // ---------------------------------------------------------------- bars (inline SVG)
 
   function bars(map, label, extraLabel) {
@@ -720,6 +889,8 @@
     for (const t of threads) counts.set(t.status, (counts.get(t.status) || 0) + 1);
     const order = ["waiting", "crashed", "stopped", "halted", "in_progress", "done", "error"];
     const chips = order.filter((s) => counts.has(s)).map((s) => el("span", { class: "chip" }, [badge(s), " " + counts.get(s)]));
+    const open = unanswered().length;
+    if (open) chips.unshift(el("span", { class: "chip q-chip" }, [el("span", { class: "badge s-waiting", text: "open questions" }), " " + open]));
     const roots = new Set(threads.map((t) => t.root));
     return el("p", { class: "summary-line" }, [
       el("span", { text: threads.length + (threads.length === 1 ? " thread" : " threads") + " in " + Math.max(roots.size, state.roots.length) + " workspace(s)" }),
@@ -731,6 +902,8 @@
     const frag = document.createDocumentFragment();
     frag.append(el("h1", { class: "page-title", text: "Threads" }));
     frag.append(statusSummary(state.threads));
+    const asked = state.questionsOn ? questionsSection() : null;
+    if (asked) frag.append(asked);
     const byRoot = groupBy(state.threads, (t) => t.root);
     const roots = state.roots.slice();
     for (const name of byRoot.keys()) {
@@ -775,6 +948,8 @@
     if (s.status === "stopped") head.append(stoppedBox(s));
     if (s.error) head.append(errorBox(s));
     for (const box of incidentBoxes(s)) head.append(box);
+    const note = questionsNote(s);
+    if (note) head.append(note);
     return head;
   }
 
@@ -1119,12 +1294,25 @@
     const keys = keepScroll ? openDetailsKeys() : new Set();
     const active = document.activeElement;
     const focusHref = keepScroll && active && main.contains(active) ? active.getAttribute("href") : null;
+    // an answer being typed keeps its focus and caret through a live redraw (its text is in
+    // state.drafts)
+    const typing = keepScroll && active && main.contains(active) && active.dataset && active.dataset.qkey
+      ? { key: active.dataset.qkey, start: active.selectionStart, end: active.selectionEnd, top: active.scrollTop }
+      : null;
     main.replaceChildren(content);
     restoreDetails(keys);
     if (keepScroll) window.scrollTo(0, y);
     if (focusHref) {
       const again = main.querySelector('a[href="' + CSS.escape(focusHref) + '"]');
       if (again) again.focus({ preventScroll: true });
+    }
+    if (typing) {
+      const again = [...main.querySelectorAll("textarea[data-qkey]")].find((t) => t.dataset.qkey === typing.key);
+      if (again && !again.disabled) {
+        again.focus({ preventScroll: true });
+        again.setSelectionRange(typing.start, typing.end);
+        again.scrollTop = typing.top;
+      }
     }
     renderCurrentDiagrams();
   }
@@ -1213,13 +1401,23 @@
     );
   }
 
+  // never rejects, as fetchRecovery
+  function fetchQuestions() {
+    return getJSON("/api/questions").then(
+      (data) => ({ data: data }),
+      (err) => ({ error: err && err.message ? err.message : String(err) }),
+    );
+  }
+
   async function refreshOnce(req) {
     const before = state.threads;
     const wantRecovery = state.recoveryOn;
-    const [roots, threads, recovery] = await Promise.all([
+    const wantQuestions = state.questionsOn;
+    const [roots, threads, recovery, asked] = await Promise.all([
       getJSON("/api/roots"),
       getJSON("/api/threads"),
       wantRecovery ? fetchRecovery() : Promise.resolve(null),
+      wantQuestions ? fetchQuestions() : Promise.resolve(null),
     ]);
     state.roots = list(roots);
     state.threads = list(threads);
@@ -1228,6 +1426,16 @@
       state.recoveryError = null;
     } else if (recovery) {
       state.recoveryError = recovery.error;
+    }
+    if (asked && asked.data) {
+      state.questions = list(asked.data);
+      state.questionsError = null;
+      // a draft and a sent answer stay for the page's life: a root that failed one read drops
+      // out of one list, and its question comes back (each attempt's question has its own id)
+      const listed = new Set(state.questions.map(questionKey));
+      for (const k of [...state.answerErrors.keys()]) if (!listed.has(k)) state.answerErrors.delete(k);
+    } else if (asked) {
+      state.questionsError = asked.error;
     }
     if (!state.graphsLoaded) {
       try {
@@ -1336,6 +1544,11 @@
         if (!recovery) {
           state.recovery = null;
           state.recoveryError = null;
+        }
+        state.questionsOn = Boolean(message && message.questions === true);
+        if (!state.questionsOn) {
+          state.questions = null;
+          state.questionsError = null;
         }
         requestRefresh({ all: true, recovery: recovery });
         return;

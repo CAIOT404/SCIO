@@ -8,6 +8,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 CODE_DIRS = ("scio", "evals", "scripts", "recovery")
 
@@ -47,6 +49,7 @@ def _code_files() -> list[Path]:
     ]
 
 
+@pytest.mark.scan
 def test_every_text_write_in_the_code_directories_passes_newline() -> None:
     found = [
         f"{p.relative_to(ROOT).as_posix()}:{line}"

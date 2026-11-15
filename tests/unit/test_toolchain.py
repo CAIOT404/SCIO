@@ -109,6 +109,7 @@ def _graph_sources() -> list[Path]:
     ]
 
 
+@pytest.mark.scan
 def test_no_stack_specific_command_outside_the_toolchain_package() -> None:
     offenders: list[str] = []
     for path in _graph_sources():
@@ -119,6 +120,7 @@ def test_no_stack_specific_command_outside_the_toolchain_package() -> None:
     assert offenders == [], "\n".join(offenders)
 
 
+@pytest.mark.scan
 def test_every_git_grep_for_a_marker_is_a_fixed_string() -> None:
     """I-090: SCIO's markers (``[scio:bootstrap]``) are regex character classes to git, so a
     ``--grep=`` without ``--fixed-strings`` matches almost any commit message."""

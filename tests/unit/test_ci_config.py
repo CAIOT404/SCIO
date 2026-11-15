@@ -84,6 +84,7 @@ def _expand(path: str, every: set[str]) -> set[str]:
     return {path}
 
 
+@pytest.mark.scan
 def test_ci_shards_cover_every_test_directory() -> None:
     """W-35: the tests job is a matrix of shards whose paths together hold every test file
     under tests/ exactly once, and the pytest step runs the shard's own paths in every shard.
@@ -115,6 +116,7 @@ def test_ci_shards_cover_every_test_directory() -> None:
     assert "uv run pytest $SHARD_PATHS " in step["run"]
 
 
+@pytest.mark.scan
 def test_the_browser_tests_run_in_their_own_shard_on_few_workers() -> None:
     """I-224: with tests/live in the unit shard, Chromium shared one runner with the unit tests'
     dozens of xdist workers, and its 5 to 10 s waits timed out in 2 of 3 runs (#132, #133).

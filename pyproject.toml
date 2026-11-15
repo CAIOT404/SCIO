@@ -80,4 +80,5 @@ testpaths = ["tests"]
 addopts = "-q --strict-markers"
 markers = [
     "live: hits a real provider; needs credentials and SCIO_RUN_LIVE_TESTS=1",
+    "scan: scans the whole codebase for a forbidden construct",
 ]

@@ -309,6 +309,39 @@ def test_a_pass_writes_the_stamp_and_a_dead_gate_leaves_its_running_marker(
     assert f"(pid {left['pid']}) died before it finished" in out and not marker.exists()
 
 
+def test_a_finished_gate_appends_its_time_to_the_machine_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, machine_dir: Path
+) -> None:
+    """Issue #141, "gate and CI time": every finished gate, a pass or a failure, appends one
+    JSON line ``{at, mode, minutes, passed, tree, worktree}`` to ``gate-runs.log`` in the
+    machine directory (where the lock lives), with LF, never inside the repository. A tree
+    that already passed is not gated, so it adds no line; `scripts/metrics.py` reads them."""
+    gate = _load()
+    repo = _repo(tmp_path)
+    monkeypatch.setattr(gate, "ROOT", repo)
+    _fake_steps(gate, monkeypatch)
+    assert gate.main(["--full"]) == 0
+    passed_tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    assert gate.main(["--full"]) == 0  # the same tree: skipped, not a gate run
+    _write(repo, "scio/x/y.py", "Y = 2\n")
+    _fake_steps(gate, monkeypatch, fail="pytest")
+    assert gate.main(["--full"]) == 1
+
+    log = gate.machine_dir() / "gate-runs.log"
+    assert log.is_relative_to(machine_dir)
+    raw = log.read_bytes()
+    assert b"\r" not in raw
+    lines = [json.loads(line) for line in raw.decode("utf-8").splitlines()]
+    assert [(e["mode"], e["passed"]) for e in lines] == [("full", True), ("full", False)]
+    for entry in lines:
+        assert set(entry) == {"at", "mode", "minutes", "passed", "tree", "worktree"}
+        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", entry["at"])
+        assert isinstance(entry["minutes"], float) and 0 <= entry["minutes"] < 5
+        assert entry["worktree"] == str(repo)
+    assert lines[0]["tree"] == passed_tree and lines[1]["tree"] != passed_tree
+    assert not list(repo.rglob("gate-runs.log"))
+
+
 def test_a_tree_that_already_passed_is_not_gated_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -6,6 +6,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 from scio.dashboard.contract import (
     ChangeEvent,
     DataSource,
@@ -55,6 +57,7 @@ def _interrupt_calls(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
     return count
 
 
+@pytest.mark.scan
 def test_every_node_interrupts_at_most_once() -> None:
     """The dashboard reads a stop as answered when a ``__resume__`` write sits beside its
     ``__interrupt__`` (I-134). That is exact only while no node asks twice in one run: both
