@@ -561,6 +561,15 @@ class FeatureRun(BaseModel):
     decision: Literal["retry", "skip", "stop"] | None = None
     """The owner's answer when the run halted (issue #119): only a ``retry`` carries the
     run's verified commits into the next attempt. None when no one was asked."""
+    question: str | None = None
+    """The question this attempt stopped with, as the owner saw it (issue #137): the worker's
+    ``design_question``, else the coder's ``design decision needed: ...`` ledger line, else the
+    stop's own line (``scio.product.build.stop_question``). Set on a ``retry`` that carried an
+    answer, in full; None otherwise and on a run recorded before the field."""
+    answer: str | None = None
+    """The owner's answer after ``retry`` (``retry: <answer>``, issue #137), in full and in
+    the owner's case. Every later attempt of the feature in the milestone reads it, with
+    ``question``, in its task. None on a plain retry, any other decision, and old runs."""
 
 
 class CiStatus(BaseModel):
