@@ -2067,3 +2067,20 @@ Template:
 - Sweep: not yet.
 - Guard: not yet.
 - Resolved: - · Status: open
+
+### I-219 · A bug-fix feature's brief carried its title and criteria, never the bug issue that held the root cause
+- Found: 2026-11-14 · graphcalc P26 ("Bug #14 fix: …"), issue #120 (graphcalc's P26 retrospective) · `scio/product/build.py` (`feature_task`), `scio/context/projections.py` (`debug_message`)
+- Symptom: graphcalc files every calculator bug as an issue in the product repo, with its symptom, a root cause read from the code (file lines), and an audit. The fix is a `PRODUCT.md` feature named for it. P26's brief had no part of issue #14. Coder session 1 spent its whole turn cap (17 min, 33 tool calls) re-deriving the root cause #14 already held: eager `sympify` of stored display strings in `calc.evaluate`. The debugger's brief held none of the task at all, only the step and the failure.
+- Root cause: `feature_task` built the description from PRODUCT.md alone, and nothing read the issues a feature links. `debug_message` took no task.
+- Fix:
+  - `scio/product/bug_context.py`. `linked_issue_numbers` finds `Bug #N`, `#N`, `owner/repo#N` and the product repo's issue URLs (at most 3). `feature_bug_brief` reads them with `--gh` and frames each as the operator's unverified report, in a fence longer than any backtick run in the body, within 4000 characters in all.
+  - `feature_task(linked_issues=…)` appends the result under "## Linked bug issue (the operator's report, not verified)". Both the serial and the parallel call sites compute it with the outer ctx's client.
+  - `debug_message(task=…)` prepends `task_block(task)`, so the debugger reads what the coder read.
+  - Without `--gh`, or with an issue that cannot be read, a ledger note says why and the brief is as before.
+- Sweep: every brief and whether it reads `TaskSpec.description`:
+  - through `task_block`: scope, plan, the T1/T2 coder, the T0 coder, router, review, documenter and gate;
+  - `debug_message` did not; fixed;
+  - `advisor_brief` cuts the description at 600 characters, which is accepted, since the advisor reads the summary;
+  - `intake` would replace the description with an issue body only when a feature run has a GitHub client, and `feature_context` sets none.
+- Guard: `test_a_bug_fix_features_task_and_debugger_brief_carry_its_linked_issue`, and the 17 tests in `tests/unit/test_bug_issue_brief.py`. Guardrail 94.
+- Resolved: 2026-11-14 · Status: resolved

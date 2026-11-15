@@ -5,6 +5,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 ### Fixed
+- A bug-fix feature's brief carries its linked bug issue (`Bug #N`, `#N`, or the product repo's issue URL, read with `--gh`), framed as the operator's unverified report. The debugger's brief now includes the task too. graphcalc's P26 coder spent its whole turn cap re-deriving a root cause that issue #14 already held (issue #120, I-219).
 - A feature retry starts from the newest commit the retried attempts verified, instead of the milestone head, and carries those features as passing. Uncommitted leftovers are still discarded. graphcalc's P26 attempt 4 spent about 32 minutes rebuilding two features attempt 3 had committed (issue #119, I-216).
 - On T1 the explorer runs before the planner, and the planner reads its summary. Every planned path is then checked against the tree: a guessed path is replaced by its one localized match, kept as a probable new file when its folder exists, and dropped only when neither, each choice recorded. graphcalc's P26 planned a `graphcalc/evaluator.py` that did not exist (issue #121, I-213).
 
