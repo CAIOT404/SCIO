@@ -16,6 +16,7 @@ import pytest
 from evals.fake_scripts import Edit, PerThreadResponder, Step, TaskScript
 from evals.product_scripts import PRODUCT_SCRIPTS
 from scio.graph.checkpointer import open_checkpointer
+from scio.graph.effects import effect_key
 from scio.graph.run_context import RunContext
 from scio.harness.core import Harness
 from scio.harness.providers.fake import FakeReply
@@ -28,7 +29,12 @@ from scio.product.build import (
     resume_build,
     run_build,
 )
-from scio.product.parallel import merge_feature, worktrees_root
+from scio.product.parallel import (
+    drop_misplaced_worktrees,
+    ensure_worktree,
+    merge_feature,
+    worktrees_root,
+)
 from scio.product.progress import PRODUCT_MD
 from scio.state.models import MilestonePlan
 from tests.graph.test_product_build_fake import (
@@ -89,8 +95,12 @@ def _bootstrap(tmp_path: Path, responder: Responder) -> Harness:
     return harness
 
 
-def _build_ctx(tmp_path: Path, harness: Harness, n: int) -> RunContext:
-    """The build context with ``parallel_features=n``; a second call is a fresh process."""
+def _build_ctx(
+    tmp_path: Path, harness: Harness, n: int, work_dir: Path | None = None
+) -> RunContext:
+    """The build context with ``parallel_features=n``; a second call is a fresh process.
+    ``work_dir`` defaults to ``tmp_path/.scio``, absolute; ``scio build`` passes none, so
+    its work directory is the relative ``.scio`` of the workspace it runs in (I-229)."""
     return RunContext.create(
         thread_id=THREAD,
         sandbox_root=tmp_path / "product",
@@ -98,7 +108,7 @@ def _build_ctx(tmp_path: Path, harness: Harness, n: int) -> RunContext:
         tier_pin="T1",
         settings=harness.settings.model_copy(update={"parallel_features": n}),
         harness=harness,
-        work_dir=tmp_path / ".scio",
+        work_dir=work_dir or tmp_path / ".scio",
     )
 
 
@@ -628,3 +638,117 @@ def test_a_finished_worktree_is_removed_from_a_deep_work_dir(
         ctx.close()
     assert len(_worktrees(base / "product")) == 1  # git forgot them either way
     assert not tree.exists() and not (worktrees_root(ctx) / _thread("P2")).exists()
+
+
+def _relative_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunContext:
+    """The live layout (I-229, #142): ``scio build`` runs in the workspace (``tmp_path``) and
+    passes no work directory, so it is the relative ``.scio``; the product tree is
+    ``tmp_path/product``, the directory every git command of the batch runs in."""
+    harness = _bootstrap(tmp_path, PerThreadResponder(independent=True))
+    monkeypatch.chdir(tmp_path)
+    return _build_ctx(tmp_path, harness, 2, work_dir=Path(".scio"))
+
+
+def test_a_batch_from_a_relative_work_dir_builds_each_feature_in_its_own_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The incident of #142: from a relative work directory, ``git worktree add`` (run in the
+    product tree) put each worktree inside the product, the feature's sandbox (resolved in
+    the workspace) was an empty directory, and ``prepare_repo``'s clone failed with
+    "repository '.scio/worktrees/...' does not exist". The batch must reach the milestone,
+    every worktree outside the product tree and gone when the batch returns."""
+    ctx = _relative_build(tmp_path, monkeypatch)
+    repo = tmp_path / "product"
+    try:
+        out = run_build(ctx)
+        s = out.state
+        assert out.paused and s.phase == "merge_wait", s.ledger[-4:]
+    finally:
+        ctx.close()
+    assert [(r.feature_id, r.attempt, r.status) for r in s.feature_runs] == [
+        ("P1", 1, "passed"),
+        ("P2", 1, "passed"),
+    ]
+    assert worktrees_root(ctx).is_absolute()
+    assert not (repo / ".scio" / "worktrees").exists()  # never inside the product tree
+    assert "worktrees" not in _git(repo, "status", "--porcelain")
+    assert len(_worktrees(repo)) == 1  # the product tree only
+
+
+def test_a_worktree_recorded_at_a_relative_path_is_added_again_where_it_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What #142's crash left for the next ``scio build``: the effect ``worktree:<thread>`` is
+    done with the relative path, and the workspace holds the empty directory the feature's
+    sandbox made there. The batch runs again with the same thread (no attempt was
+    recorded), so ``ensure_worktree`` must return an absolute path that is a worktree at the
+    milestone head, not the stale record."""
+    ctx = _relative_build(tmp_path, monkeypatch)
+    repo = tmp_path / "product"
+    thread = _thread("P1", 2)
+    intent = f"worktree:{thread}"
+    try:
+        key = effect_key(ctx.thread_id, "feature", intent)
+        ctx.effects.start(key, "feature", intent)
+        ctx.effects.finish(key, str(Path(".scio") / "worktrees" / thread))
+        empty = tmp_path / ".scio" / "worktrees" / thread
+        empty.mkdir(parents=True)  # what the feature's LocalSandbox made
+        head = _git(repo, "rev-parse", "HEAD")
+        tree = ensure_worktree(ctx, thread, head)
+    finally:
+        ctx.close()
+    assert tree.is_absolute(), tree
+    assert tree.samefile(empty)
+    assert (tree / ".git").is_file()
+    assert _git(tree, "rev-parse", "HEAD") == head
+    assert not (repo / ".scio" / "worktrees").exists()
+
+
+def test_a_worktree_left_inside_the_product_tree_is_removed_before_the_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#142 also left the batch's worktrees registered inside the product tree, at
+    ``.scio/worktrees/<thread>``: untracked, kept by ``git clean -fd``, and a serial
+    feature's ``git add -A`` there would commit them as embedded repositories. The next
+    batch removes them first, says so in the ledger, and builds as usual."""
+    ctx = _relative_build(tmp_path, monkeypatch)
+    repo = tmp_path / "product"
+    left = repo / ".scio" / "worktrees" / _thread("P1")
+    _git(repo, "worktree", "add", "-q", "--detach", left.relative_to(repo).as_posix(), "HEAD")
+    assert len(_worktrees(repo)) == 2 and (left / ".git").is_file()
+    try:
+        out = run_build(ctx)
+        s = out.state
+        assert out.paused and s.phase == "merge_wait", s.ledger[-4:]
+    finally:
+        ctx.close()
+    assert [(r.feature_id, r.status) for r in s.feature_runs] == [
+        ("P1", "passed"),
+        ("P2", "passed"),
+    ]
+    texts = [e.text for e in s.ledger]
+    assert any("removed worktree" in t and "inside the product tree (I-229)" in t for t in texts)
+    assert not left.exists()
+    assert len(_worktrees(repo)) == 1  # the product tree only
+    assert "worktrees" not in _git(repo, "status", "--porcelain")
+
+
+def test_a_worktree_under_the_work_dir_inside_the_product_tree_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A build run from inside the product tree has its work directory there, so a halted
+    feature's worktree, kept for its decision, sits in the product's ``.scio/worktrees``
+    too: that one is the feature's own and stays."""
+    harness = _bootstrap(tmp_path, PerThreadResponder(independent=True))
+    repo = tmp_path / "product"
+    monkeypatch.chdir(repo)
+    ctx = _build_ctx(tmp_path, harness, 2, work_dir=Path(".scio"))
+    try:
+        head = _git(repo, "rev-parse", "HEAD")
+        tree = ensure_worktree(ctx, _thread("P1"), head)
+        assert tree.is_relative_to((repo / ".scio" / "worktrees").resolve())
+        assert drop_misplaced_worktrees(ctx) == []
+    finally:
+        ctx.close()
+    assert (tree / ".git").is_file()
+    assert len(_worktrees(repo)) == 2
