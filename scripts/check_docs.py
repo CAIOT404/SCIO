@@ -14,6 +14,13 @@ fragments, one file each: ``docs/ledger/I-NNN.md``, ``docs/guardrails/NNN.md`` a
 ``changes/unreleased/<n>-<slug>.<kind>.md``. Every check here reads them there, and fails on
 an entry, rule or change still written into ``docs/ISSUE_LEDGER.md``,
 ``docs/LESSONS_LEARNED.md`` or CHANGELOG.md's ``[Unreleased]``.
+
+Issue #141 (the guardrail review) gives a rule file an optional status line, ``Status:
+merged into <n>`` or ``Status: retired: `<guard>` enforces it``, and generates the active
+rules a review read into ``docs/guardrails/ACTIVE.md``: ``check_guardrails`` checks the
+status lines, and ``check_active_guardrails`` fails when that list drifts from the rules up
+to its cut-off. A rule added after the review needs no change there. ``--active`` prints
+every active rule; ``--write-active`` writes ACTIVE.md at a review.
 """
 
 from __future__ import annotations
@@ -21,7 +28,8 @@ from __future__ import annotations
 import importlib.util
 import re
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 
@@ -463,19 +471,82 @@ def check_ledger_statuses(root: Path | None = None) -> list[str]:
     return [f"{LEDGER_DIR.as_posix()}: {e}" for e in problems] + ledger_fragment_problems(root)
 
 
+LEDGER_ID_RE = re.compile(r"\bI-\d{3}\b")
+MERGED_STATUS_RE = re.compile(r"^Status: merged into (\d+)$")
+RETIRED_STATUS_RE = re.compile(r"^Status: retired: (?P<guards>`[^`]+`(?:, `[^`]+`)*) enforces? it$")
+"""A rule's status line (issue #141): ``Status: merged into <n>``, or ``Status: retired:
+`<kind>:<name>` enforces it`` (several guards: ``, ``-separated, ``enforce it``). An active
+rule has no status line."""
+
+
+def guardrail_status_problems(
+    rules: list[str], statuses: Mapping[str, str], exists: Callable[[str, str], bool]
+) -> list[str]:
+    """The guardrail review's status lines (issue #141), keyed by rule number. A merged rule's
+    target exists, is active and cites every ledger id the merged rule cites; a retired rule
+    names a hook, check, test or symbol that exists, never ``manual:``, which enforces nothing.
+    Any other ``Status:`` line is malformed."""
+    by_number = {rule.split(".", 1)[0]: rule for rule in rules}
+    errors: list[str] = []
+    for n in sorted(statuses, key=lambda k: int(k) if k.isdigit() else 0):
+        status = statuses[n]
+        merged = MERGED_STATUS_RE.match(status)
+        retired = RETIRED_STATUS_RE.match(status)
+        guards = list(GUARD_RE.finditer(retired.group("guards"))) if retired else []
+        if not (merged or retired) or any(m.group(1) == "manual" for m in guards):
+            errors.append(
+                f"guardrail {n}: the status line is malformed ({status!r}); write 'Status: "
+                "merged into <n>' or 'Status: retired: `<kind>:<name>` enforces it', where "
+                "the guard is a hook:, check:, test: or symbol: that fully enforces the rule"
+            )
+            continue
+        if retired:
+            for m in guards:
+                kind, name = m.group(1), m.group(2).strip()
+                if not exists(kind, name):
+                    errors.append(f"guardrail {n}: retired by {kind}:{name}, which does not exist")
+            continue
+        assert merged is not None
+        target = str(int(merged.group(1)))
+        if target == n:
+            errors.append(f"guardrail {n}: merged into itself")
+        elif target not in by_number:
+            errors.append(f"guardrail {n}: merged into {target}, which does not exist")
+        elif target in statuses:
+            errors.append(
+                f"guardrail {n}: merged into {target}, which is not active; merge into an "
+                "active rule"
+            )
+        else:
+            target_ids = set(LEDGER_ID_RE.findall(by_number[target]))
+            errors += [
+                f"guardrail {n}: merged into {target}, which does not cite {lid}"
+                for lid in dict.fromkeys(LEDGER_ID_RE.findall(by_number.get(n, "")))
+                if lid not in target_ids
+            ]
+    return errors
+
+
 def guardrail_problems(
-    rules: list[str], resolved: list[str], exists: Callable[[str, str], bool]
+    rules: list[str],
+    resolved: list[str],
+    exists: Callable[[str, str], bool],
+    statuses: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Each rule starts with Always or Never and names guards that exist (``exists(kind,
     name)``); a ``manual:`` guard carries its reason after the token. Every resolved id is
-    cited by some rule."""
+    cited by some rule. With ``statuses`` (rule number to its status line, issue #141), the
+    status lines are checked too, and a resolved id is covered when an active or a retired
+    rule cites it: a merged rule covers its ids through its target, which must cite them."""
+    statuses = statuses or {}
     errors: list[str] = []
     cited: set[str] = set()
     for rule in rules:
         n = rule.split(".", 1)[0]
         if not GUARDRAIL_START_RE.match(rule):
             errors.append(f"guardrail {n}: must start with **Always** or **Never**")
-        cited |= set(re.findall(r"\bI-\d{3}\b", rule))
+        if not MERGED_STATUS_RE.match(statuses.get(n, "")):
+            cited |= set(LEDGER_ID_RE.findall(rule))
         guard_text = rule.split("Guard:", 1)[1] if "Guard:" in rule else ""
         guards = list(GUARD_RE.finditer(guard_text))
         if not guards:
@@ -487,6 +558,7 @@ def guardrail_problems(
                     errors.append(f"guardrail {n}: a manual guard needs its reason after it")
             elif not exists(kind, name):
                 errors.append(f"guardrail {n}: {kind}:{name} does not exist")
+    errors += guardrail_status_problems(rules, statuses, exists)
     for lid in resolved:
         if lid not in cited:
             errors.append(f"{lid} is resolved but no guardrail cites it; add an Always/Never rule")
@@ -534,21 +606,46 @@ def guardrail_fragments(root: Path | None = None) -> list[Path]:
     return [p for m, p in sorted(named, key=lambda mp: int(mp[0].group(1)))]
 
 
+GUARDRAIL_ACTIVE = GUARDRAIL_DIR / "ACTIVE.md"
+"""The reading list a review writes (issue #141): the active rules up to its cut-off, in
+number order, generated by ``WRITE_ACTIVE``; ``check_active_guardrails`` fails when it
+drifts from those rules. ``LIST_ACTIVE`` adds the rules after the cut-off."""
+GUARDRAIL_DOCS = {"README.md", "ACTIVE.md"}
+"""The files in ``docs/guardrails/`` that are not rules."""
+WRITE_ACTIVE = "uv run python scripts/check_docs.py --write-active"
+LIST_ACTIVE = "uv run python scripts/check_docs.py --active"
+
+
+def _guardrail_lines(p: Path) -> list[str]:
+    return [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def _status_line(lines: list[str]) -> str | None:
+    """A rule file's status: its second line, when that reads as one (issue #141)."""
+    return lines[1] if len(lines) == 2 and lines[1].startswith("Status:") else None
+
+
 def guardrail_fragment_rules(root: Path | None = None) -> list[str]:
     """The rule lines of the guardrail files, in number order: what ``guardrail_rules``
-    read from LESSONS_LEARNED.md before the fragments."""
-    return [
-        ln
+    read from LESSONS_LEARNED.md before the fragments. A status line is not a rule."""
+    return [lines[0] for p in guardrail_fragments(root) if (lines := _guardrail_lines(p))]
+
+
+def guardrail_fragment_statuses(root: Path | None = None) -> dict[str, str]:
+    """Rule number to status line, for each rule file that has one (issue #141): ``Status:
+    merged into <n>`` or ``Status: retired: `<kind>:<name>` enforces it``."""
+    return {
+        str(int(p.stem)): status
         for p in guardrail_fragments(root)
-        for ln in p.read_text(encoding="utf-8").splitlines()
-        if ln.strip()
-    ]
+        if (status := _status_line(_guardrail_lines(p))) is not None
+    }
 
 
 def guardrail_fragment_problems(root: Path | None = None) -> list[str]:
-    """Each file in ``docs/guardrails/`` is one rule line in a file named by its number, and
-    the ``## Guardrails`` section of LESSONS_LEARNED.md holds no rule: a rule written there
-    would be read by no check (a branch that predates the fragments)."""
+    """Each file in ``docs/guardrails/`` is one rule line in a file named by its number, with
+    at most a ``Status:`` line under it (issue #141), and the ``## Guardrails`` section of
+    LESSONS_LEARNED.md holds no rule: a rule written there would be read by no check (a
+    branch that predates the fragments)."""
     root = root or ROOT
     folder = root / GUARDRAIL_DIR
     rel = GUARDRAIL_DIR.as_posix()
@@ -556,13 +653,19 @@ def guardrail_fragment_problems(root: Path | None = None) -> list[str]:
     if folder.is_dir():
         for p in sorted(folder.iterdir()):
             m = GUARDRAIL_FRAGMENT_RE.match(p.name)
-            if p.name != "README.md" and (m is None or p.name != f"{int(m.group(1)):03d}.md"):
+            if p.name not in GUARDRAIL_DOCS and (
+                m is None or p.name != f"{int(m.group(1)):03d}.md"
+            ):
                 errors.append(f"{rel}/{p.name}: not a rule's name; a rule is {rel}/NNN.md")
     for p in guardrail_fragments(root):
-        lines = [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
-        number = re.match(r"^(\d+)\. ", lines[0]) if len(lines) == 1 else None
-        if len(lines) != 1:
-            errors.append(f"{rel}/{p.name}: holds {len(lines)} lines; a rule is one line")
+        lines = _guardrail_lines(p)
+        well_formed = len(lines) == 1 or _status_line(lines) is not None
+        number = re.match(r"^(\d+)\. ", lines[0]) if well_formed else None
+        if not well_formed:
+            errors.append(
+                f"{rel}/{p.name}: holds {len(lines)} lines; a rule is one line, with at most "
+                "a 'Status:' line under it"
+            )
         elif number is None or int(number.group(1)) != int(p.stem):
             got = number.group(1) if number else "no number"
             errors.append(f"{rel}/{p.name}: holds rule {got}; its file name says {int(p.stem)}")
@@ -578,18 +681,148 @@ def guardrail_fragment_problems(root: Path | None = None) -> list[str]:
 
 def check_guardrails(root: Path | None = None) -> list[str]:
     """The Always/Never rules are enforced, not just written (issue #61): every resolved
-    ledger entry from I-104 on is cited by a rule, and every guard a rule names exists. The
-    rules are read from ``docs/guardrails/`` and the entries from ``docs/ledger/`` (W-38,
-    W-39)."""
+    ledger entry from I-104 on is cited by an active or a retired rule, every guard a rule
+    names exists, and every status line holds (issue #141). The rules are read from
+    ``docs/guardrails/`` and the entries from ``docs/ledger/`` (W-38, W-39)."""
     root = root or ROOT
     problems = guardrail_problems(
         guardrail_fragment_rules(root),
         resolved_ledger_ids(read_ledger(root)),
         lambda kind, name: guard_exists(kind, name, root),
+        guardrail_fragment_statuses(root),
     )
     return [f"{GUARDRAIL_DIR.as_posix()}: {e}" for e in problems] + guardrail_fragment_problems(
         root
     )
+
+
+REVIEWED_RE = re.compile(r"^Reviewed through rule (\d+) on (\d{4}-\d{2}-\d{2})\.$", re.MULTILINE)
+"""ACTIVE.md's cut-off line: the last rule the review read, and the review's date."""
+
+
+def _rule_lines(root: Path) -> dict[int, str]:
+    """Rule number to its rule line, in number order."""
+    return {
+        int(p.stem): lines[0] for p in guardrail_fragments(root) if (lines := _guardrail_lines(p))
+    }
+
+
+def active_guardrails_markdown(root: Path | None, through: int, on: str) -> str:
+    """``docs/guardrails/ACTIVE.md`` as the rule files make it at a review that read rules 1
+    to ``through`` on the date ``on`` (issue #141): every one of those rules with no status
+    line, in number order, each with the rules merged into it; then the numbers of the
+    retired ones. A rule numbered after ``through`` is not in it: it is active until the next
+    review, and ``--active`` lists it. A rule's number is written ``**N.**``, so Markdown
+    never renumbers the list."""
+    root = root or ROOT
+    rules = {n: line for n, line in _rule_lines(root).items() if n <= through}
+    statuses = {int(n): s for n, s in guardrail_fragment_statuses(root).items() if int(n) in rules}
+    merged_into: dict[int, list[str]] = {}
+    retired: list[str] = []
+    for n, status in statuses.items():
+        if m := MERGED_STATUS_RE.match(status):
+            merged_into.setdefault(int(m.group(1)), []).append(str(n))
+        elif RETIRED_STATUS_RE.match(status):
+            retired.append(str(n))
+    active = [n for n in rules if n not in statuses]
+    out = [
+        "# Active guardrails",
+        "",
+        f"Reviewed through rule {through} on {on}.",
+        "",
+        f"The rules a session reads: {len(active)} of rules 1 to {through} are active, the "
+        "rule files with no status line, in number order. The others are merged into an "
+        "active rule or retired because a guard enforces them; [README.md](README.md) says "
+        "how.",
+        "",
+        f"Generated at the review by `{WRITE_ACTIVE}`; never edit it by hand. The docs check "
+        f"fails when it differs from rules 1 to {through}.",
+        "",
+    ]
+    for n in active:
+        number, _, text = rules[n].partition(". ")
+        out.append(f"**{number}.** {text}")
+        if n in merged_into:
+            out.append(f"*Merged here: {', '.join(merged_into[n])}.*")
+        out.append("")
+    if retired:
+        out += [
+            f"Retired, each enforced by the guard on its status line: {', '.join(retired)}.",
+            "",
+        ]
+    out += [
+        f"Rules after {through} are active until the next review: `{LIST_ACTIVE}` lists them all.",
+        "",
+    ]
+    return "\n".join(out)
+
+
+def write_active_guardrails(root: Path | None = None, on: str | None = None) -> Path:
+    """Write ``docs/guardrails/ACTIVE.md`` at a review, LF endings. The review reads every
+    rule there is, so its cut-off is the highest rule number; ``on`` is its date, by default
+    today in UTC, as ``ledger_new.py`` dates an entry."""
+    root = root or ROOT
+    through = max(_rule_lines(root), default=0)
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    text = active_guardrails_markdown(root, through, on or today)
+    path = root / GUARDRAIL_ACTIVE
+    path.write_text(text, encoding="utf-8", newline="\n")
+    return path
+
+
+def reviewed_through(root: Path | None = None) -> tuple[int, str] | None:
+    """``(cut-off, date)`` from ACTIVE.md's ``Reviewed through rule N on DATE.`` line."""
+    path = (root or ROOT) / GUARDRAIL_ACTIVE
+    m = REVIEWED_RE.search(path.read_text(encoding="utf-8")) if path.is_file() else None
+    return (int(m.group(1)), m.group(2)) if m else None
+
+
+def active_listing(root: Path | None = None) -> str:
+    """Every active rule, for a session to read in one list (``--active``): ACTIVE.md's,
+    which the review read, and every rule numbered after its cut-off that has no status
+    line. Each rule line is printed as it is written in its file."""
+    root = root or ROOT
+    cut = reviewed_through(root)
+    through = cut[0] if cut else 0
+    statuses = guardrail_fragment_statuses(root)
+    active = [(n, line) for n, line in _rule_lines(root).items() if str(n) not in statuses]
+    later = sum(1 for n, _ in active if n > through)
+    head = (
+        f"Active guardrails: {len(active)} rules, reviewed through rule {cut[0]} on {cut[1]}, "
+        f"{later} added since."
+        if cut
+        else f"Active guardrails: {len(active)} rules; no review yet ({WRITE_ACTIVE})."
+    )
+    return "\n\n".join([head, *(line for _, line in active)]) + "\n"
+
+
+def check_active_guardrails(root: Path | None = None) -> list[str]:
+    """The reading list matches the rules the review read (issue #141):
+    ``docs/guardrails/ACTIVE.md`` holds exactly the active rules numbered up to its cut-off,
+    in number order. One of them changed, merged or retired without writing the list again
+    is drift. A rule added after the review needs no change here: it is active until the
+    next review, and ``--active`` lists it with the rest, so pull requests that add rules
+    never touch one shared file (W-38)."""
+    root = root or ROOT
+    if not guardrail_fragments(root):
+        return []
+    path = root / GUARDRAIL_ACTIVE
+    rel = GUARDRAIL_ACTIVE.as_posix()
+    if not path.is_file():
+        return [f"{rel} is missing; `{WRITE_ACTIVE}` writes it at a review"]
+    cut = reviewed_through(root)
+    if cut is None:
+        return [
+            f"{rel} has no 'Reviewed through rule <N> on <YYYY-MM-DD>.' line; "
+            f"`{WRITE_ACTIVE}` writes it at a review"
+        ]
+    if path.read_text(encoding="utf-8") != active_guardrails_markdown(root, *cut):
+        return [
+            f"{rel} does not match rules 1 to {cut[0]}, which the review read: one was "
+            f"changed, merged or retired since, or the file was edited. A review runs "
+            f"`{WRITE_ACTIVE}` and commits the result"
+        ]
+    return []
 
 
 def check_workflow_checklist() -> list[str]:
@@ -612,7 +845,32 @@ def check_workflow_checklist() -> list[str]:
     ]
 
 
-def main() -> int:
+def _print_utf8(text: str) -> None:
+    """Print ``text`` as UTF-8 whatever the console's code page: a rule may hold a ``·``."""
+    sys.stdout.flush()
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is None:
+        sys.stdout.write(text)
+    else:
+        buffer.write(text.encode("utf-8"))
+        buffer.flush()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run every docs check. ``--active`` prints every active guardrail instead, and
+    ``--write-active`` writes ``docs/guardrails/ACTIVE.md`` at a guardrail review (issue
+    #141). Only the command line passes ``argv``: a caller in a test runs the checks."""
+    args = argv or []
+    if args == ["--active"]:
+        _print_utf8(active_listing())
+        return 0
+    if args == ["--write-active"]:
+        path = write_active_guardrails()
+        print(f"docs-check: wrote {path.relative_to(ROOT).as_posix()}")
+        return 0
+    if args:
+        print("usage: check_docs.py [--active | --write-active]")
+        return 2
     errors = (
         check_links()
         + check_model_ids()
@@ -623,6 +881,7 @@ def main() -> int:
         + check_ignored_sources()
         + check_graph_sections()
         + check_guardrails()
+        + check_active_guardrails()
         + check_scheduled_task_recipes()
         + check_ledger_statuses()
         + check_workflow_checklist()
@@ -634,4 +893,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

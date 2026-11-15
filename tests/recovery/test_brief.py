@@ -185,6 +185,10 @@ def test_it_names_the_files_to_read_first(tmp_path: Path) -> None:
     ):
         assert f"`{path}`" in read_first
     assert "Guardrails (Always / Never)" in read_first
+    # the active rules through the one listing, never every file: since the guardrail
+    # review (#141) a rule file may be merged or retired, and ACTIVE.md stops at its cut-off
+    assert "`uv run python scripts/check_docs.py --active`" in read_first
+    assert "cat docs/guardrails/" not in brief(tmp_path)
     contract = section(brief(tmp_path), "## Your contract")
     assert "`docs/ledger/I-NNN.md`" in contract and "scripts/ledger_new.py" in contract
     assert "`docs/guardrails/NNN.md`" in contract

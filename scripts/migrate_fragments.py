@@ -67,9 +67,10 @@ GUARDRAIL_MARK = "**The rules are files**"
 GUARDRAIL_POINTER = (
     f"{GUARDRAIL_MARK}, one per rule, named by its number: `docs/guardrails/NNN.md`, three "
     "digits (issue #122, W-39). Each holds its one rule line, as it would read in a numbered "
-    "list here. [guardrails/](guardrails/) holds them: `cat docs/guardrails/*.md` prints them "
-    "in order, and `uv run python scripts/next_ids.py` gives the next number. "
-    "`check_guardrails` reads them there, and fails on a rule written into this section.\n"
+    "list here. [guardrails/](guardrails/) holds them: `uv run python scripts/check_docs.py "
+    "--active` prints every active rule in order, and `uv run python scripts/next_ids.py` gives "
+    "the next number. `check_guardrails` reads them there, and fails on a rule written into "
+    "this section.\n"
 )
 CHANGES_POINTER = (
     "The unreleased changes are files, one per change, in `changes/unreleased/` (issue #122, "
