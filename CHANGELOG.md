@@ -4,6 +4,9 @@ All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- On T1 the explorer runs before the planner, and the planner reads its summary. Every planned path is then checked against the tree: a guessed path is replaced by its one localized match, kept as a probable new file when its folder exists, and dropped only when neither, each choice recorded. graphcalc's P26 planned a `graphcalc/evaluator.py` that did not exist (issue #121, I-213).
+
 ### Added
 - Session tools (issue #122, W-20 to W-29):
   - `scripts/session_state.py` is the state-first inspection in one command; with `--markdown` it gives the handoff's facts, which a `Stop` hook writes to `.scio/session-state.md`.

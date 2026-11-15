@@ -4,16 +4,21 @@
 Explorers are read-only and run in parallel through LangGraph ``Send``; their results
 reduce into ``explorer_summaries`` as artifact references of at most ~1.5k tokens each.
 
-T1 plans before it explores, so the planner's ``files_expected`` are guesses. ``localize``
-adds the files its explorer found to every open step, so plan drift compares the diff with
-files that exist (I-151).
+Both planned tiers explore before they plan (issue #121): T2 runs ``scope`` and its
+explorers, T1 runs one ``localize`` explorer, and the planner reads their summaries. Every
+plan (the planner's, a replan's, the advisor's ``revised_steps``) then passes
+:func:`keep_localized_files`: each open step's ``files_expected`` is grounded in the tree
+(:func:`ground_plan`), T1 adds the files its explorer found to every open step so plan
+drift compares the diff with files that exist (I-151, I-166), and a test filter that
+selects nothing is flagged (:func:`unmatched_test_filters`).
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
+from pathlib import PurePosixPath
 from typing import Any
 
 from langgraph.types import Send
@@ -27,7 +32,7 @@ from scio.context.projections import (
     scope_message,
 )
 from scio.graph.effects import run_effect
-from scio.graph.nodes.common import fact, git_out
+from scio.graph.nodes.common import fact, git_out, untracked_files
 from scio.graph.run_context import RunContext
 from scio.harness.failures import BudgetExceeded
 from scio.harness.types import Message
@@ -40,6 +45,7 @@ from scio.state.models import (
     ExitReason,
     ExplorerSummary,
     FeatureItem,
+    FeatureStatus,
     Plan,
     PlannerOutput,
     PlanStep,
@@ -238,18 +244,23 @@ def localized_files(
 
 
 def add_localized_files(
-    plan: Plan, files: list[str], *, root: str | None = None
+    plan: Plan,
+    files: list[str],
+    *,
+    root: str | None = None,
+    named: Collection[str] = (),
 ) -> tuple[Plan, dict[str, list[str]]]:
     """``plan`` with ``files`` added to each open step's ``files_expected`` (I-151).
 
-    Planned files stay, even missing ones: a plan may name a file to create. A step that
-    names no files keeps none, since an empty ``files_expected`` turns the drift check off.
-    Returns the plan (same version) and the files added per step id.
+    Planned files stay. A step that names no files keeps none, since an empty
+    ``files_expected`` turns the drift check off; a step in ``named`` (it named files that
+    grounding then dropped, issue #121) gets them all the same. Returns the plan (same
+    version) and the files added per step id.
     """
     added: dict[str, list[str]] = {}
     steps: list[PlanStep] = []
     for s in plan.steps:
-        if not s.done and s.files_expected:
+        if not s.done and (s.files_expected or s.id in named):
             have = {drift_norm(f, root) for f in s.files_expected}
             new = [f for f in files if drift_norm(f, root) not in have]
             if new:
@@ -259,14 +270,16 @@ def add_localized_files(
     return plan.model_copy(update={"steps": steps}), added
 
 
-def _localize_plan(ctx: RunContext, plan: Plan, summary: ExplorerSummary) -> tuple[Plan, str]:
+def _localize_plan(
+    ctx: RunContext, plan: Plan, summary: ExplorerSummary, *, named: Collection[str] = ()
+) -> tuple[Plan, str]:
     files = localized_files(
         summary,
         tracked=_tracked_files(ctx),
         is_source=ctx.toolchain.is_source,
         root=ctx.sandbox.root,
     )
-    new_plan, added = add_localized_files(plan, files, root=ctx.sandbox.root)
+    new_plan, added = add_localized_files(plan, files, root=ctx.sandbox.root, named=named)
     if not files:
         return new_plan, "no files added to the plan (the explorer named no tracked source file)"
     if not added:
@@ -290,8 +303,14 @@ def explore(ctx: RunContext) -> Callable[[dict[str, Any]], dict[str, Any]]:
 
 
 def localize(ctx: RunContext) -> Node:
-    """T1: a single explorer answers where/how the first step should be implemented, and
-    the files it found join every open step's ``files_expected`` (I-151)."""
+    """T1: a single explorer answers where the task should be implemented and tested,
+    before the first plan, and ``plan`` reads its summary (issue #121). It runs once per
+    run: replans (the advisor's, the gate's) return to ``plan``, never here. The files it
+    found join every open step's ``files_expected`` in :func:`keep_localized_files` (I-151).
+
+    A checkpoint from before issue #121 can still reach it after ``post_plan``; then it
+    adds its files to that plan here, as it did, and :func:`after_localize` goes on to
+    ``implement``."""
 
     def node(state: SCIOState) -> dict[str, Any]:
         question = localize_question(state.current_step(), state.task)
@@ -301,19 +320,27 @@ def localize(ctx: RunContext) -> Node:
             entry = fact(f"budget exhausted at localize: {exc.message}", source=Role.SYSTEM)
             return {"exit_reason": ExitReason.BUDGET, "task_ledger": [entry], **ctx.budget_update()}
         entries = [fact("localize: repository context gathered", source=Role.EXPLORER)]
-        update: dict[str, Any] = {}
+        update: dict[str, Any] = {"phase": "plan"}
         if state.plan is not None:
             update["plan"], note = _localize_plan(ctx, state.plan, summary)
+            update["phase"] = "implement"
             entries.append(fact(f"localize: {note}", source=Role.SYSTEM))
         return {
             **update,
             "explorer_summaries": [ref],
             "task_ledger": entries,
-            "phase": "implement",
             **ctx.budget_update(),
         }
 
     return node
+
+
+def after_localize(state: SCIOState) -> str:
+    """``plan`` with the explorer's summary; ``implement`` when a plan exists already (a
+    checkpoint from before issue #121, where localize ran after ``post_plan``)."""
+    if state.exit_reason is not None:
+        return "halt"
+    return "implement" if state.plan is not None else "plan"
 
 
 _NOOP_STEP_RE = re.compile(
@@ -380,19 +407,268 @@ def _stored_summary(ctx: RunContext, ref: ArtifactRef) -> ExplorerSummary | None
         return None
 
 
-def keep_localized_files(ctx: RunContext, state: SCIOState, plan: Plan) -> tuple[Plan, list[str]]:
-    """``plan`` with the T1 localize explorer's files merged back into its open steps
-    (I-151). Every replan (the planner's, or the advisor's ``revised_steps``) names its files
-    again without exploring, and localize runs once per T1 run (build.py), so the files it
-    found would drop out and drift would fire on them again. Returns the notes to record."""
-    if state.routing is None or state.routing.tier is not Tier.T1:
-        return plan, []
+_WRITES_RE = re.compile(
+    r"\b(add|adds|adding|create|creates|creating|write|writes|writing|new|tests?)\b",
+    re.IGNORECASE,
+)
+"""A step whose text says it writes something: a test path it names may be new (#121)."""
+_FILTER_TERM_RE = re.compile(r"[\w.\-]+")
+_FILTER_KEYWORDS = frozenset({"and", "or", "not"})
+
+
+def _ancestors(paths: Iterable[str]) -> set[str]:
+    """Every directory that holds one of ``paths`` (``a/b/c.py`` gives ``a`` and ``a/b``)."""
+    out: set[str] = set()
+    for p in paths:
+        parts = p.split("/")
+        out.update("/".join(parts[:i]) for i in range(1, len(parts)))
+    return out
+
+
+def _parent(path: str) -> str:
+    parent = str(PurePosixPath(path).parent)
+    return "" if parent == "." else parent
+
+
+def _grounded_match(
+    path: str, *, localized: list[str], known: dict[str, str], listed: set[str]
+) -> tuple[str, str] | None:
+    """The obvious existing file a missing ``path`` meant, and where it came from, or None.
+
+    1. ``tree``: the one file in the tree whose path ends with ``path`` (spelled short);
+    2. ``localized``: the one file the explorer found with the same basename;
+    3. ``localized``: the one file the explorer found in the same directory that the step
+       does not list already. Anything less certain is no match.
+    """
+    hit = _resolve(path, None, known)
+    if hit is not None:
+        return hit, "tree"
+    name = PurePosixPath(path).name
+    same = [f for f in localized if PurePosixPath(f).name == name]
+    if len(same) == 1:
+        return same[0], "localized"
+    parent = _parent(path)
+    if parent:
+        near = [
+            f
+            for f in localized
+            if _parent(drift_norm(f, None)) == parent and drift_norm(f, None) not in listed
+        ]
+        if len(near) == 1:
+            return near[0], "localized"
+    return None
+
+
+def ground_plan(
+    plan: Plan,
+    *,
+    tree: Iterable[str],
+    localized: list[str],
+    is_test_path: Callable[[str], bool],
+    root: str | None = None,
+) -> tuple[Plan, list[str], set[str]]:
+    """``plan`` with each open step's ``files_expected`` grounded in ``tree`` (issue #121).
+
+    ``tree`` is every file git sees (tracked and untracked, as git spells them). A named
+    path stays when it exists (a file, or a directory holding one), when the step declares
+    it in ``files_new``, or when it is a test path (``is_test_path``) and the step's text
+    says it writes something (add, create, write, new, test). Any other path is a guess: it
+    is replaced by the obvious file it meant (:func:`_grounded_match`; each match stands in
+    for one guess); else kept as a probable new file when its directory exists (the
+    repository root counts), since dropping a file the coder then creates would be plan
+    drift; else dropped. ``files_new`` entries join ``files_expected``, since plan drift
+    reads only that list.
+
+    Returns the plan (same version), one note per replacement, kept guess or drop (``S1
+    a.py -> b.py (localized)``), and the ids of the open steps that named files before
+    grounding, so T1's localized files still join a step whose every guess was dropped
+    (an empty list would turn drift off for it).
+    """
+    known = {drift_norm(t, None): t for t in tree if t}
+    dirs = _ancestors(known)
     notes: list[str] = []
-    for ref in state.explorer_summaries:
-        stored = _stored_summary(ctx, ref)
-        if stored is not None:
-            plan, note = _localize_plan(ctx, plan, stored)
+    named: set[str] = set()
+    steps: list[PlanStep] = []
+    for s in plan.steps:
+        if s.done:
+            steps.append(s)
+            continue
+        expected = list(dict.fromkeys([*s.files_expected, *s.files_new]))
+        if expected:
+            named.add(s.id)
+        declared = {drift_norm(f, root) for f in s.files_new}
+        writes = bool(_WRITES_RE.search(s.description))
+        listed = {drift_norm(f, root) for f in expected}
+        kept: dict[str, str] = {}  # normalized -> as spelled, in order, without duplicates
+        for f in expected:
+            p = drift_norm(f.strip("`'\" "), root)
+            exists = p in known or p.rstrip("/") in dirs
+            if not p or exists or p in declared or (writes and is_test_path(p)):
+                kept.setdefault(p, f)
+                continue
+            match = _grounded_match(p, localized=localized, known=known, listed=listed)
+            if match is not None:
+                notes.append(f"{s.id} {f} -> {match[0]} ({match[1]})")
+                kept.setdefault(drift_norm(match[0], None), match[0])
+                listed.add(drift_norm(match[0], None))  # a file stands in for one guess only
+            elif not _parent(p) or _parent(p) in dirs:
+                # Never drop a plausible new file: one the coder then creates would drift,
+                # while an expected file nobody touches costs nothing (P26 created state.py).
+                notes.append(f"{s.id} kept {f} (probable new file: its directory exists)")
+                kept.setdefault(p, f)
+            else:
+                notes.append(
+                    f"{s.id} {f} dropped (not in the tree, not declared new, and its "
+                    "directory does not exist)"
+                )
+        out = list(kept.values())
+        if expected and not out:
+            notes.append(f"{s.id} keeps none of the files it named")
+        if out != s.files_expected:
+            s = s.model_copy(update={"files_expected": out})
+        steps.append(s)
+    return plan.model_copy(update={"steps": steps}), notes, named
+
+
+def _test_filter_terms(test_filter: str) -> tuple[str | None, list[str]]:
+    """A filter that names a path (``tests/test_x.py``, ``tests/x.test.ts::name``) as that
+    path; else the terms it selects on, without ``and``/``or`` and anything after ``not``."""
+    text = test_filter.strip()
+    if text and not any(c.isspace() for c in text) and ("/" in text or "::" in text):
+        return text.split("::", 1)[0], []
+    terms: list[str] = []
+    negated = False
+    for term in _FILTER_TERM_RE.findall(text):
+        low = term.lower()
+        if low in _FILTER_KEYWORDS:
+            negated = low == "not"
+            continue
+        if not negated and len(term) >= 2 and term not in terms:
+            terms.append(term)
+        negated = False
+    return None, terms
+
+
+def unmatched_test_filters(
+    plan: Plan,
+    features: list[FeatureItem],
+    *,
+    tree: Iterable[str],
+    is_test_path: Callable[[str], bool],
+    files_containing: Callable[[list[str]], set[str] | None],
+    root: str | None = None,
+) -> list[str]:
+    """One note per open feature whose ``test_filter`` selects nothing (issue #121).
+
+    A path filter matches when the path exists or its step names it (after
+    :func:`ground_plan`, a named path that does not exist is one the step creates). A term
+    filter matches when a term is in a test file's path or text (``files_containing``: the
+    files whose text holds any term, None when that cannot be read), or when its step
+    creates a test file. A filter is flagged, never dropped: the coder may write the test,
+    and a halt on "no tests collected" then reads against the note.
+    """
+    paths = [drift_norm(t, None) for t in tree if t]
+    have = set(paths) | _ancestors(paths)
+    tests = [p for p in paths if is_test_path(p)]
+    by_id = {f.id: f for f in features}
+    checked: set[str] = set()
+    notes: list[str] = []
+    for s in plan.steps:
+        if s.done:
+            continue
+        named = [drift_norm(f, root) for f in s.files_expected]
+        new_tests = [p for p in named if p not in have and is_test_path(p)]
+        for fid in s.feature_ids:
+            f = by_id.get(fid)
+            if fid in checked or f is None or not f.test_filter:
+                continue
+            checked.add(fid)
+            if f.status is FeatureStatus.PASSING:
+                continue
+            path, terms = _test_filter_terms(f.test_filter)
+            if path is not None:
+                p = drift_norm(path, root)
+                matched = p.rstrip("/") in have or p in named
+            elif not terms:
+                continue
+            elif new_tests or any(t.lower() in tp.lower() for t in terms for tp in tests):
+                matched = True
+            else:
+                hits = files_containing(terms)
+                if hits is None:
+                    continue  # unknown is not "no match"
+                matched = any(is_test_path(drift_norm(h, None)) for h in hits)
+            if not matched:
+                notes.append(
+                    f"{fid}'s test filter {f.test_filter!r} ({s.id}) matches no test in the "
+                    f"tree, and {s.id} creates no test file; kept (the coder may write it)"
+                )
+    return notes
+
+
+def _files_containing(ctx: RunContext, terms: list[str]) -> set[str] | None:
+    """The files (tracked or untracked) whose text holds any of ``terms``, ignoring case;
+    None when git cannot say."""
+    argv = ["git", "grep", "--untracked", "-I", "-i", "-l", "-F"]
+    for t in terms:
+        argv += ["-e", t]
+    r = ctx.sandbox.exec(argv, timeout_s=60)
+    if r.exit_code == 1 and not r.stderr.strip() and not r.timed_out:
+        return set()  # git grep's "no match"
+    if not r.ok:
+        return None
+    return {ln.strip() for ln in r.stdout.splitlines() if ln.strip()}
+
+
+def keep_localized_files(
+    ctx: RunContext,
+    state: SCIOState,
+    plan: Plan,
+    *,
+    features: list[FeatureItem] | None = None,
+) -> tuple[Plan, list[str]]:
+    """Every new plan passes here: the planner's (v1 and each replan) and the advisor's
+    ``revised_steps`` (implement.py). Returns the plan and the notes to record.
+
+    1. Its open steps' files are grounded in the tree (:func:`ground_plan`, issue #121),
+       with the files every stored explorer summary localized as the obvious matches.
+    2. T1: the localize explorer's files are merged into its open steps (I-151). Every
+       replan names its files again without exploring, and localize runs once per run
+       (build.py), so the files it found would drop out and drift would fire on them again.
+    3. A test filter that selects nothing is flagged (:func:`unmatched_test_filters`);
+       ``features`` defaults to the state's (the advisor's replan keeps them).
+    """
+    root = ctx.sandbox.root
+    tracked = _tracked_files(ctx)
+    # untracked too: an advisor's replan can name a file the coder created this step
+    tree = list(dict.fromkeys([*tracked, *untracked_files(ctx.sandbox)]))
+    stored = [_stored_summary(ctx, ref) for ref in state.explorer_summaries]
+    summaries = [x for x in stored if x is not None]
+    localized: list[str] = []
+    for summary in summaries:
+        found = localized_files(
+            summary, tracked=tracked, is_source=ctx.toolchain.is_source, root=root
+        )
+        localized += [f for f in found if f not in localized]
+    plan, grounding, named = ground_plan(
+        plan, tree=tree, localized=localized, is_test_path=ctx.toolchain.is_test_path, root=root
+    )
+    notes = [f"plan grounding (v{plan.version}): {n}" for n in grounding]
+    if state.routing is not None and state.routing.tier is Tier.T1:
+        for summary in summaries:
+            plan, note = _localize_plan(ctx, plan, summary, named=named)
             notes.append(f"plan v{plan.version}: {note}")
+    notes += [
+        f"plan grounding (v{plan.version}): {n}"
+        for n in unmatched_test_filters(
+            plan,
+            state.feature_list if features is None else features,
+            tree=tree,
+            is_test_path=ctx.toolchain.is_test_path,
+            files_containing=lambda terms: _files_containing(ctx, terms),
+            root=root,
+        )
+    ]
     return plan, notes
 
 
@@ -489,7 +765,8 @@ def plan(ctx: RunContext) -> Node:
                 source=Role.PLANNER,
             )
         ] + [fact(n, source=Role.SYSTEM) for n in plan_notes]
-        new_plan, notes = keep_localized_files(ctx, state, new_plan)
+        # grounded in the tree, then T1's localized files merged back (issue #121, I-151)
+        new_plan, notes = keep_localized_files(ctx, state, new_plan, features=features)
         entries += [fact(n, source=Role.SYSTEM) for n in notes]
         return {
             "plan": new_plan,
