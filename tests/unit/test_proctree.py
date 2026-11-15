@@ -10,6 +10,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SPAWNERS = {"run", "call", "check_call", "check_output"}
 ALLOWED = {
@@ -36,6 +38,7 @@ def timed_subprocess_calls(path: Path) -> list[int]:
     ]
 
 
+@pytest.mark.scan
 def test_no_subprocess_timeout_outside_run_tree() -> None:
     found = {
         f"{path.relative_to(ROOT).as_posix()}:{line}"

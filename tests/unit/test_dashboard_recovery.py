@@ -709,6 +709,7 @@ def imports_of(source: str, package: str) -> list[str]:
     return found
 
 
+@pytest.mark.scan
 def test_scio_never_imports_the_supervisor() -> None:
     """The supervisor is deployed apart from SCIO and is not in its wheel: SCIO reads its
     store's shape, never its code."""
