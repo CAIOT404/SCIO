@@ -207,7 +207,8 @@ class RunContext:
                 binding=binding,
             )
             harness = Harness.from_settings(settings, budget=guard)
-        work = Path(work_dir) if work_dir else Path(".scio")
+        # absolute: a path under it reaches commands that run in the sandbox root (I-229)
+        work = (Path(work_dir) if work_dir else Path(".scio")).resolve()
         toolchain = resolve_toolchain(settings, sandbox_root)
         sandbox = sandbox or make_sandbox(
             settings,
