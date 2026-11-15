@@ -21,17 +21,19 @@ What happens today:
 2. **The question goes to the feature's issue.**
    - With `--gh`, the build comments on the feature's issue in the product repository. The comment's first line is the marker `<!-- scio:question feature=<id> attempt=<n> id=<question_id> -->`, followed by the question, the attempt's last ledger lines, and how to answer.
    - The issue gets the label `needs-answer`.
+   - Posting is best-effort. A failed GitHub write (the question, the label, a receipt, a label's removal) never halts the build. The feature stays parked, the failure is a ledger line, and the write is tried again on the next pass; every write reads the issue first, so none lands twice.
    - Offline, the question is written to the feature's issue file under `.scio/product/issues/`, which is the offline issue.
 3. **An answer is a comment that starts with `answer:`.** SCIO comments with the owner's own credentials, so the author cannot tell an answer from a question; the prefix can.
    - The first `answer:` comment after the question's marker answers it.
-   - Offline, or from the dashboard when the product has no repository, an answer is a file `.scio/answers/<question_id>.md` in the workspace, outside the product's repository. A question's id is `<feature>-a<attempt>`, for example `P29-a1`, and stays the same across reruns.
+   - Offline, or from the dashboard when the product has no repository, an answer is a file `.scio/answers/<question_id>.md` in the workspace, outside the product's repository.
+   - A question's id is the attempt's thread id, for example `build-graphcalc-m4-p29-a1`, and stays the same across reruns. A new build thread or a later milestone numbers attempts from 1 again, so `<feature>-a<attempt>` (the id of a `Question` without a `qid`) would name two questions. The thread id names one: an old question's marker never suppresses a new post, and an old answer never answers a new question.
    - `scio/product/questions.py` holds the contract: the marker, the prefix, the label, the answer directory, and `format_question`, `parse_answer`, `read_answer_file` and `write_answer_file`. It has pure functions only; callers do the `gh` calls. The build, the dashboard and the tests use it, and nothing else parses these formats.
 4. **The build picks answers up itself.** At the start of each feature pass and before the milestone gate, the build reads the answers to its parked features.
    - A parked feature with an answer gets its next attempt, through #137's path: the answer and its question go into the task. Its `needs-answer` label comes off, and the build comments that the answer was received.
    - A parked feature without an answer stays parked.
 5. **Only when nothing else can build does the milestone wait, once, for all its questions.**
    - When every other feature of the milestone is done, and parked features still have no answer, the build stops once at the phase `questions_wait`. The stop lists every open question with its issue link.
-   - The reply `proceed` defers the parked features, as a `skip` does (#140: deferred, not undelivered). `stop` stops the build. Any other reply means "I answered on the issues": the build reads the answers again and goes on.
+   - The reply `proceed` defers the parked features, as a `skip` does (#140: deferred, not undelivered). Each one's `needs-answer` label comes off, and its issue says the owner deferred it to the next milestone. `stop` stops the build. Any other reply means "I answered on the issues": the build reads the answers again and goes on.
    - A rerun of `scio build`, by the operator or the recovery tick, does the same.
 6. **The dashboard shows the open questions and can answer them.**
    - It lists every parked feature with its question, attempt, issue link and age.

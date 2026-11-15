@@ -573,9 +573,11 @@ class FeatureRun(BaseModel):
     the owner's case. Every later attempt of the feature in the milestone reads it, with
     ``question``, in its task. None on a plain retry, any other decision, and old runs."""
     question_id: str | None = None
-    """A parked run's question id, ``<feature>-a<attempt>`` (:func:`scio.product.questions.
-    question_id`, ADR 0020): how the build finds the answer on the issue or in the workspace's
-    answer file. None on every other run."""
+    """A parked run's question id, the attempt's thread id (``build-graphcalc-m4-p29-a2``,
+    ``questions.Question.qid``, ADR 0020): unique across milestones and build threads, where
+    attempt numbers start again. How the build finds the answer on the issue or in the
+    workspace's answer file. Kept once the question is answered or deferred; None on a run
+    that asked nothing."""
 
 
 class CiStatus(BaseModel):
@@ -638,6 +640,7 @@ ProductBuildPhase = Literal[
     "plan",
     "issues",
     "feature",
+    "questions_wait",
     "integrate",
     "gate",
     "pr",
@@ -695,7 +698,9 @@ class ProductBuildState(BaseModel):
         it, and so does a run skipped in this milestone. A skip defers the feature to the next
         milestone (I-116), so a run skipped in an earlier one does not finish it here, and the
         feature runs again with its next attempt. A run recorded before runs carried their
-        milestone (``milestone`` None) keeps the old rule: skipped finishes."""
+        milestone (``milestone`` None) keeps the old rule: skipped finishes. A feature parked
+        on a design question in this milestone is passed over until its answer turns the run
+        into a ``retry`` (ADR 0020): unfinished, but not buildable."""
         if self.milestone is None:
             return None
         mid = self.milestone.id
@@ -705,10 +710,24 @@ class ProductBuildState(BaseModel):
                 return f
             if run.status == "passed":
                 continue
-            if run.status == "skipped" and run.milestone in (None, mid):
+            if run.status in ("skipped", "parked") and run.milestone in (None, mid):
                 continue
             return f
         return None
+
+    def parked_runs(self) -> list[FeatureRun]:
+        """The milestone's open questions (ADR 0020): the latest run of each of its features
+        that is parked in this milestone, in plan order."""
+        if self.milestone is None:
+            return []
+        mid = self.milestone.id
+        return [
+            run
+            for f in self.milestone.features
+            if (run := self.latest_run(f.id)) is not None
+            and run.status == "parked"
+            and run.milestone in (None, mid)
+        ]
 
     def finished(self, feature_id: str) -> bool:
         """``next_feature``'s rule for one feature: passed, or skipped in this milestone."""

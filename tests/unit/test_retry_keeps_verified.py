@@ -269,25 +269,30 @@ def test_an_attempt_that_halts_before_its_checkpoint_passes_the_verified_commit_
     tmp_path: Path,
 ) -> None:
     """T0: attempt 1 committed F1+F2 and halted at its gate; attempt 2 carried them and
-    stopped on a design question before any verify, so it committed nothing. Attempt 3
-    still starts from attempt 1's commit, not from the milestone head."""
+    stopped on a design question before any verify, so it committed nothing. Attempt 3 still
+    starts from attempt 1's commit, not from the milestone head.
+
+    Since ADR 0020 the question parks attempt 2 and its answer gives P1 attempt 3, through a
+    ``retry`` record as the owner's reply did. With GitHub the question is a comment, so no
+    bookkeeping commit moves the milestone head; the answer is already in the workspace, so
+    the next pass reads it and P1 goes on before P2 moves the head."""
+    from scio.product import questions
+    from tests.graph.test_product_build_fake import _github_product
+
     responder = _PerAttempt({"-p1-a1": "gate", "-p1-a2": "design"})
-    harness = _bootstrap(tmp_path, responder)
-    repo = tmp_path / "product"
-    ctx = _ctx(tmp_path, harness, build_thread_id(PRODUCT))
+    ctx, _fake, repo, _origin = _github_product(tmp_path, responder)
+    questions.write_answer_file(tmp_path, f"{ctx.thread_id}-p1-a2", "Keep them")  # its id
     try:
         out = run_build(ctx)
         assert out.paused and out.interrupt and out.interrupt["thread"].endswith("-p1-a1")
         c1, ids, head = _committed(ctx, out.interrupt["thread"])
         assert ids == ["F1", "F2"]
         out = resume_build(ctx, "retry")
-        assert out.paused and out.interrupt and out.interrupt["thread"].endswith("-p1-a2")
-        a2 = _feature_state(ctx, out.interrupt["thread"])
-        assert a2.task.start_commit == c1
-        assert not any(f.commit_sha for f in a2.feature_list)
-        out = resume_build(ctx, "retry")
         s = out.state
         assert out.paused and s.phase == "merge_wait", s.ledger[-3:]
+        a2 = _feature_state(ctx, f"{ctx.thread_id}-p1-a2")
+        assert a2.task.start_commit == c1
+        assert not any(f.commit_sha for f in a2.feature_list)
     finally:
         ctx.close()
     assert [(r.feature_id, r.attempt, r.status, r.decision) for r in s.feature_runs] == [
@@ -297,9 +302,11 @@ def test_an_attempt_that_halts_before_its_checkpoint_passes_the_verified_commit_
         ("P2", 1, "passed", None),
     ]
     texts = [e.text for e in s.ledger]
-    # attempt 2 paused for a decision, which drops its node run's facts: the run that
-    # resumed its thread said where it started
-    assert (f"P1 attempt 2 started from {c1[:12]} (F1, F2 carried as passing; issue #119)") in texts
+    assert (
+        f"P1 attempt 2 starts from {c1[:12]} (F1, F2 verified in attempt 1), not from the "
+        "head of milestone/1 (issue #119)"
+    ) in texts
+    assert any(t.startswith("P1 attempt 2 parked") for t in texts)
     assert (
         f"P1 attempt 3 starts from {c1[:12]} (F1, F2 verified in attempt 1), not from the "
         "head of milestone/1 (issue #119)"

@@ -735,18 +735,19 @@ def test_escalation_records_cross_from_the_feature_run_to_the_product(tmp_path: 
 
 
 @pytest.mark.parametrize(
-    ("mode", "inner_pause"),
-    [("idle", False), ("design_question", True)],
+    ("scripted", "inner_pause"),
+    [({"coder_mode": "idle"}, False), ({"gate_verdict": "escalate_human"}, True)],
     ids=["stall-exit", "escalate_human-interrupt"],
 )
 def test_feature_failure_stops_for_one_human_decision(
-    tmp_path: Path, mode: str, inner_pause: bool
+    tmp_path: Path, scripted: dict[str, Any], inner_pause: bool
 ) -> None:
-    """A feature that halts (a stall exit, or the task graph's own human interrupt) stops the
-    build once: 'skip' defers it (the milestone goes on without it; the next milestone plans
-    it again, I-116), 'retry' starts a new attempt on a new thread, anything else halts the
-    build with feature_failed."""
-    harness = _bootstrap(tmp_path, ScriptedResponder(coder_mode=mode))
+    """A feature that halts (a stall exit, or the task graph's own human interrupt, here its
+    gate's escalation) stops the build once: 'skip' defers it (the milestone goes on without
+    it; the next milestone plans it again, I-116), 'retry' starts a new attempt on a new
+    thread, anything else halts the build with feature_failed. A design question parks the
+    feature instead (ADR 0020, ``tests/unit/test_question_channel.py``)."""
+    harness = _bootstrap(tmp_path, ScriptedResponder(**scripted))
     ctx = _ctx(tmp_path, harness, build_thread_id(PRODUCT))
     try:
         out = run_build(ctx)

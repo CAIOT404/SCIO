@@ -1,10 +1,15 @@
 """The milestone loop behind ``scio build`` (ADR 0011).
 
-    load -> plan_milestone -> issues -> feature (x N: the task graph as a subgraph, one
-    checkpoint thread per feature attempt) -> integrate -> milestone_gate -> [gate_decision]
+    load -> plan_milestone -> issues -> answers -> feature (x N: the task graph as a
+    subgraph, one checkpoint thread per feature attempt; answers before each) ->
+    [questions_wait] -> integrate -> milestone_gate -> [gate_decision]
     -> milestone_pr -> merge_wait -> update_progress -> plan_milestone | release_check
     -> [release_decision] -> release -> [release_merge_wait, GitHub only] -> release_publish
     -> done                                            (the release gate, M11; issue #58)
+
+A feature attempt that ends with a design question parks the feature (ADR 0020): the question
+goes to its issue, the answer gives it its next attempt, and the milestone waits, once, at
+``questions_wait`` only when nothing else in it can build.
 
 The orchestrator, not a model, picks the next feature (the first open one in ``PRODUCT.md``
 order); the milestone planner only proposes how many to group and at what tier. Every
@@ -43,8 +48,10 @@ from scio.graph.run import resume_graph, run_graph, thread_started
 from scio.graph.run_context import T0_TOOL_CAP, RunContext, product_sandbox_backend
 from scio.harness.budget import BudgetGuard, BudgetLimits, BudgetsConfig, budget_binding
 from scio.harness.failures import BudgetExceeded, HarnessError
+from scio.harness.github.client import GitHubError
 from scio.harness.types import Message
 from scio.loop.exits import LoopLimits
+from scio.product import questions
 from scio.product.acceptance import run_acceptance
 from scio.product.bug_context import feature_bug_brief
 from scio.product.parallel import (
@@ -111,6 +118,15 @@ DESIGN_QUESTION = "design decision needed:"
 the question a feature stop carries into the retried attempt's task (issue #137)."""
 ANSWERS_HEADING = "## The owner's answers to earlier attempts' questions"
 """The section of a feature task that holds the owner's ``retry: <answer>`` replies (#137)."""
+PARK_REPLY = "parked (ADR 0020): question {qid} went to the feature's issue; no reply here"
+"""What closes a parked attempt's own interrupt. ``checkpoint_gate.halt`` only adds the reply
+to the attempt's ``human_notes`` and ends the thread, so it has no other effect."""
+QUESTIONS_RERUN = "rerun: read the answers again"
+"""What a rerun of ``scio build`` without ``--decision`` replies at ``questions_wait``: the
+same as any reply that is neither ``proceed`` nor ``stop`` (ADR 0020 decision 5)."""
+QUESTIONS_STOP = ("stop", "abort", "halt")
+"""The replies that end the build at ``questions_wait``. Not ``no``: "not yet" and "nothing
+yet" mean "read again" there."""
 
 
 @dataclass
@@ -463,7 +479,10 @@ def feature_task(
 
 
 def feature_run_from_state(
-    run: FeatureRun, final: SCIOState, *, status: Literal["passed", "failed", "skipped"]
+    run: FeatureRun,
+    final: SCIOState,
+    *,
+    status: Literal["passed", "failed", "skipped", "parked"],
 ) -> FeatureRun:
     """Fold a finished task-graph state back into the product's record of the run."""
     return run.model_copy(
@@ -580,20 +599,26 @@ def retry_answer(reply: str) -> str | None:
     return rest.lstrip(ANSWER_SEPARATORS) or None
 
 
-def stop_question(final: SCIOState, feature_id: str, reason: str, attempt: int) -> str:
-    """The question an attempt stopped with, as the owner saw it at the stop. First the
+def asked_question(final: SCIOState) -> str | None:
+    """The design question an attempt ended with, or None when it asked none. First the
     worker's own ``design_question``: on T1/T2 the advisor gets it first, and no ledger line
-    names it. Then the coder's ``design decision needed: ...`` line (T0), which the stop
-    shows in its ``ledger_tail``; the task graph's own interrupt asks only "The run needs a
-    human decision.". The stop's own line, ``Feature <id> (<reason>, attempt <n>)``, when
-    the attempt asked nothing."""
+    names it. Then the coder's ``design decision needed: ...`` line (T0); the task graph's own
+    interrupt asks only "The run needs a human decision.". An attempt that ended with one
+    parks (ADR 0020)."""
     worker = final.last_worker_output
     if worker is not None and worker.design_question and worker.design_question.strip():
         return worker.design_question.strip()
     for entry in reversed(final.task_ledger):
         if entry.text.startswith(DESIGN_QUESTION):
             return entry.text
-    return f"Feature {feature_id} ({reason}, attempt {attempt})"
+    return None
+
+
+def stop_question(final: SCIOState, feature_id: str, reason: str, attempt: int) -> str:
+    """The question an attempt stopped with, as the owner saw it at the stop:
+    :func:`asked_question`, or the stop's own line, ``Feature <id> (<reason>, attempt <n>)``,
+    when the attempt asked nothing (#137)."""
+    return asked_question(final) or f"Feature {feature_id} ({reason}, attempt {attempt})"
 
 
 def owner_answers(
@@ -611,6 +636,364 @@ def owner_answers(
         and run.decision == "retry"
         and run.answer
     ]
+
+
+# ---------- a design question parks the feature (ADR 0020, issue #141 part 5) ----------
+
+
+def answers_workspace(ctx: RunContext) -> Path:
+    """The workspace whose ``.scio/answers/`` holds the owner's answer files: the directory
+    that holds this run's work directory (``RunContext.create`` puts the artifacts at
+    ``<work>/artifacts/<thread>``). ``scio build`` runs there with the default ``.scio``,
+    beside its checkpoint DB, which is the directory the dashboard is given as ``--root`` and
+    writes the files under. Absolute, as ``worktrees_root`` is (I-229)."""
+    return ctx.artifacts.root.parent.parent.parent.resolve()
+
+
+def issue_link(ctx: RunContext, state: ProductBuildState, feature_id: str) -> str:
+    """Where a feature's question is asked: its GitHub issue, or offline its issue file."""
+    n = state.issues.get(feature_id)
+    if ctx.github is not None and n is not None:
+        return f"https://github.com/{ctx.github.repo}/issues/{n}"
+    branch = state.milestone.branch if state.milestone is not None else "the milestone branch"
+    return f"{ISSUES_DIR}/{feature_id}.md on {branch}"
+
+
+def decided_at_a_stop(
+    ctx: RunContext, saver: BaseCheckpointSaver | None, attempt_thread: str
+) -> bool:
+    """True when this build thread waits at a feature decision about ``attempt_thread``: a
+    stop asked before ADR 0020 for an attempt that ended with a question. The node run that
+    the owner's reply starts must take that reply (``retry: <answer>``, ``skip``, stop), not
+    park the feature and drop it unread; only a new attempt with a question parks."""
+    config = {"configurable": {"thread_id": ctx.thread_id}}
+
+    def read(cp: BaseCheckpointSaver) -> list[Any]:
+        graph: Any = build_product_build_graph(None, cp).compile(checkpointer=cp)
+        snapshot = graph.get_state(config)
+        return [i.value for task in snapshot.tasks for i in task.interrupts]
+
+    if saver is not None:
+        pending = read(saver)
+    else:
+        with open_checkpointer(ctx.settings.checkpoint_dsn) as opened:
+            pending = read(opened)
+    return any(
+        isinstance(v, dict) and "feature" in v and v.get("thread") == attempt_thread
+        for v in pending
+    )
+
+
+def _park_record(
+    fctx: RunContext,
+    saver: BaseCheckpointSaver | None,
+    run: FeatureRun,
+    outcome: Any,
+    asked: str,
+) -> tuple[FeatureRun, list[str], str]:
+    """Park an attempt that ended with the design question ``asked``: its own paused thread
+    is ended with :data:`PARK_REPLY` (no product interrupt), and the run is recorded
+    ``parked`` with the question and its id, the attempt's thread id: unique across
+    milestones and build threads, where attempt numbers start again. Returns the record, the
+    attempt's last ledger lines for the question, and the ledger line."""
+    qid = run.thread_id
+    final = outcome.state
+    if outcome.paused:
+        final = resume_graph(fctx, PARK_REPLY.format(qid=qid), saver=saver).state
+    record = feature_run_from_state(run, final, status="parked").model_copy(
+        update={"question": asked, "question_id": qid}
+    )
+    line = (
+        f"{run.feature_id} attempt {run.attempt} parked on a design question ({qid}): "
+        f"{asked[:300]}; the milestone's other features go on (ADR 0020)"
+    )
+    return record, [e.text for e in final.task_ledger[-5:]], line
+
+
+def _qid(run: FeatureRun) -> str:
+    """A run's question id: the attempt's thread id, which parking records."""
+    return run.question_id or questions.question_id(run.feature_id, run.attempt)
+
+
+def _question(run: FeatureRun) -> questions.Question:
+    return questions.Question(run.feature_id, run.attempt, run.question or "", qid=_qid(run))
+
+
+QUESTIONS_EFFECTS = "questions"
+"""The effect-log node of every GitHub write of the question channel, whichever graph node
+makes it, so the retry on a later pass finds the write the first pass started."""
+
+
+def _github_write(
+    ctx: RunContext,
+    intent: str,
+    what: str,
+    apply: Callable[[], object],
+    probe: Callable[[], object | None] | None = None,
+) -> list[str]:
+    """One GitHub write of the question channel, once (``run_effect``), and best-effort: a
+    failed write never halts the build. It returns a ledger note instead, and its effect stays
+    started, so the next pass tries it again; ``comment_once`` and the label helpers read the
+    issue first, so a write that did land is not made twice."""
+    try:
+        run_effect(
+            ctx.effects,
+            thread_id=ctx.thread_id,
+            node=QUESTIONS_EFFECTS,
+            intent=intent,
+            apply=apply,
+            probe=probe,
+        )
+    except GitHubError as exc:
+        return [
+            f"{what} failed ({' '.join(str(exc).split())[:200]}); it is tried again on the "
+            "next pass"
+        ]
+    return []
+
+
+def _post_question(
+    ctx: RunContext, run: FeatureRun, ledger_tail: Sequence[str] | None = None
+) -> list[str]:
+    """Comment a parked run's question on its issue and add ``needs-answer``. Without
+    ``ledger_tail`` (a retry), the attempt's last ledger lines are read from its thread, and
+    only when the comment is still to be made. Returns the failure notes."""
+    gh, n = ctx.github, run.issue_number
+    if gh is None or n is None:
+        return []
+    q = _question(run)
+    marker = questions.marker(q)
+
+    def body() -> str:
+        tail = ledger_tail
+        if tail is None:
+            inner = task_thread_state(ctx, None, run.thread_id)
+            tail = [e.text for e in inner.task_ledger[-5:]] if inner is not None else []
+        return questions.format_question(q, tail)
+
+    failed = _github_write(
+        ctx,
+        f"question:{q.question_id}",
+        f"{run.feature_id}: posting question {q.question_id} on issue #{n}",
+        lambda: gh.comment_once(n, body(), marker=marker),
+        lambda: gh.find_comment(n, marker),
+    )
+    if failed:  # the label says a question waits there: not before the question is
+        return failed
+    return _github_write(
+        ctx,
+        f"question-label:{q.question_id}",
+        f"{run.feature_id}: adding the label {questions.QUESTION_LABEL} to issue #{n}",
+        lambda: gh.add_label(n, questions.QUESTION_LABEL),
+    )
+
+
+def _post_closing(ctx: RunContext, run: FeatureRun, kind: str, text: str) -> list[str]:
+    """Close a question on its issue: a comment saying how (``kind``: ``answer-received`` or
+    ``deferred``), and the ``needs-answer`` label off. The comment's marker is not a
+    question's and the comment does not start with ``answer:``, so it never reads as
+    either. Returns the failure notes."""
+    gh, n = ctx.github, run.issue_number
+    if gh is None or n is None:
+        return []
+    qid = _qid(run)
+    marker = f"<!-- scio:{kind} id={qid} -->"
+    return _github_write(
+        ctx,
+        f"{kind}:{qid}",
+        f"{run.feature_id}: the {kind} comment for {qid} on issue #{n}",
+        lambda: gh.comment_once(n, f"{marker}\n{text}", marker=marker),
+        lambda: gh.find_comment(n, marker),
+    ) + _github_write(
+        ctx,
+        f"{kind}-label:{qid}",
+        f"{run.feature_id}: removing the label {questions.QUESTION_LABEL} from issue #{n}",
+        lambda: gh.remove_label(n, questions.QUESTION_LABEL),
+    )
+
+
+def _post_received(ctx: RunContext, run: FeatureRun) -> list[str]:
+    return _post_closing(
+        ctx,
+        run,
+        "answer-received",
+        f"Received the answer to {_qid(run)}. {run.feature_id} attempt {run.attempt + 1} "
+        "starts with it, and with the question, in its task.",
+    )
+
+
+def _post_deferred(ctx: RunContext, run: FeatureRun) -> list[str]:
+    return _post_closing(
+        ctx,
+        run,
+        "deferred",
+        f"The owner deferred {run.feature_id} to the next milestone without an answer to "
+        f"{_qid(run)}. It stays open, and the next milestone plans it again.",
+    )
+
+
+def retry_github_posts(ctx: RunContext, state: ProductBuildState) -> list[LedgerEntry]:
+    """Every pass: make the question channel's GitHub writes that failed before (a write that
+    is done costs no call). For each feature of the milestone, its newest run that asked a
+    question: parked, its question and label; answered, the receipt and the label off;
+    deferred at ``questions_wait``, the notice and the label off. Only the newest: an older
+    question's label is the newer one's now. Returns the notes of writes that failed again."""
+    if ctx.github is None or state.milestone is None:
+        return []
+    notes: list[str] = []
+    for mf in state.milestone.features:
+        run = next(
+            (r for r in reversed(state.feature_runs) if r.feature_id == mf.id and r.question_id),
+            None,
+        )
+        if run is None:
+            continue
+        if run.status == "parked":
+            notes += _post_question(ctx, run)
+        elif run.decision == "retry" and run.answer:
+            notes += _post_received(ctx, run)
+        elif run.decision == "skip":
+            notes += _post_deferred(ctx, run)
+    return [fact(n) for n in notes]
+
+
+def _ask(
+    ctx: RunContext, plan: MilestonePlan, record: FeatureRun, ledger_tail: Sequence[str]
+) -> list[LedgerEntry]:
+    """Ask a parked feature's question where its owner reads it (ADR 0020 decision 2): a
+    comment on the feature's issue and the ``needs-answer`` label with GitHub, else the
+    feature's issue file, committed on the milestone branch. Every write checks the world
+    first, so a resumed node or a later build thread never asks twice. A failed GitHub write
+    leaves the feature parked and is tried again on the next pass."""
+    q = _question(record)
+    qid, fid = q.question_id, q.feature
+    body = questions.format_question(q, ledger_tail)
+    answer_file = questions.answer_path(answers_workspace(ctx), qid)
+    gh, n = ctx.github, record.issue_number
+    if gh is not None and n is not None:
+        failed = _post_question(ctx, record, ledger_tail)
+        if failed:
+            return [fact(line) for line in failed] + [
+                fact(f"{fid}: question {qid} is parked, in the ledger and on the dashboard")
+            ]
+        return [
+            fact(
+                f"{fid}: question {qid} posted on issue #{n} with the label "
+                f"{questions.QUESTION_LABEL}; an `{questions.ANSWER_PREFIX}` comment there, or "
+                f"the dashboard, answers it"
+            )
+        ]
+    if gh is not None:
+        return [fact(f"{fid}: question {qid} has no issue to go to; answer it in {answer_file}")]
+    sha = _ask_offline(ctx, plan, q, body)
+    return [
+        fact(
+            f"{fid}: question {qid} added to {ISSUES_DIR}/{fid}.md on {plan.branch} at "
+            f"{sha[:12]}; answer it in {answer_file} or from the dashboard"
+        )
+    ]
+
+
+def _ask_offline(ctx: RunContext, plan: MilestonePlan, q: questions.Question, body: str) -> str:
+    """Append the question to the feature's issue file (the offline issue) and commit it on
+    the milestone branch as bookkeeping, once per question. The tree is the
+    milestone branch, clean, first: after a serial attempt it is the attempt's own branch
+    with its leftovers, which the next attempt's reset removes anyway (I-067); a hand edit
+    of PRODUCT.md is carried (I-109). Returns the commit."""
+    sb = ctx.sandbox
+    rel = f"{ISSUES_DIR}/{q.feature}.md"
+    marker = f"[scio:question:{q.question_id}]"
+
+    def clean_tree() -> None:
+        _git(ctx, "checkout", "-q", plan.branch)
+        _git(ctx, "reset", "-q", "--hard")
+        _git(ctx, "clean", "-fdq")
+
+    def apply() -> str:
+        if (found := find_commit(sb, marker)) is not None:
+            return found
+        carrying_product_md(ctx, clean_tree)
+        path = f"{sb.root}/{rel}"
+        text = sb.read_text(path) if sb.exists(path) else ""
+        if questions.marker(q) not in text:
+            sb.write_text(path, (text.rstrip("\n") + "\n\n" if text.strip() else "") + body + "\n")
+        _git(ctx, "add", "--", rel)
+        if git_out(sb, "diff", "--cached", "--name-only", "--", rel):
+            _git(ctx, "commit", "-q", "-m", f"chore: {q.question_id} design question {marker}")
+        return head_sha(sb)
+
+    sha: str = run_effect(
+        ctx.effects,
+        thread_id=ctx.thread_id,
+        node="feature",
+        intent=f"question-file:{q.question_id}",
+        apply=apply,
+        probe=lambda: find_commit(sb, marker),
+    )
+    return sha
+
+
+def read_answer(ctx: RunContext, run: FeatureRun) -> tuple[str | None, str, list[str]]:
+    """The owner's answer to a parked run's question (ADR 0020 decision 3): the first
+    ``answer:`` comment after the question on the feature's issue with GitHub, else the
+    workspace's answer file. Returns the answer (None while unanswered), where it was read,
+    and ledger notes. A failed read of the comments falls back to the file and is said; it
+    does not stop the build."""
+    qid = _qid(run)
+    notes: list[str] = []
+    gh, n = ctx.github, run.issue_number
+    if gh is not None and n is not None:
+        try:
+            said = questions.parse_answer(gh.issue_comments(n), qid)
+        except GitHubError as exc:
+            said = None
+            notes.append(
+                f"{run.feature_id}: the comments of issue #{n} could not be read "
+                f"({' '.join(str(exc).split())[:200]}); its answer file is read instead"
+            )
+        if said is not None:
+            return said, f"issue #{n}", notes
+    ws = answers_workspace(ctx)
+    said = questions.read_answer_file(ws, qid)
+    return said, str(questions.answer_path(ws, qid)), notes
+
+
+def pick_up_answers(
+    ctx: RunContext, state: ProductBuildState
+) -> tuple[list[FeatureRun], list[LedgerEntry]]:
+    """Read the answers to the milestone's parked features (ADR 0020 decision 4). A parked
+    run with an answer becomes what #137's ``retry: <answer>`` records, its question kept, so
+    :func:`owner_answers` puts both into the next attempt's task and the feature is buildable
+    again as attempt n+1. A parked run without one stays parked. Returns the runs and the
+    ledger lines."""
+    runs = list(state.feature_runs)
+    entries: list[LedgerEntry] = []
+    for run in state.parked_runs():
+        qid = _qid(run)
+        said, where, notes = read_answer(ctx, run)
+        entries += [fact(n) for n in notes]
+        if said is None:
+            continue
+        answered = run.model_copy(update={"status": "failed", "decision": "retry", "answer": said})
+        at = max(i for i, r in enumerate(runs) if r.thread_id == run.thread_id)
+        runs[at] = answered
+        entries.append(
+            fact(
+                f"{run.feature_id}: the answer to {qid} was received ({where}): {said[:200]}; "
+                f"attempt {run.attempt + 1} starts with it in its task (ADR 0020, #137)",
+                source=Role.HUMAN,
+            )
+        )
+        failed = _post_received(ctx, answered)
+        entries += [fact(line) for line in failed]
+        if ctx.github is not None and answered.issue_number is not None and not failed:
+            entries.append(
+                fact(
+                    f"issue #{answered.issue_number}: the answer to {qid} is acknowledged and "
+                    f"the label {questions.QUESTION_LABEL} is off"
+                )
+            )
+    return runs, entries
 
 
 def task_thread_state(
@@ -711,7 +1094,9 @@ def render_milestone_pr_body(state: ProductBuildState, spec: ProductSpec) -> str
     for mf in plan.features:
         f = _feature(spec, mf.id)
         run = state.latest_run(mf.id)
-        status = run.status if run else "not run"
+        status: str = run.status if run else "not run"
+        if run is not None and run.question_id and run.status in ("parked", "skipped"):
+            status += f" (question {run.question_id} unanswered)"  # ADR 0020
         commit = (run.commit_sha or "-")[:12] if run else "-"
         usd = f"${run.usd:.4f}" if run else "-"
         esc = f"{run.escalations_resolved}/{run.escalations}" if run else "-"
@@ -1212,12 +1597,14 @@ def feature(ctx: RunContext, saver: BaseCheckpointSaver | None) -> Node:
 
     The thread id is deterministic per attempt, so a crash mid-feature resumes the same
     subgraph; its ``merge_wait`` is answered by the orchestrator (the milestone PR is the
-    human's stop); any other pause or a failed exit stops here for one human decision:
-    ``retry`` (a new attempt; ``retry: <answer>`` carries the owner's answer, with the
-    question it answers, into its task, issue #137), ``skip``, or anything else to stop the
-    build. ``skip`` defers the feature: this milestone goes on without it, it stays open in
-    ``progress.json`` and the next milestone plans it again; only removing it from
-    ``PRODUCT.md`` drops it (I-116).
+    human's stop). An attempt that ends with a design question parks the feature: its own
+    interrupt is closed, the question goes to the feature's issue, and the build goes on with
+    the milestone's other features (ADR 0020). Any other pause or failed exit stops here for
+    one human decision: ``retry`` (a new attempt; ``retry: <answer>`` carries the owner's
+    answer, with the question it answers, into its task, issue #137), ``skip``, or anything
+    else to stop the build. ``skip`` defers the feature: this milestone goes on without it,
+    it stays open in ``progress.json`` and the next milestone plans it again; only removing
+    it from ``PRODUCT.md`` drops it (I-116).
     """
 
     def node(state: ProductBuildState) -> dict[str, Any]:
@@ -1366,6 +1753,19 @@ def feature(ctx: RunContext, saver: BaseCheckpointSaver | None) -> Node:
                 **ctx.budget_update(),
             }
 
+        # A design question parks the feature and the build goes on (ADR 0020), unless the
+        # owner was already asked about this attempt at a stop: the reply answers that stop.
+        asked = asked_question(final)
+        if asked is not None and not decided_at_a_stop(ctx, saver, thread):
+            record, tail, line = _park_record(fctx, saver, run, outcome, asked)
+            entries.append(fact(line))
+            entries += _ask(ctx, plan, record, tail)
+            return {
+                "feature_runs": [*state.feature_runs, record],
+                "phase": "feature",
+                "ledger": entries,
+                **ctx.budget_update(),
+            }
         # A pause the orchestrator cannot answer, or a non-success exit: one human decision.
         return _feature_decision(
             ctx, saver, state, feat, attempt, fctx, run, outcome, entries, state.feature_runs
@@ -1490,7 +1890,8 @@ def _run_batch(
     """Build ``batch`` at once, each feature in its own worktree from the milestone head
     (ADR 0018), then merge the ones that passed onto the milestone branch in PRODUCT.md order.
     A merge that conflicts or turns the suite red is undone; that feature's next attempt runs
-    from the new head. A feature that halts gets the usual human decision, one per node run
+    from the new head. Every feature that ends with a design question parks (ADR 0020). A
+    feature that halts without one gets the usual human decision, one per node run
     (guardrail 29): every subgraph is checkpointed and every merge checks whether it already
     happened (I-164), so the node re-run that the answer starts repeats neither. Worktrees are
     removed only once the node returns."""
@@ -1570,6 +1971,7 @@ def _run_batch(
     done: list[FeatureRun] = []
     failed_hard = False
     halted: tuple[_BatchJob, Any] | None = None
+    parked: list[tuple[FeatureRun, list[str]]] = []  # asked once the merges are done
     for job, outcome in zip(jobs, outcomes, strict=True):
         fid = job.feat.id
         if isinstance(outcome, HarnessError):
@@ -1590,6 +1992,14 @@ def _run_batch(
             continue
         final = outcome.state
         if outcome.paused or final.exit_reason is not ExitReason.SUCCESS:
+            # every question parks (ADR 0020), unless a stop already asked about this attempt
+            asked = asked_question(final)
+            if asked is not None and not decided_at_a_stop(ctx, saver, job.fctx.thread_id):
+                record, tail, line = _park_record(job.fctx, saver, job.run, outcome, asked)
+                done.append(record)
+                parked.append((record, tail))
+                entries.append(fact(line))
+                continue
             halted = halted or (job, outcome)  # the first, in plan order; the rest wait
             continue
         head = final.github.head_sha or git_out(job.fctx.sandbox, "rev-parse", "HEAD")
@@ -1612,6 +2022,11 @@ def _run_batch(
                     f"alone from the new head"
                 )
             )
+    # Before a decision's interrupt, which ends this node run: the node re-run that its answer
+    # starts parks these again, and every ask checks the world first, so none is asked twice.
+    # Offline, after the merges: the question commits move the milestone head.
+    for record, tail in parked:
+        entries += _ask(ctx, plan, record, tail)
     before = [*state.feature_runs, *done]
     if failed_hard:
         result: dict[str, Any] = {
@@ -1640,10 +2055,170 @@ def _run_batch(
     return result
 
 
-def after_feature(state: ProductBuildState) -> Literal["feature", "integrate", "halt"]:
+def after_feature(state: ProductBuildState) -> Literal["answers", "halt"]:
+    """Every feature pass, and the gate, comes after the ``answers`` node (ADR 0020)."""
+    return "halt" if state.exit_reason is not None else "answers"
+
+
+def _route_features(
+    state: ProductBuildState,
+) -> Literal["feature", "questions_wait", "integrate"]:
+    """A buildable feature first; else the open questions; else the milestone's checks."""
+    if state.next_feature() is not None:
+        return "feature"
+    return "questions_wait" if state.parked_runs() else "integrate"
+
+
+def answers(ctx: RunContext) -> Node:
+    """Before every feature pass and before the gate: read the answers to the milestone's
+    parked features (ADR 0020 decision 4), then route. A node of its own, with no interrupt:
+    a node that asks the human (a feature's decision, ``questions_wait``) runs again from the
+    top when it is answered, and an answer read there would change which feature it decides."""
+
+    def node(state: ProductBuildState) -> dict[str, Any]:
+        plan = state.milestone
+        assert plan is not None
+        entries = retry_github_posts(ctx, state)  # what failed on an earlier pass
+        runs, read = pick_up_answers(ctx, state)
+        entries += read
+        now = state.model_copy(update={"feature_runs": runs})
+        route = _route_features(now)
+        if route == "questions_wait":
+            # The stop's own node run loses its facts while it waits, so they are said here.
+            entries.append(
+                fact(
+                    f"{plan.id} waits at questions_wait: nothing else in it can build, and "
+                    + ", ".join(
+                        f"{r.question_id} ({issue_link(ctx, now, r.feature_id)})"
+                        for r in now.parked_runs()
+                    )
+                    + " wait for an answer (ADR 0020)"
+                )
+            )
+        elif route == "integrate":
+            entries.append(fact("all milestone features passed or skipped"))
+        return {"feature_runs": runs, "phase": route, "ledger": entries}
+
+    return node
+
+
+def after_answers(state: ProductBuildState) -> Literal["feature", "questions_wait", "integrate"]:
+    return _route_features(state)
+
+
+def _open_question(ctx: RunContext, state: ProductBuildState, run: FeatureRun) -> dict[str, Any]:
+    qid = _qid(run)
+    return {
+        "feature": run.feature_id,
+        "attempt": run.attempt,
+        "question_id": qid,
+        "question": run.question or "",
+        "issue": run.issue_number,
+        "link": issue_link(ctx, state, run.feature_id),
+        "answer_file": str(questions.answer_path(answers_workspace(ctx), qid)),
+    }
+
+
+def questions_wait(ctx: RunContext) -> Node:
+    """The milestone's one stop for its open questions (ADR 0020 decision 5), reached only
+    when nothing else in it can build. ``proceed`` defers every parked feature as a ``skip``
+    does (I-116; the gate does not judge it, #140); ``stop`` ends the build; any other reply,
+    and a rerun of ``scio build``, reads the answers again and goes on if one came, or waits
+    here again. Nothing is read before the reply: an answer that arrived meanwhile must not
+    override an explicit ``proceed`` or ``stop``."""
+
+    def node(state: ProductBuildState) -> dict[str, Any]:
+        plan = state.milestone
+        assert plan is not None
+        parked = state.parked_runs()
+        listed = [_open_question(ctx, state, r) for r in parked]
+        lines = [
+            f"- {q['question_id']} ({q['feature']} attempt {q['attempt']}): "
+            f"{' '.join(str(q['question']).split())[:300]} [{q['link']}]"
+            for q in listed
+        ]
+        reply = str(
+            interrupt(
+                {
+                    "question": f"Milestone {plan.id} waits for the answers to {len(listed)} "
+                    "design question(s); nothing else in it can build:\n"
+                    + "\n".join(lines)
+                    + f"\nAnswer each on its issue with a comment that starts with "
+                    f"'{questions.ANSWER_PREFIX}', or from the SCIO dashboard (offline: its "
+                    "answer file), then reply anything, or run scio build again: the build "
+                    "reads the answers and goes on. Reply 'proceed' to defer the parked "
+                    "features, as a skip does (each stays open and the next milestone plans "
+                    "it again), and go on to the gate; 'stop' to end the build.",
+                    "questions": listed,
+                    "cost_usd": total_usd(state),
+                    "resume": _resume(ctx, "<proceed|stop|anything else: read the answers>"),
+                }
+            )
+        )
+        choice = reply.strip().lower()
+        notes = [f"{plan.id} questions: {reply.strip()[:120]}"]
+        if choice.startswith("proceed"):
+            ids = {r.thread_id for r in parked}
+            runs = [
+                r.model_copy(update={"status": "skipped", "decision": "skip"})
+                if r.thread_id in ids
+                else r
+                for r in state.feature_runs
+            ]
+            entries: list[LedgerEntry] = []
+            for r in parked:
+                entries.append(
+                    decision(
+                        f"{r.feature_id} deferred at questions_wait ({r.question_id} "
+                        "unanswered): this milestone goes on without it, it stays open and the "
+                        "next milestone plans it again (I-116, #140)",
+                        source=Role.HUMAN,
+                    )
+                )
+                # its issue no longer waits: the label comes off and the issue says why
+                entries += [fact(line) for line in _post_deferred(ctx, r)]
+            return {
+                "feature_runs": runs,
+                "phase": "integrate",
+                "human_notes": notes,
+                "ledger": entries,
+            }
+        if choice.startswith(QUESTIONS_STOP):
+            return {
+                "exit_reason": "stopped",
+                "phase": "halted",
+                "human_notes": notes,
+                "ledger": [
+                    decision(f"build stopped at {plan.id} questions_wait", source=Role.HUMAN)
+                ],
+            }
+        runs, entries = pick_up_answers(ctx, state)
+        if _route_features(state.model_copy(update={"feature_runs": runs})) == "feature":
+            return {
+                "feature_runs": runs,
+                "phase": "feature",
+                "human_notes": notes,
+                "ledger": entries,
+            }
+        waiting = ", ".join(str(q["question_id"]) for q in listed)
+        return {
+            "feature_runs": runs,
+            "phase": "questions_wait",
+            "human_notes": notes,
+            "ledger": [*entries, fact(f"no answer yet to {waiting}; asking again")],
+        }
+
+    return node
+
+
+def after_questions_wait(
+    state: ProductBuildState,
+) -> Literal["feature", "questions_wait", "integrate", "halt"]:
     if state.exit_reason is not None:
         return "halt"
-    return "feature" if state.next_feature() is not None else "integrate"
+    if state.phase == "feature":
+        return "feature"
+    return "integrate" if state.phase == "integrate" else "questions_wait"
 
 
 def integration_checks(ctx: RunContext, spec: ProductSpec | None = None) -> tuple[str, bool]:
@@ -2698,7 +3273,9 @@ def build_product_build_graph(
     n("load", load)
     n("plan_milestone", plan_milestone)
     n("issues", issues)
+    n("answers", answers)
     g.add_node("feature", feature(ctx, saver) if ctx is not None else _unbound("feature"))
+    n("questions_wait", questions_wait)
     n("integrate", integrate)
     n("milestone_gate", milestone_gate)
     n("gate_decision", gate_decision)
@@ -2718,9 +3295,22 @@ def build_product_build_graph(
         after_plan,
         {"issues": "issues", "release": "release_check", "halt": "done"},
     )
-    g.add_edge("issues", "feature")
+    g.add_edge("issues", "answers")
     g.add_conditional_edges(
-        "feature", after_feature, {"feature": "feature", "integrate": "integrate", "halt": "done"}
+        "answers",
+        after_answers,
+        {"feature": "feature", "questions_wait": "questions_wait", "integrate": "integrate"},
+    )
+    g.add_conditional_edges("feature", after_feature, {"answers": "answers", "halt": "done"})
+    g.add_conditional_edges(
+        "questions_wait",
+        after_questions_wait,
+        {
+            "feature": "feature",
+            "questions_wait": "questions_wait",
+            "integrate": "integrate",
+            "halt": "done",
+        },
     )
     g.add_conditional_edges(
         "integrate", after_integrate, {"gate": "milestone_gate", "halt": "done"}
@@ -2802,10 +3392,18 @@ def run_build(ctx: RunContext, *, gh_repo: str | None = None) -> BuildOutcome:
 
 
 def resume_build(ctx: RunContext, decision: str | None) -> BuildOutcome:
+    """Continue the build thread; ``decision`` answers its stop. A rerun without one at
+    ``questions_wait`` reads the answers again, as a reply there does (ADR 0020): the stop
+    would otherwise only ask again, and the operator or the recovery tick reruns the build
+    once an answer is in."""
     config = {"configurable": {"thread_id": ctx.thread_id}}
     with open_checkpointer(ctx.settings.checkpoint_dsn) as saver:
         graph: Any = build_product_build_graph(ctx, saver).compile(checkpointer=saver)
-        ctx.carry_spend(graph.get_state(config).values)  # this thread's spend so far (I-110)
+        snapshot = graph.get_state(config)
+        ctx.carry_spend(snapshot.values)  # this thread's spend so far (I-110)
+        waiting = any(task.interrupts for task in snapshot.tasks)
+        if decision is None and waiting and "questions_wait" in snapshot.next:
+            decision = QUESTIONS_RERUN
         inp: Any = Command(resume=decision) if decision is not None else None
         raw = graph.invoke(inp, config=config, durability=DURABILITY)
     return _outcome(raw)

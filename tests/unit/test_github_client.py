@@ -60,6 +60,8 @@ class FakeGh:
         if a[:2] == ["repo", "view"]:
             return RunResult(0, json.dumps({"defaultBranchRef": {"name": "main"}}), "")
         if a[:2] == ["issue", "view"]:
+            # an issue this fake created shows its own labels; any other number is canned
+            known = self.issues.get(int(a[2]))
             return RunResult(
                 0,
                 json.dumps(
@@ -67,12 +69,27 @@ class FakeGh:
                         "number": int(a[2]),
                         "title": "T",
                         "body": "B",
-                        "labels": [{"name": "feature"}],
+                        "labels": known["labels"] if known else [{"name": "feature"}],
                         "url": "u",
                     }
                 ),
                 "",
             )
+        if a[:2] == ["issue", "edit"]:
+            # as GitHub does for `issue create` (I-113): a label the repository lacks fails
+            issue = self.issues.get(int(a[2]))
+            if issue is None:
+                return RunResult(1, "", f"FakeGh: no issue {a[2]}")
+            names = [str(lb["name"]) for lb in issue["labels"]]  # type: ignore[attr-defined]
+            for i, x in enumerate(a):
+                if x == "--add-label":
+                    if a[i + 1] not in self.labels:
+                        return RunResult(1, "", f"could not add label: '{a[i + 1]}' not found")
+                    names += [a[i + 1]] if a[i + 1] not in names else []
+                if x == "--remove-label":
+                    names = [n for n in names if n != a[i + 1]]
+            issue["labels"] = [{"name": n} for n in names]
+            return RunResult(0, f"https://github.com/o/r/issues/{a[2]}\n", "")
         if a[:2] == ["issue", "list"]:
             # as gh does: issues only, newest first, at most --limit rows (30 by default). A
             # --search phrase ends at the next '"', so a title with a '"' in it finds nothing:
@@ -339,6 +356,48 @@ def test_upsert_comment_creates_then_updates(gh: tuple[GitHubClient, FakeGh]) ->
         and "<!-- scio:plan -->" in fake.comments[3][cid]
     )
     assert [w.detail.split()[0] for w in client.writes] == ["created", "updated"]
+
+
+def test_comment_once_posts_the_body_as_it_is_once(gh: tuple[GitHubClient, FakeGh]) -> None:
+    """ADR 0020: a question's marker is its comment's first line, so nothing is appended,
+    and a comment that already carries the marker is not posted again."""
+    client, fake = gh
+    body = "<!-- scio:question feature=P1 attempt=1 id=P1-a1 -->\n\nWhich rule?"
+    cid = client.comment_once(3, body, marker="id=P1-a1 -->")
+    again = client.comment_once(3, body + "\nedited", marker="id=P1-a1 -->")
+    assert cid == again and fake.comments[3] == {cid: body}
+    assert [(w.op, w.noop) for w in client.writes] == [
+        ("comment_once", False),
+        ("comment_once", True),
+    ]
+
+
+def test_issue_comments_are_the_bodies_oldest_first(gh: tuple[GitHubClient, FakeGh]) -> None:
+    client, fake = gh
+    fake.comments[4] = {205: "third", 101: "first", 150: "second"}  # listed out of order
+    assert client.issue_comments(4) == ["first", "second", "third"]
+    assert client.issue_comments(5) == []
+    (argv, _), (argv2, _) = fake.calls
+    assert argv == ["api", "--paginate", "repos/o/r/issues/4/comments"] and argv2[0] == "api"
+
+
+def test_add_and_remove_label(gh: tuple[GitHubClient, FakeGh]) -> None:
+    """The label is created when the repository lacks it (``issue edit --add-label`` fails
+    on a missing label, I-113); adding or removing twice is a no-op."""
+    client, fake = gh
+    issue = client.ensure_issue(title="P1: x", body="b", milestone=None)
+    assert client.add_label(issue.number, "needs-answer") is True
+    assert "needs-answer" in fake.labels
+    assert client.add_label(issue.number, "needs-answer") is False
+    assert client.get_issue(issue.number).labels == ["needs-answer"]
+    assert client.remove_label(issue.number, "needs-answer") is True
+    assert client.remove_label(issue.number, "needs-answer") is False
+    assert client.get_issue(issue.number).labels == []
+    edits = [a for a, _ in fake.calls if a[:2] == ["issue", "edit"]]
+    assert edits == [
+        ["issue", "edit", str(issue.number), "-R", "o/r", "--add-label", "needs-answer"],
+        ["issue", "edit", str(issue.number), "-R", "o/r", "--remove-label", "needs-answer"],
+    ]
 
 
 def test_ensure_draft_pr_then_noop_then_ready(gh: tuple[GitHubClient, FakeGh]) -> None:
