@@ -4,7 +4,7 @@ The supervisor keeps a `scio build` alive through failures in SCIO itself. It ru
 1. Preserves the build's state.
 2. Opens a `recovery` issue.
 3. Starts a Claude Code session that repairs SCIO in a tested PR.
-4. Once the owner has merged that PR, moves `.scio/live-wt`.
+4. Once the owner has merged that PR, moves `.scio/live-wt` to the merge commit. It never moves it backwards: a live-wt whose HEAD already contains the merge (the owner moved it to a newer `main` with `scripts/move_live_wt.py`) stays where it is, the timeline says "live-wt at <head> already contains the fix <sha>; not moved", and the next steps run on that HEAD. Its `uv.lock` is compared with that HEAD, so a lock change made on `main` after the repair is not blamed on it (I-237).
 5. Checks that the repaired SCIO can read the halted thread.
 6. Replays the original command, so the build resumes from its checkpoint.
 

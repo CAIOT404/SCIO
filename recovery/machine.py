@@ -675,6 +675,9 @@ def advance(incident: Incident, deps: Deps) -> Incident:
     - AWAITING_MERGE:
       - merged (``mergedAt``) with green CI on the merge SHA: ``runtime.move_live_wt``,
         then -> RUNTIME_UPDATED;
+      - never backwards (I-237): when live-wt's HEAD already contains the merge SHA, it
+        stays there with a note, and that HEAD is the effective target
+        (``live_wt_target``) and the rollback point -> RUNTIME_UPDATED;
       - closed without a merge -> ESCALATED;
       - a ``RuntimeRefused`` that cannot be retried -> ESCALATED.
     - RUNTIME_UPDATED:
@@ -1005,6 +1008,21 @@ def _on_awaiting_merge(incident: Incident, deps: Deps) -> Incident:
     iid = incident.incident_id
     incident.merge_sha = sha
     try:
+        # Never backwards (I-237). Read fresh on every tick, never from the step log: a
+        # move that waited (a SCIO process ran) may find live-wt moved past the fix since.
+        target = _effective_target(cfg, sha, deps)
+    except RuntimeError as exc:
+        return _escalate(incident, f"live-wt could not be read: {exc}", deps)
+    incident.live_wt_target = target
+    if target != sha:
+        # live-wt's HEAD already contains the fix: it stays, and it is its own rollback
+        # point, whatever an earlier tick recorded before the owner moved it.
+        incident.prev_live_wt_sha = target
+        note = f"live-wt at {target[:12]} already contains the fix {sha[:12]}; not moved"
+        return _transition(
+            incident, IncidentState.RUNTIME_UPDATED, deps, f"PR #{number} merged; {note}"
+        )
+    try:
         # The rollback point is read once, before the move, and kept in the step log: a
         # re-run of move_live_wt returns the target, never the old SHA.
         prev_sha = deps.store.step(
@@ -1014,12 +1032,12 @@ def _on_awaiting_merge(incident: Incident, deps: Deps) -> Incident:
         deps.store.save_incident(incident)
 
         def probe() -> str | None:
-            return prev_sha if runtime.head(cfg.live_wt, git=deps.git) == sha else None
+            return prev_sha if runtime.head(cfg.live_wt, git=deps.git) == target else None
 
         deps.store.step(
             iid,
             "live-wt",
-            lambda: runtime.move_live_wt(cfg, sha, git=deps.git, scio_running=deps.scio_running),
+            lambda: runtime.move_live_wt(cfg, target, git=deps.git, scio_running=deps.scio_running),
             probe=probe,
         )
     except runtime.RuntimeRefused as exc:
@@ -1037,6 +1055,18 @@ def _on_awaiting_merge(incident: Incident, deps: Deps) -> Incident:
     )
 
 
+def _effective_target(cfg: WorkspaceConfig, sha: str, deps: Deps) -> str:
+    """The commit the health check and the resume run on: live-wt's HEAD when it already
+    contains the merge ``sha`` (moved past it, by the owner's ``move_live_wt.py``), else
+    ``sha``, the move's target. A HEAD equal to ``sha`` answers ``sha``, so that case keeps
+    its own rollback point (:func:`_rollback_point`). Raises ``RuntimeError`` when git
+    cannot read live-wt or answer."""
+    current = runtime.head(cfg.live_wt, git=deps.git)
+    if current != sha and runtime.contains(cfg.live_wt, sha, git=deps.git):
+        return current
+    return sha
+
+
 def _rollback_point(incident: Incident, cfg: WorkspaceConfig, sha: str, deps: Deps) -> str:
     """live-wt's HEAD before the move. If something already moved it to ``sha``, the SHA
     the failed run ran on (its record) is the one to go back to."""
@@ -1048,9 +1078,14 @@ def _rollback_point(incident: Incident, cfg: WorkspaceConfig, sha: str, deps: De
 
 def _health(incident: Incident, run: RunRecord, cfg: WorkspaceConfig, deps: Deps) -> dict[str, Any]:
     """The health verdict, recorded once in the step log, so that a re-run after the
-    rollback never finds the old code healthy and resumes on it."""
+    rollback never finds the old code healthy and resumes on it.
+
+    uv.lock is compared between the rollback point and the effective target, so a lock
+    change made on main after the repair is not blamed on it (I-237). An incident recorded
+    before ``live_wt_target`` existed compares with its merge SHA, as it did."""
+    target = incident.live_wt_target or incident.merge_sha
     try:
-        if runtime.lock_changed(cfg, incident.prev_live_wt_sha, incident.merge_sha, git=deps.git):
+        if runtime.lock_changed(cfg, incident.prev_live_wt_sha, target, git=deps.git):
             return {"lock_changed": True, "problems": []}
         work = deps.home / "incidents" / incident.incident_id / "health"
         work.mkdir(parents=True, exist_ok=True)
