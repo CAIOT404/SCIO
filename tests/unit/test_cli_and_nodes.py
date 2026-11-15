@@ -113,8 +113,11 @@ def test_the_local_ci_line_runs_python_tools_as_modules() -> None:
 
     root = Path(__file__).resolve().parents[2]
     text = (root / "CLAUDE.md").read_text(encoding="utf-8")
-    line = next(ln for ln in text.splitlines() if ln.startswith("- Run the CI-equivalent locally"))
+    # Since #122 W-14 the line is "Run the gate before every push" (quick by default, --full
+    # for CI's run); it still names the one command, and the gate's steps are unchanged.
+    line = next(ln for ln in text.splitlines() if ln.startswith("- Run the gate before every push"))
     assert "`uv run python scripts/gate.py`" in line, line[:120]
+    assert "gate.py --full" in text, "CLAUDE.md names the full gate"
     spec = importlib.util.spec_from_file_location("gate", root / "scripts" / "gate.py")
     assert spec is not None and spec.loader is not None
     gate = importlib.util.module_from_spec(spec)
