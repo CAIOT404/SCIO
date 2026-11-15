@@ -453,9 +453,11 @@ def test_one_feature_halts_while_the_other_passes_and_a_resume_never_reruns_it(
     assert not any(t.endswith("-a2") for t in requests.threads)
     runs = sorted((r.feature_id, r.attempt, r.status) for r in s.feature_runs)
     assert runs == [("P1", 1, "skipped"), ("P2", 1, "passed")]
-    # the build goes on without P1: the gate overrides its pass and asks the human
-    assert out.paused and s.phase == "gate", s.ledger[-4:]
-    assert s.last_gate and "features not passed: P1" in s.last_gate.reasoning
+    # the build goes on without P1: the owner deferred it, so the gate passes and the build
+    # stops only at the milestone's merge (#140; before, the gate asked a second time)
+    assert out.paused and s.phase == "merge_wait", s.ledger[-4:]
+    assert s.last_gate and s.last_gate.verdict == "pass"
+    assert "features not passed" not in s.last_gate.reasoning
     subjects = _git(repo, "log", "--format=%s", "milestone/1").splitlines()
     assert sum(x.startswith("feat: todo add then todo list") for x in subjects) == 1
     assert not (worktrees_root(ctx) / _thread("P1")).exists()

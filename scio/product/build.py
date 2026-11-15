@@ -1716,14 +1716,35 @@ def after_integrate(state: ProductBuildState) -> Literal["gate", "halt"]:
     return "halt" if state.exit_reason is not None else "gate"
 
 
+def _deferred_by_owner(state: ProductBuildState, feature_id: str) -> bool:
+    """The owner answered ``skip`` for this feature in this milestone: it is deferred to the
+    next one (I-116), not undelivered, so the gate neither judges it nor stops on it (#140).
+    A skipped run nobody answered ``skip``, or one from another milestone, is not deferred."""
+    run = state.latest_run(feature_id)
+    mid = state.milestone.id if state.milestone is not None else None
+    return (
+        run is not None
+        and run.status == "skipped"
+        and run.decision == "skip"
+        and run.milestone == mid
+    )
+
+
 def milestone_gate(ctx: RunContext) -> Node:
-    """One Opus verdict on the milestone; a failing check or a failed feature overrides it."""
+    """One Opus verdict on the features built in this milestone; a failing check, a feature
+    that did not pass, or a milestone with every feature deferred overrides it. A feature the
+    owner skipped is named as deferred and not judged (#140)."""
 
     def node(state: ProductBuildState) -> dict[str, Any]:
         spec, plan = state.spec, state.milestone
         assert spec is not None and plan is not None
+        deferred = [mf.id for mf in plan.features if _deferred_by_owner(state, mf.id)]
         lines = [f"{MILESTONE_GATE_HEADER}: {plan.id} {plan.title}", "", "## Features"]
+        if len(deferred) == len(plan.features):
+            lines.append("(none built: the owner deferred every feature)")
         for mf in plan.features:
+            if mf.id in deferred:
+                continue
             f = _feature(spec, mf.id)
             run = state.latest_run(mf.id)
             summary = (
@@ -1734,6 +1755,15 @@ def milestone_gate(ctx: RunContext) -> Node:
                 else "run: none"
             )
             lines += [f"### {f.id}: {f.description} ({summary})", *[f"- {a}" for a in f.acceptance]]
+        if deferred:
+            lines += [
+                "",
+                "## Deferred by the owner (not judged in this milestone)",
+                "The owner answered 'skip' for these features: each stays open and the next "
+                "milestone plans it again. Their acceptance criteria are not this milestone's "
+                "to meet: do not judge them or list them as unmet.",
+                *[f"- {fid}: {_feature(spec, fid).description}" for fid in deferred],
+            ]
         lines += [
             "",
             "## Integration checks (ground truth)",
@@ -1754,16 +1784,21 @@ def milestone_gate(ctx: RunContext) -> Node:
             out: GateOutput = ctx.harness.structured(req, GateOutput).value
         except BudgetExceeded as exc:
             return _halt(ctx, "budget", f"budget exhausted at the milestone gate: {exc}")
+        # A deferred feature is not undelivered (#140); a failed or unrun one still stops.
         failed = [
             mf.id
             for mf in plan.features
-            if (r := state.latest_run(mf.id)) is None or r.status != "passed"
+            if mf.id not in deferred
+            and ((r := state.latest_run(mf.id)) is None or r.status != "passed")
         ]
-        if out.verdict == "pass" and (not state.integration_ok or failed):
+        nothing_built = len(deferred) == len(plan.features)
+        if out.verdict == "pass" and (not state.integration_ok or failed or nothing_built):
             why = (
                 "integration checks failed"
                 if not state.integration_ok
                 else ("features not passed: " + ", ".join(failed))
+                if failed
+                else "every feature was deferred by the owner: nothing was delivered"
             )
             out = out.model_copy(
                 update={
