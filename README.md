@@ -263,7 +263,7 @@ Product Mode ([docs/PRODUCT_MODE.md](docs/PRODUCT_MODE.md), ADR 0007; tracked on
 - M10 (done, 0.6.0): `node-ts` profile, stack detection, a stack-neutral product path (ADR 0014); live TypeScript milestone `notes_service`
 - M11 (done, 0.7.0): product-ready quality bar, release gate, product eval suite p001 to p003 passing live (ADR 0015)
 - post-M11 (done, 0.8.0): squash-safe `--gh` merges, a release PR, `scio upgrade`, Node in the Docker sandbox, `run_app` in a container, parallel CI tests (ADR 0016)
-- dashboard (done, 0.9.0): `scio dashboard`, a live read-only view of every thread across workspaces (ADR 0017)
+- dashboard (done, 0.9.0): `scio dashboard`, a live view of every thread across workspaces (ADR 0017), read-only except one write (#141, ADR 0020). It lists the features parked on a design question, and its answer box posts the owner's `answer:` comment to the feature's issue and records it in the workspace.
 - parallel features (done, 0.10.0, [issue #82](https://github.com/NewMe505/SCIO/issues/82)): opt-in `SCIO_PARALLEL_FEATURES`, independent features in worktrees, merged and rechecked by one integrator (ADR 0018)
 - the graphcalc live run's fixes (done, 0.10.0): S6 to S11 (issues #75, #77, #79, #84), Claude Code sessions in `--safe-mode` (#87), faster gates with evals beside tests (#88), and push-gate hooks that follow Git Bash paths and run in every session (#91, #93)
 

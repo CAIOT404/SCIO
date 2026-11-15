@@ -60,6 +60,7 @@ The shared shapes are fixed in [`scio/dashboard/contract.py`](../../scio/dashboa
    - One unreadable root does not hide the others. The threads list skips it and logs why, and `/api/threads?root=` for that root answers 503.
 10. **Out of scope, left for a v2.**
    - Answering stops from the page. That would make the dashboard a writer of the checkpoint DB beside the build, and SCIO keeps one writer per product ([ARCHITECTURE.md](../ARCHITECTURE.md)). Stops are answered with `scio build --decision` or `scio new --decision`, as before.
+   - *Amended 2026-11-15 (#141):* decision 10 amended by [ADR 0020](0020-questions-are-an-async-channel.md): the answer box. The page lists the parked features' design questions and answers them through `POST /api/answer`, the one write route (decision 1's "no write route" now means no other; `test_every_route_is_a_read` allows exactly it). It needs a per-launch token. It posts an `answer:` comment on the feature's issue when the build has a GitHub repository (bounded at 30 s), and writes the workspace's answer file in every case, so a failed post loses nothing and the page says why it failed. It never writes a checkpoint. Stops are still answered with `--decision`.
    - Postgres checkpoints (`postgresql://` in `SCIO_CHECKPOINT_DSN`). A root is a directory with a SQLite checkpoint DB.
 
 ## Consequences

@@ -7,7 +7,7 @@ and ``scio status`` (product mode), ``scio report``, ``scio dashboard``.
     scio new --prompt "<idea>" --dir DIR [--gh owner/name]   (resume: --thread ID --decision)
     scio build --product DIR [--gh owner/name] [--thread ID] [--decision "<text>"]
     scio status --product DIR
-    scio dashboard [--root DIR ...] [--port 8765]  # read-only, on 127.0.0.1 (ADR 0017)
+    scio dashboard [--root DIR ...] [--port 8765]  # on 127.0.0.1; one write: answers (ADR 0020)
 
 ``run``, ``resume``, ``new`` and ``build`` take ``--outcome-file PATH``: one JSON object
 written there on every exit path (ADR 0019 decision 11), for the recovery supervisor.
@@ -488,8 +488,11 @@ that wait only by ``timeout_graceful_shutdown``."""
 
 
 def _dashboard(args: argparse.Namespace) -> int:
-    """``scio dashboard``: a live, read-only view of every thread under the roots (ADR 0017).
-    A root is a directory SCIO ran in; it holds ``.scio/checkpoints.sqlite``."""
+    """``scio dashboard``: a live view of every thread under the roots (ADR 0017), read-only
+    but for one write: the owner's answer to a parked feature's question (``POST /api/answer``,
+    token-protected), which posts an issue comment and writes the workspace's answer file, and
+    never writes a checkpoint (ADR 0020). A root is a directory SCIO ran in; it holds
+    ``.scio/checkpoints.sqlite``."""
     try:
         import uvicorn
 
@@ -508,7 +511,10 @@ def _dashboard(args: argparse.Namespace) -> int:
     for w in source.roots():
         note = "" if w.present else " (no checkpoint DB yet: it lists once SCIO runs there)"
         print(f"root {w.name}: {w.path}{note}")
-    print(f"scio dashboard on http://{DASHBOARD_HOST}:{args.port} (read-only; Ctrl+C stops it)")
+    print(
+        f"scio dashboard on http://{DASHBOARD_HOST}:{args.port} "
+        "(read-only except answers to open questions; Ctrl+C stops it)"
+    )
     uvicorn.run(
         create_app(source),
         host=DASHBOARD_HOST,
@@ -653,7 +659,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     upgrade.add_argument("--product", type=Path, required=True)
     dash = sub.add_parser(
-        "dashboard", help="a live, read-only view of every thread (needs the dashboard extra)"
+        "dashboard",
+        help="a live view of every thread, read-only but for answering parked questions "
+        "(needs the dashboard extra)",
     )
     dash.add_argument(
         "--root",
