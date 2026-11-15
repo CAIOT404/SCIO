@@ -15,6 +15,12 @@ It prints what a session used to gather with about ten commands:
 - the recovery supervisor's runs and open incidents (``python -m recovery status`` in
   ``.scio/recovery-wt``);
 - the next ledger id and guardrail (``next_ids.py``);
+- the metrics ``scripts/metrics.py --write`` cached in the main checkout's
+  ``.scio/metrics.json``, and their age (issue #141). It never computes them in the hook: the
+  ``Stop`` hook has 30 seconds, and a merged-PR and CI-run read takes longer. The hook's
+  background run (``--refresh-metrics``) runs ``metrics.py --write`` first when the cache is
+  missing or over 6 hours old, with ``--product-root $SCIO_METRICS_PRODUCT_ROOT`` when set,
+  and says in its output when that failed;
 - the Workflow v2 checklist's count and open items, when ``scripts/workflow_status.py`` is
   in the checkout.
 
@@ -31,6 +37,7 @@ list, gate-stamp lookup and recovery-status reader. Standard library only.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import io
 import json
@@ -53,6 +60,18 @@ RUNNING = Path(".scio") / "gate" / "RUNNING"
 FACTS = Path(".scio") / "session-state.md"
 LIVE_WT = Path(".scio") / "live-wt"
 RECOVERY_WT = Path(".scio") / "recovery-wt"
+METRICS = Path(".scio") / "metrics.json"
+METRICS_RUN = "uv run python scripts/metrics.py --write"
+METRICS_STALE_S = 24 * 3600
+"""Shown as stale past this age."""
+METRICS_REFRESH_S = 6 * 3600
+"""The ``Stop`` hook's background run refreshes the cache past this age (issue #141)."""
+METRICS_RETRY_S = 30 * 60
+"""At most one refresh attempt per this long, so failures and long runs never stack."""
+METRICS_TIMEOUT_S = 600.0
+METRICS_ATTEMPT = Path(".scio") / "metrics.refresh.json"
+METRICS_ROOT_ENV = "SCIO_METRICS_PRODUCT_ROOT"
+"""The product workspace ``metrics.py --product-root`` reads (graphcalc's ``graphcalc-run``)."""
 ISSUE_LABELS = ("live-run", "proposal")
 PR_FIELDS = "number,title,headRefName,baseRefName,isDraft,mergeStateStatus,statusCheckRollup"
 OPEN_ITEMS_SHOWN = 12
@@ -336,6 +355,8 @@ class State:
     ids: tuple[str, int] | str = ""
     workflow: tuple[str, list[str]] | None = None
     """("12/45 closed", ["W-11 · title", ...]); ``None`` without the checklist script."""
+    metrics: tuple[str, list[tuple[str, str]]] = ("not read", [])
+    """("computed <when>, 3.0 h old", [(label, text), ...]) from ``.scio/metrics.json``."""
 
 
 def _git(root: Path, runner: Runner, *args: str) -> str:
@@ -420,7 +441,113 @@ def _workflow(root: Path) -> tuple[str, list[str]] | None:
     return count, [f"{it.id} · {it.title}" for it, s in rows if s not in closed_states]
 
 
-def collect(root: Path, runner: Runner, *, fetch: bool = False) -> State:
+def _age(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds < 90 * 60:
+        return f"{round(seconds / 60)} min"
+    if seconds < 48 * 3600:
+        return f"{seconds / 3600:.1f} h"
+    return f"{seconds / 86400:.1f} d"
+
+
+def _utc(value: object) -> datetime:
+    """An ISO 8601 time in UTC; raises on anything else."""
+    at = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return at if at.tzinfo else at.replace(tzinfo=UTC)
+
+
+def cached_metrics(main: Path, now: datetime | None = None) -> tuple[str, list[tuple[str, str]]]:
+    """The numbers ``scripts/metrics.py --write`` left in ``<main>/.scio/metrics.json``, as
+    ``(when and how old, rows)``, the rows by ``metrics.py``'s own ``summary_rows``. Read only:
+    computing them takes longer than the ``Stop`` hook may (issue #141). A missing file says
+    how to make it; one that cannot be read is one line."""
+    path = main / METRICS
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return f"none cached: run `{METRICS_RUN}`", []
+    except OSError as exc:
+        return f"unreadable ({exc})", []
+    try:
+        data = json.loads(text)
+        computed = _utc(data["computed_at"])
+        rows = sibling("metrics").summary_rows(data)
+    except Exception as exc:  # a cache from another version is one line, never a failure
+        return f"unreadable ({type(exc).__name__}: {exc})", []
+    age = ((now or datetime.now(UTC)) - computed).total_seconds()
+    head = f"computed {computed.astimezone(UTC):%Y-%m-%d %H:%M} UTC, {_age(age)} old"
+    if age > METRICS_STALE_S:
+        head += f"; older than a day: run `{METRICS_RUN}`"
+    return head, rows
+
+
+def _venv_python(*roots: Path) -> str:
+    """The first checkout's own interpreter: the ``Stop`` hook runs this file with the system
+    ``python``, and ``metrics.py --product-root`` imports SCIO and the supervisor. The venv's
+    ``python.exe`` is the interpreter ``uv run python`` starts, not a blocked launcher."""
+    for root in roots:
+        exe = root / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        if exe.is_file():
+            return str(exe)
+    return sys.executable
+
+
+def refresh_metrics(root: Path, main: Path, runner: Runner, now: datetime) -> str | None:
+    """The ``Stop`` hook's background run (``--refresh-metrics``): when ``.scio/metrics.json``
+    is missing or older than ``METRICS_REFRESH_S``, run ``metrics.py --write`` once, with
+    ``--product-root $SCIO_METRICS_PRODUCT_ROOT`` when it is set (issue #141). An attempt is
+    made at most once per ``METRICS_RETRY_S``, so a turn's run never stacks on another's, and a
+    failed one is not retried every turn: ``.scio/metrics.refresh.json`` holds the last attempt
+    and its failure. Returns that failure while the cache is stale, for the session-state
+    output and nowhere else; never raises."""
+    marker = main / METRICS_ATTEMPT
+    try:
+        try:
+            computed: datetime | None = _utc(
+                json.loads((main / METRICS).read_text(encoding="utf-8"))["computed_at"]
+            )
+        except (OSError, ValueError, KeyError, TypeError):
+            computed = None
+        if computed is not None and (now - computed).total_seconds() < METRICS_REFRESH_S:
+            return None
+        try:
+            last = json.loads(marker.read_text(encoding="utf-8"))
+            tried, error = _utc(last["at"]), last.get("error")
+        except (OSError, ValueError, KeyError, TypeError):
+            tried, error = None, None
+        if tried is not None and 0 <= (now - tried).total_seconds() < METRICS_RETRY_S:
+            return f"{error} (at {tried:%H:%M} UTC)" if error else None
+        _note_attempt(marker, now, None)
+        argv = [_venv_python(root, main), str(SCRIPTS / "metrics.py"), "--write"]
+        argv += ["--root", str(root)]
+        product = os.environ.get(METRICS_ROOT_ENV, "").strip()
+        if product:
+            argv += ["--product-root", product]
+        proc = runner.run(argv, cwd=root, timeout=METRICS_TIMEOUT_S)
+        if proc.returncode == 0:
+            return None
+        why = (proc.stderr or proc.stdout or "").strip().splitlines()
+        error = f"metrics.py exit {proc.returncode}: {why[-1] if why else 'no output'}"
+    except Exception as exc:  # the hook's background run never fails on the metrics
+        error = f"{type(exc).__name__}: {exc}"
+    with contextlib.suppress(Exception):  # the failure still shows in this run's output
+        _note_attempt(marker, now, error)
+    return error
+
+
+def _note_attempt(marker: Path, now: datetime, error: str | None) -> None:
+    """Record a refresh attempt and its failure, whole or not at all, with LF."""
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    tmp = marker.with_name(f"{marker.name}.{os.getpid()}.tmp")
+    with tmp.open("w", encoding="utf-8", newline="\n") as f:
+        json.dump({"at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "error": error}, f)
+        f.write("\n")
+    os.replace(tmp, marker)
+
+
+def collect(
+    root: Path, runner: Runner, *, fetch: bool = False, now: datetime | None = None
+) -> State:
     """Gather every fact; independent sources are read side by side."""
     if fetch:
         runner.run(["git", "-C", str(root), "fetch", "--quiet", "origin"], timeout=120)
@@ -461,6 +588,7 @@ def collect(root: Path, runner: Runner, *, fetch: bool = False) -> State:
         except Exception as exc:
             state.ids = f"unavailable ({type(exc).__name__}: {exc})"
         state.workflow = workflow.result()
+    state.metrics = cached_metrics(main, now)
     for name in (LIVE_WT, RECOVERY_WT):
         path = main / name
         row = next((r for r in state.rows if r.name == name.as_posix()), None)
@@ -550,6 +678,9 @@ def render_text(state: State) -> str:
             out += [f"  #{i.get('number')}  {i.get('title')}" for i in issues]
     out.append("recovery      (python -m recovery status in .scio/recovery-wt)")
     out += [f"  {line}" for line in _recovery_lines(state.recovery)]
+    head, rows = state.metrics
+    out.append(f"metrics       {head}")
+    out += [f"  {label:<10} {text}" for label, text in rows]
     if state.workflow is None:
         out.append("workflow v2   no scripts/workflow_status.py in this checkout")
     else:
@@ -620,6 +751,10 @@ def render_markdown(state: State) -> str:
             out += [f"- `{label}` #{i.get('number')}: {i.get('title')}" for i in issues]
     out += ["", "## Recovery", ""]
     out += [f"- {line.strip()}" for line in _recovery_lines(state.recovery)]
+    head, rows = state.metrics
+    out += ["", "## Metrics", "", f"{head[:1].upper()}{head[1:]} (`{METRICS.as_posix()}`)."]
+    if rows:
+        out += [""] + [f"- **{label}:** {_cell(text)}" for label, text in rows]
     out += ["", "## Workflow v2", ""]
     if state.workflow is None:
         out.append("No `scripts/workflow_status.py` in this checkout.")
@@ -632,7 +767,10 @@ def render_markdown(state: State) -> str:
     return "\n".join(out) + "\n"
 
 
-def main(argv: list[str] | None = None, runner: Runner | None = None) -> int:
+def main(
+    argv: list[str] | None = None, runner: Runner | None = None, now: datetime | None = None
+) -> int:
+    """``now``: the wall clock, injected by a test (the metrics' age and refresh)."""
     console()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--root", type=Path, default=ROOT, help="any checkout of the repository")
@@ -644,15 +782,32 @@ def main(argv: list[str] | None = None, runner: Runner | None = None) -> int:
         "--detach", action="store_true", help="with --write: return at once, write in background"
     )
     ap.add_argument("--fetch", action="store_true", help="fetch origin first")
+    ap.add_argument(
+        "--refresh-metrics",
+        action="store_true",
+        help="first refresh .scio/metrics.json when it is missing or over 6 h old (the Stop "
+        "hook's background run; $SCIO_METRICS_PRODUCT_ROOT adds --product-root)",
+    )
     args = ap.parse_args(argv)
     runner = runner or Runner()
     if args.detach:
         main_co = main_checkout(args.root, runner)
         child = [sys.executable, str(Path(__file__).resolve()), "--root", str(args.root)]
-        child += ["--markdown", "--write"] + (["--fetch"] if args.fetch else [])
+        child += ["--markdown", "--write", "--refresh-metrics"]
+        child += ["--fetch"] if args.fetch else []
         runner.spawn(child, args.root, main_co / ".scio" / "session-state.log")
         return 0
-    state = collect(args.root, runner, fetch=args.fetch)
+    now = now or datetime.now(UTC)
+    failed = None
+    if args.refresh_metrics:
+        try:
+            failed = refresh_metrics(args.root, main_checkout(args.root, runner), runner, now)
+        except Exception as exc:  # refresh_metrics never raises; this is belt and braces
+            failed = f"{type(exc).__name__}: {exc}"
+    state = collect(args.root, runner, fetch=args.fetch, now=now)
+    if failed:
+        head, rows = state.metrics
+        state.metrics = (f"{head}; refresh failed: {failed}", rows)
     text = render_markdown(state) if args.markdown or args.write else render_text(state)
     if args.write:
         try:
