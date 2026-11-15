@@ -50,8 +50,10 @@ def parallel_refused(ctx: RunContext) -> str | None:
 
 
 def worktrees_root(ctx: RunContext) -> Path:
-    """``<work dir>/worktrees``: beside the run's artifacts, outside the product tree."""
-    return ctx.artifacts.root.parent.parent / "worktrees"
+    """``<work dir>/worktrees``: beside the run's artifacts, outside the product tree. Always
+    absolute: git runs in the product tree and Python in the workspace, so a relative path
+    names a different directory for each (I-229)."""
+    return (ctx.artifacts.root.parent.parent / "worktrees").resolve()
 
 
 def _git_path(ctx: RunContext, name: str) -> str:
@@ -72,8 +74,11 @@ def prepare_shared_git(ctx: RunContext) -> None:
 
 
 def ensure_worktree(ctx: RunContext, thread: str, base_sha: str) -> Path:
-    """The worktree of one feature attempt, detached at ``base_sha``. ``run_effect`` reads the
-    probe only after a crash inside the effect, so ``apply`` checks for itself (I-164)."""
+    """The worktree of one feature attempt, detached at ``base_sha``, at an absolute path.
+    ``run_effect`` reads the probe only after a crash inside the effect, so ``apply`` checks
+    for itself (I-164). A done record is not the world either: one written with a relative
+    path (I-229) named a directory git never used, so the path returned is always computed
+    here, and a worktree missing there is added again."""
     path = worktrees_root(ctx) / thread
 
     def apply() -> str:
@@ -96,18 +101,49 @@ def ensure_worktree(ctx: RunContext, thread: str, base_sha: str) -> Path:
         )
         if not r.ok:
             raise RuntimeError(f"git worktree add failed: {r.output.strip()[:300]}")
+        if not (path / ".git").exists():  # git and Python must name one directory (I-229)
+            raise RuntimeError(f"git worktree add succeeded, but {path} holds no worktree")
         return str(path)
 
-    return Path(
-        run_effect(
-            ctx.effects,
-            thread_id=ctx.thread_id,
-            node="feature",
-            intent=f"worktree:{thread}",
-            apply=apply,
-            probe=lambda: str(path) if (path / ".git").exists() else None,
-        )
+    run_effect(
+        ctx.effects,
+        thread_id=ctx.thread_id,
+        node="feature",
+        intent=f"worktree:{thread}",
+        apply=apply,
+        probe=lambda: str(path) if (path / ".git").exists() else None,
     )
+    apply()  # a no-op when the worktree is there; adds it when a stale record said done
+    return path
+
+
+def drop_misplaced_worktrees(ctx: RunContext) -> list[str]:
+    """Remove the worktrees a relative work directory put inside the product tree (I-229):
+    git ran ``worktree add .scio/worktrees/<thread>`` in the product tree, so they sit in its
+    ``.scio/worktrees``, untracked, where a later ``git add -A`` would commit them as embedded
+    repositories and the product's own checks would walk them. A worktree under
+    :func:`worktrees_root` (a build run from inside the product tree) is a feature's own and
+    stays. Returns one ledger line per worktree found."""
+    sb = ctx.sandbox
+    misplaced = (Path(sb.root) / ".scio" / "worktrees").resolve()
+    own = worktrees_root(ctx)
+    r = sb.exec(["git", "worktree", "list", "--porcelain"], timeout_s=60)
+    if not r.ok:
+        return []
+    lines: list[str] = []
+    for row in r.stdout.splitlines():
+        if not row.startswith("worktree "):
+            continue
+        path = Path(row.removeprefix("worktree ").strip()).resolve()
+        if not path.is_relative_to(misplaced) or path.is_relative_to(own):
+            continue
+        left = remove_worktree(ctx, path)
+        lines.append(
+            left
+            or f"removed worktree {path}, which a relative work directory put inside the "
+            "product tree (I-229)"
+        )
+    return lines
 
 
 def in_worktree(fctx: RunContext, path: Path, python: str | None) -> RunContext:
