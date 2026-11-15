@@ -64,6 +64,7 @@ from scio.dashboard.contract import (
     UnknownThread,
 )
 from scio.harness.github.client import Runner, RunResult
+from scio.proctree import run_tree
 from scio.product import questions
 
 log = logging.getLogger(__name__)
@@ -111,17 +112,10 @@ def gh_runner(argv: Sequence[str], *, stdin: str | None = None) -> RunResult:
     """``gh`` with ``argv``, ``stdin`` as its input, bounded at :data:`GH_TIMEOUT_S`: a
     :class:`~scio.harness.github.client.Runner`. ``GhRunner`` has no timeout, and a hung ``gh``
     would hold the answer request open. A timeout or a missing ``gh`` is a failed run, never a
-    raise; ``subprocess.run`` kills the process it timed out."""
+    raise. :func:`scio.proctree.run_tree` runs it, whose timeout kills the whole process tree
+    (guardrail 74, ``test_no_subprocess_timeout_outside_run_tree``)."""
     try:
-        proc = subprocess.run(
-            ["gh", *argv],
-            input=stdin,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=GH_TIMEOUT_S,
-        )
+        proc = run_tree(["gh", *argv], timeout_s=GH_TIMEOUT_S, input=stdin)
     except subprocess.TimeoutExpired:
         return RunResult(GH_TIMED_OUT, "", f"gh timed out after {GH_TIMEOUT_S} s")
     except OSError as exc:

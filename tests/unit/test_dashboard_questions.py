@@ -290,25 +290,26 @@ def test_a_failed_issue_post_still_saves_the_answer_and_says_so(
 
 
 def test_the_gh_call_is_bounded_at_30_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default runner passes the timeout to ``subprocess.run``, which kills the ``gh`` it
-    timed out; a timeout and a missing ``gh`` are failed runs, never a raise. No live ``gh``."""
+    """The default runner passes the timeout to ``run_tree``, which kills the ``gh`` process
+    tree it timed out (guardrail 74); a timeout and a missing ``gh`` are failed runs, never a
+    raise. No live ``gh``."""
     seen: list[dict[str, Any]] = []
 
     def timing_out(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         seen.append({"argv": argv, **kwargs})
-        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout_s"])
 
-    monkeypatch.setattr(dashboard_app.subprocess, "run", timing_out)
+    monkeypatch.setattr(dashboard_app, "run_tree", timing_out)
     done = dashboard_app.gh_runner(["issue", "comment", "12"], stdin="answer: x")
     assert seen[0]["argv"] == ["gh", "issue", "comment", "12"]
-    assert seen[0]["timeout"] == dashboard_app.GH_TIMEOUT_S == 30
+    assert seen[0]["timeout_s"] == dashboard_app.GH_TIMEOUT_S == 30
     assert seen[0]["input"] == "answer: x"
     assert (done.code, done.stderr) == (dashboard_app.GH_TIMED_OUT, "gh timed out after 30 s")
 
     def missing(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         raise FileNotFoundError("gh")
 
-    monkeypatch.setattr(dashboard_app.subprocess, "run", missing)
+    monkeypatch.setattr(dashboard_app, "run_tree", missing)
     assert dashboard_app.gh_runner(["issue"]).code == 127
 
 
