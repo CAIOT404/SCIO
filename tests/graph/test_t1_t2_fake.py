@@ -321,9 +321,10 @@ def test_t1_a_guessed_planned_file_does_not_drift_once_localize_names_the_real_o
     )
     s = _finish(ctx, outcome).state
     assert s.exit_reason is ExitReason.SUCCESS and s.plan is not None
-    assert s.plan.version == 1 and s.plan.steps[0].files_expected == [GUESSED, REAL]
+    # issue #121: localize runs before the plan, and the guess is replaced, not kept
+    assert s.plan.version == 1 and s.plan.steps[0].files_expected == [REAL]
     texts = [e.text for e in s.task_ledger]
-    assert f"localize: files the explorer localized added to the plan: S1 += {REAL}" in texts
+    assert f"plan grounding (v1): S1 {GUESSED} -> {REAL} (localized)" in texts
     assert any("triage -> debug (no escalation signal" in t for t in texts), texts
     assert not any("plan_drift" in t for t in texts)
     assert s.escalations == [] and s.budgets.advisor_calls_used == 0
@@ -358,9 +359,9 @@ def test_t1_replan_keeps_the_localized_files_and_an_unnamed_file_still_drifts(
         (EscalationTrigger.PLAN_DRIFT, Verdict.REPLAN)
     ]
     assert s.plan is not None and s.plan.version == 2
-    assert s.plan.steps[0].files_expected == [GUESSED, REAL]
+    assert s.plan.steps[0].files_expected == [REAL]  # from the stored summary (issue #121)
     texts = [e.text for e in s.task_ledger]
-    assert f"plan v2: files the explorer localized added to the plan: S1 += {REAL}" in texts
+    assert f"plan grounding (v2): S1 {GUESSED} -> {REAL} (localized)" in texts
 
 
 def test_an_advisor_replan_with_revised_steps_keeps_the_localized_files(tmp_path: Path) -> None:
@@ -378,9 +379,9 @@ def test_an_advisor_replan_with_revised_steps_keeps_the_localized_files(tmp_path
         (EscalationTrigger.PLAN_DRIFT, Verdict.REPLAN)
     ]
     assert s.plan is not None and s.plan.version == 2 and s.plan.author is Role.ADVISOR
-    assert s.plan.steps[0].files_expected == [GUESSED, REAL]
+    assert s.plan.steps[0].files_expected == [REAL]  # from the stored summary (issue #121)
     texts = [e.text for e in s.task_ledger]
-    assert f"plan v2: files the explorer localized added to the plan: S1 += {REAL}" in texts
+    assert f"plan grounding (v2): S1 {GUESSED} -> {REAL} (localized)" in texts
 
 
 class RecordingResponder(ScriptedResponder):
