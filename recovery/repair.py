@@ -21,6 +21,9 @@ from recovery.model import VERDICT_SCHEMA, Incident, RepairVerdict
 DENIED_TOOLS: tuple[str, ...] = (
     "Bash(gh pr merge*)",
     "Bash(gh api *)",
+    # `land.py N --enqueue` adds a PR to the merge queue: a merge is the owner's act (#141)
+    "Bash(uv run python scripts/land.py*)",
+    "Bash(python scripts/land.py*)",
     "Bash(git push --force*)",
     "Bash(git push -f*)",
     "Bash(git push origin main*)",

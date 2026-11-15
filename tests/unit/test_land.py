@@ -60,11 +60,14 @@ class FakeGitHub:
         self.runs: dict[str, list[dict[str, Any]]] = {}
         self.queue: dict[int, list[dict[str, Any]]] = {}
         """The merge queue's script: each ``pr view`` of N first applies N's next change."""
+        self.enqueued: list[tuple[int, str]] = []
+        """``enqueuePullRequest`` calls, as (PR number, expected head)."""
 
     def view(self, n: int) -> dict[str, Any]:
         pr = dict(self.prs[n])
         if pr.get("state", "OPEN") == "OPEN":
             pr["headRefOid"] = git(self.hub, "rev-parse", pr["headRefName"])
+        pr.setdefault("id", f"PR_node{n}")
         pr.setdefault("state", "OPEN")
         pr.setdefault("labels", [])
         pr.setdefault("mergeable", "MERGEABLE")
@@ -74,9 +77,36 @@ class FakeGitHub:
     def labels_of(self, n: int) -> list[str]:
         return [str(lab["name"]) for lab in self.prs[n].get("labels", [])]
 
+    def enqueue(self, args: list[str]) -> tuple[int, str]:
+        """GitHub's ``enqueuePullRequest``, called exactly as I-233's fix calls it: the node
+        id and the expected head as raw strings (``-f``), and this query, word for word."""
+        assert args == [
+            "api",
+            "graphql",
+            "-f",
+            args[3],
+            "-f",
+            args[5],
+            "-f",
+            "query=mutation($id: ID!, $head: GitObjectID!) "
+            "{ enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $head}) "
+            "{ mergeQueueEntry { position state } } }",
+        ], args
+        assert args[3].startswith("id=") and args[5].startswith("head=")
+        node, head = args[3].removeprefix("id="), args[5].removeprefix("head=")
+        n = next(k for k in self.prs if self.view(k)["id"] == node)
+        if self.view(n)["headRefOid"] != head:
+            return 1, "GraphQL: Head ref has changed (enqueuePullRequest)"
+        self.enqueued.append((n, head))
+        self.prs[n]["isInMergeQueue"] = True
+        entry = {"position": len(self.enqueued), "state": "QUEUED"}
+        return 0, json.dumps({"data": {"enqueuePullRequest": {"mergeQueueEntry": entry}}})
+
     def __call__(self, args: list[str]) -> tuple[int, str]:
         if args[:2] == ["pr", "view"] and self.queue.get(int(args[2])):
             self.prs[int(args[2])].update(self.queue[int(args[2])].pop(0))
+        if args[:2] == ["api", "graphql"] and "enqueuePullRequest" in args[-1]:
+            return self.enqueue(args)
         if args[:2] == ["api", "graphql"]:
             fields = dict(a.split("=", 1) for a in args[2:] if "=" in a and "query=" not in a)
             assert fields["owner"] == "{owner}" and fields["name"] == "{repo}", "gh fills these"
@@ -366,11 +396,12 @@ def test_land_prints_the_merge_only_for_an_approved_pr(
         },
     )
     out = landed()
-    assert 'waiting for the owner\'s "merge 9"' in out and "gh pr merge" not in out
+    assert 'waiting for the owner\'s "merge 9"' in out and "--enqueue" not in out
     with approvals.open("a", encoding="utf-8", newline="\n") as f:
         f.write("2026-11-14T12:10Z | mege for me: the #90 work | issue 90\n")
     out = landed()
-    assert "approved by the owner: gh pr merge 9 --merge" in out
+    assert "approved by the owner: " + ENQUEUE.format(n=9) in out
+    assert "gh pr merge" not in out, "never gh pr merge under the merge queue (I-233)"
     assert "mege for me: the #90 work" in out
 
     # Each way an approval names a PR, and the near misses.
@@ -559,7 +590,7 @@ def test_land_next_starts_the_next_branchs_gate_while_ci_runs(
 
 # Issue #141: low-risk PRs merge when green, a revert merges fast, and main's CI is watched.
 
-ENQUEUE = "gh pr merge {n} --merge  # adds it to the merge queue"
+ENQUEUE = "uv run python scripts/land.py {n} --enqueue  # adds it to the merge queue"
 LOW_RISK_LINE = "low risk (docs/tests only; the owner's rule, #141): " + ENQUEUE.format(n=9)
 
 
@@ -617,7 +648,7 @@ def test_a_green_low_risk_pr_gets_its_merge_line_without_an_approval(
     red = FakeRunner(gh=gh, python=_python(watch_code=1))
     assert land.main(["9", "--root", str(scio)], runner=red) == 1
     out = capsys.readouterr().out
-    assert "gh pr merge" not in out and gh.labels_of(9) == []
+    assert "--enqueue" not in out and gh.labels_of(9) == []
 
     runner = FakeRunner(gh=gh, python=_python())
     assert land.main(["9", "--root", str(scio)], runner=runner) == 0
@@ -631,7 +662,7 @@ def test_a_green_low_risk_pr_gets_its_merge_line_without_an_approval(
     # An approval still reads as the owner's.
     write(scio, {".scio/approvals.md": "2026-11-15T09:00Z | merge 9 | PR 9\n"})
     assert land.main(["9", "--root", str(scio)], runner=FakeRunner(gh=gh, python=_python())) == 0
-    assert "approved by the owner: gh pr merge 9 --merge" in capsys.readouterr().out
+    assert "approved by the owner: " + ENQUEUE.format(n=9) in capsys.readouterr().out
 
 
 def test_an_existing_label_keeps_the_colour_set_on_github(
@@ -668,7 +699,7 @@ def test_a_high_risk_pr_still_waits_for_the_owner(
     out = capsys.readouterr().out
     assert "#9 is high risk (scio/x.py): it waits for the owner's review" in out
     assert out.rstrip().endswith('waiting for the owner\'s "merge 9"')
-    assert "gh pr merge" not in out
+    assert "--enqueue" not in out
     assert ["pr", "edit", "9", "--remove-label", "low-risk"] in runner.gh_calls()
     assert gh.labels_of(9) == []
 
@@ -880,3 +911,86 @@ def test_after_merge_waits_for_the_queue_to_merge_the_pr(
     order = runner.events
     assert order.index("gh api graphql") < order.index("python watch_ci.py")
     assert "main's ci passed" in out
+
+
+# I-233: under the merge queue, `gh pr merge` goes through auto-merge, which the repository
+# refuses; `land.py N --enqueue` adds the PR with GraphQL's enqueuePullRequest.
+
+
+def _enqueue(
+    land: Any, scio: Path, gh: FakeGitHub, n: int = 9, watch_code: int = 0
+) -> tuple[int, FakeRunner]:
+    """``land.py N --enqueue``: its exit code and the runner that saw its calls."""
+    runner = FakeRunner(gh=gh, python=_python(watch_code=watch_code))
+    code = land.main([str(n), "--enqueue", "--root", str(scio)], runner=runner)
+    assert not any(c[:2] == ["pr", "merge"] for c in runner.gh_calls()), "never gh pr merge"
+    return code, runner
+
+
+def test_enqueue_adds_an_approved_green_pr_to_the_queue(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The owner's approval and green CI on the head put the PR in the merge queue, through
+    ``enqueuePullRequest`` pinned to that head, never ``gh pr merge`` (I-233)."""
+    land = load("land")
+    _hub, scio, wt, gh = _gated_pr(tmp_path)  # z.py: high risk, so only the approval counts
+    head = git(wt, "rev-parse", "HEAD")
+    write(scio, {".scio/approvals.md": "2026-11-15T13:00Z | merge 9 | PR 9\n"})
+
+    # Red CI on the head: not enqueued.
+    code, runner = _enqueue(land, scio, gh, watch_code=1)
+    assert code == 1 and gh.enqueued == []
+    assert "CI did not pass for #9's head" in capsys.readouterr().out
+
+    code, runner = _enqueue(land, scio, gh)
+    assert code == 0
+    out = capsys.readouterr().out
+    assert gh.enqueued == [(9, head)]
+    assert "#9 enqueued (approved): position 1, state QUEUED" in out
+    assert "land.py 9 --after-merge" in out
+    [watch] = _watched(runner)
+    assert watch[watch.index("--sha") + 1] == head, "CI checked on the head it enqueues"
+    order = runner.events
+    assert order.index("python watch_ci.py") < len(order) - 1 - order[::-1].index("gh api graphql")
+
+    # A low-risk PR needs no approval: the same basis as its merge line.
+    low = tmp_path / "low"
+    low.mkdir()
+    _hub, scio_low, _wt, gh_low = _gated_pr(low, files={"docs/guide.md": "# Guide\n"})
+    assert _enqueue(land, scio_low, gh_low)[0] == 0
+    assert [n for n, _ in gh_low.enqueued] == [9] and gh_low.labels_of(9) == ["low-risk"]
+    assert "#9 enqueued (low)" in capsys.readouterr().out
+
+
+def test_enqueue_refuses_a_high_risk_pr_without_an_approval(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--enqueue`` holds the line ``land.py N`` draws: a PR touching ``scio/`` with no
+    approval is never queued, and CI is not even watched for it."""
+    land = load("land")
+    files = {"docs/guide.md": "# Guide\n", "scio/x.py": "x = 1\n"}
+    _hub, scio, _wt, gh = _gated_pr(tmp_path, files=files)
+    write(scio, {".scio/approvals.md": "2026-11-15T13:00Z | merge 19 | PR 19\n"})
+
+    code, runner = _enqueue(land, scio, gh)
+    assert code == 1 and gh.enqueued == []
+    out = capsys.readouterr().out
+    assert "#9 is high risk (scio/x.py)" in out and "not enqueued" in out
+    assert _watched(runner) == []
+    assert not any("enqueuePullRequest" in c[-1] for c in runner.gh_calls())
+
+
+def test_enqueue_of_a_queued_pr_is_a_no_op(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A PR already in the merge queue (``isInMergeQueue``) is left as it is: exit 0, no
+    second ``enqueuePullRequest``, no CI watch."""
+    land = load("land")
+    _hub, scio, _wt, gh = _gated_pr(tmp_path, files={"docs/guide.md": "# Guide\n"})
+    gh.prs[9]["isInMergeQueue"] = True
+
+    code, runner = _enqueue(land, scio, gh)
+    assert code == 0 and gh.enqueued == []
+    assert "#9 is already in the merge queue" in capsys.readouterr().out
+    assert _watched(runner) == []
+    assert not any("enqueuePullRequest" in c[-1] for c in runner.gh_calls())

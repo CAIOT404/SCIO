@@ -4,6 +4,7 @@ issue #141).
     uv run python scripts/land.py N                # land N up to its merge line
     uv run python scripts/land.py N --next         # ... and gate the next queued branch meanwhile
     uv run python scripts/land.py N --body         # only: write the PR body from the gate stamp
+    uv run python scripts/land.py N --enqueue      # the merge line: add N to the merge queue
     uv run python scripts/land.py N --after-merge  # after N merged: the tail, then main's CI
     uv run python scripts/land.py N --after-merge --no-watch-main  # ... without main's CI
 
@@ -23,8 +24,13 @@ Landing N, in this order:
    fast revert (title ``revert:``, body ``Reverts #M``, M merged, only M's files), labelled
    ``revert``; N is low risk (``risk_of``: docs and tests only), labelled ``low-risk``.
    Otherwise it waits for the owner and says which paths need the review. It never merges.
-   ``main`` requires a merge queue, so the line ``gh pr merge N --merge`` enqueues N, and
-   the queue merges it after its own ``merge_group`` CI run passes.
+   ``main`` requires a merge queue: the line is ``land.py N --enqueue``, and the queue merges
+   N after its own ``merge_group`` CI run passes.
+
+``--enqueue`` re-checks that basis (never a high-risk PR without an approval) and CI on the
+head, then adds N to the queue with GraphQL's ``enqueuePullRequest``, pinned to that head.
+Never ``gh pr merge``: under the queue it goes through auto-merge, which this repository
+refuses (I-233). A PR already queued is left as it is.
 
 ``--after-merge`` checks ``mergedAt`` in its own call first (I-087). While N is still in the
 merge queue (GraphQL ``isInMergeQueue``) it polls until the queue merges it, for
@@ -59,7 +65,7 @@ from typing import Any, Literal
 SCRIPTS = Path(__file__).resolve().parent
 ROOT = SCRIPTS.parent
 PR_FIELDS = (
-    "number,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,isDraft,body,title,"
+    "number,id,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,isDraft,body,title,"
     "state,labels"
 )
 AFTER_FIELDS = "number,title,headRefName,baseRefName,mergeCommit,files"
@@ -87,9 +93,15 @@ LABELS = {
 """The labels land.py puts on GitHub, made with ``gh label create`` when missing, never reset."""
 RED_CONCLUSIONS = ("failure", "timed_out", "startup_failure")
 ENQUEUES = "# adds it to the merge queue"
-"""``main`` requires a merge queue: ``gh pr merge N`` (``--merge`` only warns) enqueues a PR
-whose checks passed, and the queue merges it after its own ``merge_group`` run passes. A
-shell comment, so the line can be pasted as it is. Never ``--admin``: it bypasses the queue."""
+"""A shell comment, so the merge line can be pasted as it is."""
+ENQUEUE_MUTATION = (
+    "mutation($id: ID!, $head: GitObjectID!) "
+    "{ enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $head}) "
+    "{ mergeQueueEntry { position state } } }"
+)
+"""Adds a PR to ``main``'s merge queue; GitHub refuses it when the head moved off ``$head``.
+Not ``gh pr merge``: under the queue it calls ``enablePullRequestAutoMerge``, refused here
+(``allow_auto_merge`` is false, I-233). Never ``--admin``: it bypasses the queue."""
 QUEUE_TIMEOUT_MIN = 30.0
 QUEUE_POLL_S = 30.0
 QUEUE_QUERY = (
@@ -128,6 +140,16 @@ def _session_state() -> ModuleType:
         sys.modules[key] = mod  # @dataclass looks its module up there (I-174)
         spec.loader.exec_module(mod)
     return sys.modules[key]
+
+
+@dataclass
+class Basis:
+    """Why a PR may merge (#141): ``kind`` is ``approved``, ``revert``, ``low`` or ``high``
+    (no basis); ``risk`` is ``risk_of`` its paths, whatever the kind."""
+
+    kind: str
+    detail: str
+    risk: str
 
 
 class Stop(Exception):
@@ -414,14 +436,7 @@ class Lander:
             print(f"retargeted #{n} from {base} to main (#{merged[0]['number']} merged)")
             pr = self.view(n)
         # No update-branch step: the ruleset no longer requires an up-to-date branch (#141).
-        # UNKNOWN (still computing) and BEHIND go on; only a real conflict stops.
-        mergeable, status = pr.get("mergeable"), pr.get("mergeStateStatus")
-        if mergeable == "CONFLICTING" or status == "DIRTY":
-            raise Stop(
-                f"#{n} conflicts with main (mergeable {mergeable}, mergeStateStatus {status}): "
-                f"merge origin/main into {pr['headRefName']} in its worktree, resolve, run the "
-                "gate, push, and land again"
-            )
+        self.refuse_a_conflict(n, pr)
         head = str(pr["headRefOid"])
         tree = self.tree(head)
         found = self.gated(tree)
@@ -443,32 +458,118 @@ class Lander:
         print(self.verdict(n, pr, head))
         return 0
 
-    def verdict(self, n: int, pr: dict[str, Any], head: str) -> str:
-        """The merge line for a PR whose CI passed (#141). First match wins: the owner's
-        approval, a fast revert, low risk; else it waits for the owner. A ``low-risk`` label
-        left from an earlier landing comes off a PR that is high risk now."""
-        body = str(pr.get("body") or "")
+    def refuse_a_conflict(self, n: int, pr: dict[str, Any]) -> None:
+        """Stop on a PR GitHub reports conflicting. UNKNOWN (still computing) and BEHIND go
+        on: with no update step, only a real conflict stops (#141)."""
+        mergeable, status = pr.get("mergeable"), pr.get("mergeStateStatus")
+        if mergeable == "CONFLICTING" or status == "DIRTY":
+            raise Stop(
+                f"#{n} conflicts with main (mergeable {mergeable}, mergeStateStatus {status}): "
+                f"merge origin/main into {pr['headRefName']} in its worktree, resolve, run the "
+                "gate, push, and land again"
+            )
+
+    def basis(self, n: int, pr: dict[str, Any], head: str) -> Basis:
+        """Why PR ``n`` may merge (#141), first match wins: the owner's approval, a fast
+        revert, low risk. ``high`` is no basis: it waits for the owner. Reads only."""
         paths = self.changed_paths(head)
-        high = high_risk_paths(paths)
-        labels = {str(lab.get("name")) for lab in pr.get("labels") or [] if isinstance(lab, dict)}
-        if risk_of(paths) == "high" and LOW_RISK in labels:
-            self.gh("pr", "edit", str(n), "--remove-label", LOW_RISK)
-            print(f"#{n}: removed its {LOW_RISK} label")
-        approval = approval_for(n, body, read_approvals(self.approvals()))
-        merge = f"gh pr merge {n} --merge  {ENQUEUES}"
+        risk = risk_of(paths)
+        approval = approval_for(n, str(pr.get("body") or ""), read_approvals(self.approvals()))
         if approval is not None:
-            return f'approved by the owner: {merge}\n  ({approval.at}: "{approval.words}")'
+            return Basis("approved", f'({approval.at}: "{approval.words}")', risk)
         reverted = self.reverts(n, pr, paths)
         if reverted is not None:
-            self.label(n, REVERT)
-            return f"fast revert of #{reverted} (the owner's rule, #141): {merge}"
-        if risk_of(paths) == "low":
-            print(f"#{n} changes {len(paths)} path(s), all docs or tests")
-            self.label(n, LOW_RISK)
-            return f"low risk (docs/tests only; the owner's rule, #141): {merge}"
+            return Basis("revert", f"#{reverted}", risk)
+        if risk == "low":
+            return Basis("low", f"{len(paths)} path(s), all docs or tests", risk)
+        high = high_risk_paths(paths)
         shown = ", ".join(high[:3]) + (f", and {len(high) - 3} more" if len(high) > 3 else "")
-        print(f"#{n} is high risk ({shown or 'no changed paths'}): it waits for the owner's review")
+        return Basis("high", shown or "no changed paths", risk)
+
+    def mark(self, n: int, pr: dict[str, Any], basis: Basis) -> None:
+        """The labels that make the basis visible on GitHub: ``revert`` or ``low-risk`` on,
+        and a ``low-risk`` label left from an earlier landing off a PR that is high risk now."""
+        labels = {str(lab.get("name")) for lab in pr.get("labels") or [] if isinstance(lab, dict)}
+        if basis.risk == "high" and LOW_RISK in labels:
+            self.gh("pr", "edit", str(n), "--remove-label", LOW_RISK)
+            print(f"#{n}: removed its {LOW_RISK} label")
+        if basis.kind == "revert":
+            self.label(n, REVERT)
+        elif basis.kind == "low":
+            self.label(n, LOW_RISK)
+
+    def verdict(self, n: int, pr: dict[str, Any], head: str) -> str:
+        """The merge line for a PR whose CI passed (#141). It names ``--enqueue``: under the
+        merge queue, ``gh pr merge`` goes through auto-merge, which this repository refuses
+        (I-233)."""
+        basis = self.basis(n, pr, head)
+        self.mark(n, pr, basis)
+        line = f"uv run python scripts/land.py {n} --enqueue  {ENQUEUES}"
+        if basis.kind == "approved":
+            return f"approved by the owner: {line}\n  {basis.detail}"
+        if basis.kind == "revert":
+            return f"fast revert of {basis.detail} (the owner's rule, #141): {line}"
+        if basis.kind == "low":
+            print(f"#{n} changes {basis.detail}")
+            return f"low risk (docs/tests only; the owner's rule, #141): {line}"
+        print(f"#{n} is high risk ({basis.detail}): it waits for the owner's review")
         return f'waiting for the owner\'s "merge {n}"'
+
+    # Enqueueing (I-233).
+
+    def enqueue(self, n: int) -> int:
+        """Add PR ``n`` to the merge queue, on the same basis ``land.py N`` printed its line
+        on: never a high-risk PR without the owner's approval, and only once CI passed on the
+        head. GitHub's ``enqueuePullRequest`` mutation, pinned to that head
+        (``expectedHeadOid``); ``gh pr merge`` would try auto-merge, which is off here."""
+        pr = self.view(n)
+        if pr.get("state") != "OPEN":
+            raise Stop(f"PR {n} is {pr.get('state')}; nothing to enqueue")
+        if self.in_queue(n):
+            print(f"#{n} is already in the merge queue; nothing to do")
+            return 0
+        if pr.get("baseRefName") != "main" or pr.get("isDraft"):
+            what = "a draft" if pr.get("isDraft") else f"based on {pr['baseRefName']}"
+            raise Stop(f"#{n} is {what}: land it first (uv run python scripts/land.py {n})")
+        self.fetch()
+        self.refuse_a_conflict(n, pr)
+        head = str(pr["headRefOid"])
+        self.tree(head)  # the head is in this clone, or a clear stop
+        basis = self.basis(n, pr, head)
+        if basis.kind == "high":
+            raise Stop(
+                f"#{n} is high risk ({basis.detail}) and .scio/approvals.md does not approve it: "
+                f'not enqueued. It waits for the owner\'s "merge {n}"'
+            )
+        code = self.watch(head)
+        if code != 0:
+            raise Stop(
+                f"CI did not pass for #{n}'s head {head[:12]} (watch_ci exit {code}): not enqueued"
+            )
+        self.mark(n, pr, basis)
+        node = str(pr.get("id") or "")
+        if not node:
+            raise Stop(f"gh pr view {n} gave no node id")
+        data = self.gh_json(
+            "api",
+            "graphql",
+            "-f",
+            f"id={node}",
+            "-f",
+            f"head={head}",
+            "-f",
+            f"query={ENQUEUE_MUTATION}",
+        )
+        payload = ((data or {}).get("data") or {}).get("enqueuePullRequest") or {}
+        entry = payload.get("mergeQueueEntry") or {}
+        if not entry:
+            raise Stop(f"GitHub returned no merge-queue entry for #{n}: {json.dumps(data)[:200]}")
+        print(
+            f"#{n} enqueued ({basis.kind}): position {entry.get('position')}, state "
+            f"{entry.get('state')}. After the queue merges it: "
+            f"uv run python scripts/land.py {n} --after-merge"
+        )
+        return 0
 
     def reverts(self, n: int, pr: dict[str, Any], paths: list[str]) -> int | None:
         """The PR that ``n`` reverts under the fast-revert policy (#141): its title starts
@@ -635,8 +736,8 @@ class Lander:
                 raise Stop(
                     f"PR {n} is not merged (mergedAt is null) and not in the merge queue (state "
                     f"{state}): it left the queue unmerged or never joined it, so nothing after "
-                    f"it runs. Look at its checks and the queue's run, then: gh pr merge {n} "
-                    "--merge"
+                    f"it runs. Look at its checks and the queue's run, then: uv run python "
+                    f"scripts/land.py {n} --enqueue"
                 )
             left = deadline - self.runner.now()
             if left <= 0:
@@ -817,6 +918,9 @@ def main(argv: list[str] | None = None, runner: Any = None) -> int:
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--next", action="store_true", help="also gate the next queued branch")
     mode.add_argument("--body", action="store_true", help="only write the PR body")
+    mode.add_argument(
+        "--enqueue", action="store_true", help="add the PR to the merge queue (I-233)"
+    )
     mode.add_argument("--after-merge", action="store_true", help="the tail after the merge")
     ap.add_argument(
         "--no-watch-main",
@@ -842,6 +946,8 @@ def main(argv: list[str] | None = None, runner: Any = None) -> int:
             )
         if args.body:
             return lander.body(args.pr)
+        if args.enqueue:
+            return lander.enqueue(args.pr)
         return lander.land(args.pr, next_gate=args.next)
     except Stop as stop:
         print(f"land: {stop}", flush=True)
