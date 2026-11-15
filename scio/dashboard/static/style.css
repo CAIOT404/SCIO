@@ -231,7 +231,8 @@ main {
 }
 
 .s-waiting,
-.f-waiting {
+.f-waiting,
+.f-parked {
   background: var(--wait-bg);
   color: var(--wait-fg);
   box-shadow: inset 0 0 0 1px var(--wait-line);
@@ -511,6 +512,121 @@ tr.sub.child td {
   margin: 4px 0 0;
   color: var(--red-fg);
   overflow-wrap: anywhere;
+}
+
+/* ---- open questions and the answer box (ADR 0020): amber, as a stop waiting for you */
+
+.questions-section {
+  margin-bottom: 24px;
+}
+
+.question-card {
+  border-left: 4px solid var(--wait-line);
+  background: var(--surface);
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px var(--border-soft);
+  padding: 8px 12px;
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.question-card.q-done {
+  border-left-color: var(--border);
+}
+
+.question-card p {
+  margin: 0;
+}
+
+.q-text {
+  margin: 6px 0 2px;
+  font-weight: 500;
+  white-space: pre-wrap;
+}
+
+.q-state {
+  margin-top: 6px;
+  color: var(--muted);
+}
+
+.q-state.q-warn {
+  color: var(--red-fg);
+}
+
+.q-box {
+  margin-top: 8px;
+}
+
+.q-label {
+  display: block;
+}
+
+.q-label-text {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.q-answer {
+  display: block;
+  width: 100%;
+  min-height: 4.5em;
+  resize: vertical;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+}
+
+.q-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-top: 6px;
+}
+
+.q-actions .meta {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.q-send {
+  padding: 3px 14px;
+  border: 1px solid var(--wait-line);
+  border-radius: 4px;
+  background: var(--wait-solid);
+  color: var(--wait-solid-fg);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.q-send:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.q-answer:focus-visible,
+.q-send:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.q-error {
+  margin-top: 4px;
+  color: var(--red-fg);
+}
+
+.q-error:empty {
+  display: none;
+}
+
+.questions-note {
+  margin: 8px 0 0;
 }
 
 /* ---- the recovery supervisor's section */

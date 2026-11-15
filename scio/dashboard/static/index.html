@@ -10,6 +10,9 @@
        styles. -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.15.0/mermaid.min.js; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ws: wss:; base-uri 'none'; form-action 'none'">
   <meta name="referrer" content="no-referrer">
+  <!-- The server fills in this launch's token for the answer box (ADR 0020); the page sends it
+       with each answer, and a page from another launch is refused. -->
+  <meta name="scio-answer-token" content="">
   <title>SCIO dashboard</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/style.css">

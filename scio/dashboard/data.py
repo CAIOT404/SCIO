@@ -16,7 +16,12 @@ the supervisor keeps it (:func:`scio.dashboard.supervisor.store_path`, resolved 
 unless the source was given a path): its runs make a supervised thread whose process is gone
 read ``stopped``, and :meth:`CheckpointDataSource.recovery` serves its open incidents (issue
 #102). A missing store is no error; an unreadable one is skipped and logged once per streak,
-and never fails a root's threads (guardrail 30)."""
+and never fails a root's threads (guardrail 30).
+
+The open questions (ADR 0020, issue #141 part 5) are each build thread's parked features:
+:meth:`CheckpointDataSource.questions` lists them, with whether the workspace's answer file
+(:mod:`scio.product.questions`) already holds an answer. This layer only reads; the API sends an
+answer, and nothing here writes a checkpoint."""
 
 from __future__ import annotations
 
@@ -46,6 +51,7 @@ from scio.dashboard.contract import (
     FeatureLink,
     GraphDiagram,
     IncidentEvent,
+    OpenQuestion,
     RecoveryIncident,
     RecoveryView,
     StopInfo,
@@ -56,6 +62,7 @@ from scio.dashboard.contract import (
     ThreadSummary,
     ThreadVersion,
     TimelineItem,
+    UnknownQuestion,
     UnknownRoot,
     UnknownThread,
     Workspace,
@@ -65,9 +72,17 @@ from scio.graph.mermaid import render_mermaid
 from scio.graph.registry import GRAPHS
 from scio.graph.report import build_report
 from scio.harness.accounting import CostEntry
+from scio.product import questions
 from scio.product.progress import PROGRESS_PATH, ProgressFile
 from scio.product.report import build_bootstrap_report, build_product_report
-from scio.state.models import ArtifactRef, LedgerEntry, ProductBuildState, ProductState, SCIOState
+from scio.state.models import (
+    ArtifactRef,
+    FeatureRun,
+    LedgerEntry,
+    ProductBuildState,
+    ProductState,
+    SCIOState,
+)
 
 INTERRUPT = "__interrupt__"
 RESUME = "__resume__"
@@ -699,6 +714,78 @@ def _task_detail(ws: Workspace, summary: ThreadSummary, state: SCIOState) -> Thr
     )
 
 
+def answer_file(ws: Workspace, qid: str) -> Path | None:
+    """Where the answer file of question ``qid`` lives in ``ws`` (``questions.answer_path``);
+    None when the id would name a file outside the answer directory (a separator, ``..``).
+    The id comes from the build's checkpoint, and a feature id is the planner's text."""
+    base = Path(ws.path)
+    path = questions.answer_path(base, qid)
+    return path if path.parent == base / questions.ANSWERS_DIR and path.stem == qid else None
+
+
+def _checkpoint_ts(saver: SqliteSaver, latest: dict[str, str], thread_id: str) -> datetime | None:
+    """The thread's latest checkpoint's ``ts``; None when the root has no such thread or its
+    checkpoint cannot be read."""
+    if thread_id not in latest:
+        return None
+    try:
+        tup = saver.get_tuple({"configurable": {"thread_id": thread_id}})
+    except Exception:
+        return None
+    return _ts(tup.checkpoint.get("ts")) if tup is not None else None
+
+
+def _parked(state: ProductBuildState) -> list[FeatureRun]:
+    """Each feature's latest run (``latest_run``), where it is still ``parked``."""
+    features = dict.fromkeys(r.feature_id for r in state.feature_runs)
+    latest = (state.latest_run(fid) for fid in features)
+    return [r for r in latest if r is not None and r.status == "parked"]
+
+
+def _open_questions(
+    ws: Workspace, saver: SqliteSaver, latest: dict[str, str], build: _Thread
+) -> list[OpenQuestion]:
+    """``build``'s parked features, as :class:`OpenQuestion`. Read only: an answer file is
+    read, never written (ADR 0020 decision 6)."""
+    state = build.state
+    if not isinstance(state, ProductBuildState):
+        return []
+    out: list[OpenQuestion] = []
+    for run in _parked(state):
+        qid = run.question_id or questions.question_id(run.feature_id, run.attempt)
+        file = answer_file(ws, qid)
+        answered = file is not None and questions.read_answer_file(Path(ws.path), qid) is not None
+        repo, issue = state.gh_repo, run.issue_number
+        out.append(
+            OpenQuestion(
+                root=ws.name,
+                thread_id=build.thread_id,
+                product=state.spec.name if state.spec else None,
+                milestone=run.milestone,
+                feature_id=run.feature_id,
+                attempt=run.attempt,
+                question=run.question or "",
+                question_id=qid,
+                feature_thread=run.thread_id,
+                feature_present=run.thread_id in latest,
+                issue_number=issue,
+                gh_repo=repo,
+                issue_url=f"https://github.com/{repo}/issues/{issue}" if repo and issue else None,
+                asked_at=_checkpoint_ts(saver, latest, run.thread_id),
+                answered=answered,
+                answer_file=str(file) if file is not None else None,
+            )
+        )
+    return out
+
+
+def _waiting_longest(rows: list[OpenQuestion]) -> list[OpenQuestion]:
+    """The longest-waiting first, a question of unknown age last."""
+    return sorted(
+        rows, key=lambda q: (q.asked_at is None, q.asked_at or _OLDEST, q.thread_id, q.question_id)
+    )
+
+
 @functools.cache
 def _diagrams() -> tuple[GraphDiagram, ...]:
     """Compiling every graph takes seconds, and the graphs change only with the code."""
@@ -963,3 +1050,40 @@ class CheckpointDataSource:
             )
             for tid, cid in latest.items()
         }
+
+    # ---- the open questions (ADR 0020)
+
+    def questions(self, root: str) -> list[OpenQuestion]:
+        """Every build thread's parked features in ``root``, the longest-waiting first: a
+        feature's latest run, still ``parked``. Read only, as every read here is."""
+        ws = self._workspace(root)
+        db = Path(ws.checkpoints)
+        if not db.is_file():
+            return []
+        out: list[OpenQuestion] = []
+        with _reader(db) as (conn, saver):
+            latest = _latest(conn)
+            for tid, cid in latest.items():
+                t = _load(saver, tid, cid)
+                if t.kind == "build":
+                    out.extend(_open_questions(ws, saver, latest, t))
+        return _waiting_longest(out)
+
+    def question(self, root: str, thread_id: str, question_id: str) -> OpenQuestion:
+        """The open question ``question_id`` of build thread ``thread_id``. Raises
+        :class:`UnknownQuestion` when the thread has none by that id: a run superseded by a
+        later attempt, or no longer parked, is not open."""
+        ws = self._workspace(root)
+        db = Path(ws.checkpoints)
+        if not db.is_file():
+            raise UnknownQuestion(question_id)
+        with _reader(db) as (conn, saver):
+            latest = _latest(conn)
+            if thread_id not in latest:
+                raise UnknownQuestion(question_id)
+            build = _load(saver, thread_id, latest[thread_id])
+            found = _open_questions(ws, saver, latest, build)
+        match = next((q for q in found if q.question_id == question_id), None)
+        if match is None:
+            raise UnknownQuestion(question_id)
+        return match

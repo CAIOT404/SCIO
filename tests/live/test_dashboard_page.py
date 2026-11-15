@@ -512,7 +512,8 @@ def test_the_list_shows_every_thread_grouped_with_its_badges(
     error_row = _row(page, ("SCIO", "run-old0001"))
     expect(error_row).to_have_class(re.compile(r"\bmuted-row\b"))
     expect(page.locator('tr[data-sub-for="SCIO/run-old0001"]')).to_contain_text("SCIOState")
-    # read-only: nothing on the page acts
+    # nothing on the page acts while no feature is parked (the fixture parks none); the one
+    # control is an open question's answer box (ADR 0020, test_dashboard_questions_page.py)
     assert page.locator("button, form, input, select, textarea").count() == 0
     watched.assert_clean()
 

@@ -2,15 +2,17 @@
 
 The data layer (:mod:`scio.dashboard.data`) implements :class:`DataSource` over the checkpoint
 DBs; the API (:mod:`scio.dashboard.app`, ``create_app(source, *, poll_interval_s=1.0,
-static_dir=None, allowed_hosts=("127.0.0.1", "localhost"))``) reads only through a
-:class:`DataSource` and serves these models as JSON
+static_dir=None, allowed_hosts=("127.0.0.1", "localhost"), answer_token=None, gh=gh_runner)``)
+reads only through a :class:`DataSource` and serves these models as JSON
 (``model_dump(mode="json")``); the page (``scio/dashboard/static/``) renders that JSON. The
 example payloads in ``tests/fixtures/dashboard/`` validate against these models
 (``tests/unit/test_dashboard_contract.py``), so the API and page tests need no real data.
 
-HTTP surface (every route is a read; there is no write route)::
+HTTP surface (every route is a read but one, ``POST /api/answer``: ADR 0020 amends ADR 0017
+decision 10)::
 
-    GET /                                -> static/index.html
+    GET /                                -> static/index.html, the per-launch answer token
+                                            filled into its ``scio-answer-token`` meta tag
     GET /static/{file}                   -> static/app.js, static/style.css
     GET /api/roots                       -> list[Workspace]
     GET /api/threads[?root=NAME]         -> list[ThreadSummary], newest update first
@@ -21,10 +23,23 @@ HTTP surface (every route is a read; there is no write route)::
                                             escalated ones of the last 14 days (issue #102);
                                             an empty view from a source that is not a
                                             RecoverySource
+    GET /api/questions                   -> list[OpenQuestion], the longest-waiting first
+                                            (ADR 0020); none from a source that is not a
+                                            QuestionSource
+    POST /api/answer                     -> AnswerResult, for an AnswerRequest: the owner's
+                                            answer to an open question, as an ``answer:``
+                                            comment on its issue (with a repository) and in
+                                            the workspace's answer file; never a checkpoint
+                                            write. A failed post still saves the answer and
+                                            answers 200 with ``gh_error``. 403 without the
+                                            launch token (header ``X-SCIO-Answer-Token``) or
+                                            from another site's page, 400 for an empty
+                                            answer, 404 for no such open question
     WS  /ws                              -> ChangeEvent: one hello with no thread in it on
                                             connect (``recovery`` true when the source reads
-                                            a supervisor store), then one per poll that found
-                                            a change
+                                            a supervisor store, ``questions`` true when it
+                                            lists open questions), then one per poll that
+                                            found a change
 """
 
 from __future__ import annotations
@@ -138,7 +153,8 @@ class FeatureLink(BaseModel):
     attempt: int
     thread_id: str
     status: str
-    """The run's ``FeatureRun.status``: running, passed, failed or skipped. For a feature
+    """The run's ``FeatureRun.status``: running, passed, failed, skipped or parked (a design
+    question waits for the owner, ADR 0020). For a feature
     thread of this build that has no ``FeatureRun`` yet (the attempt in progress: SCIO records
     a run only when its attempt ends), ``running``, or the thread's own status when it has
     stopped: ``waiting``, ``crashed``, ``halted`` or ``stopped`` (the live graphcalc build's P4
@@ -259,6 +275,10 @@ class ChangeEvent(BaseModel):
     so the page shows its section and refetches it with every refresh from then on. On a
     later event: the store changed (:meth:`RecoverySource.recovery_version`). A server that
     never sets it is never asked for ``/api/recovery``."""
+    questions: bool = False
+    """Set on the hello only: the source lists open questions (:class:`QuestionSource`), so
+    the page fetches ``/api/questions`` with every refresh. A server that never sets it is
+    never asked."""
 
 
 class SupervisedRun(BaseModel):
@@ -347,12 +367,84 @@ class RecoveryView(BaseModel):
     (``escalation``). Closed incidents are never listed."""
 
 
+class OpenQuestion(BaseModel):
+    """A parked feature's design question (ADR 0020): the feature's latest run in a build
+    thread whose status is ``parked``. The formats are :mod:`scio.product.questions`'."""
+
+    root: str
+    """``Workspace.name``."""
+    thread_id: str
+    """The build thread that recorded the run."""
+    product: str | None = None
+    milestone: str | None = None
+    """``FeatureRun.milestone``."""
+    feature_id: str
+    attempt: int
+    question: str
+    """As the attempt asked it; the page shows it as text, never as HTML."""
+    question_id: str
+    """``FeatureRun.question_id`` (``P29-a1``); the answer endpoint finds the run by it."""
+    feature_thread: str
+    """The attempt's own thread."""
+    feature_present: bool = False
+    """The attempt's thread has a checkpoint in the same root (the page links it only then)."""
+    issue_number: int | None = None
+    """``FeatureRun.issue_number``: the GitHub issue with ``gh_repo``, else the offline file
+    index."""
+    gh_repo: str | None = None
+    """The build's GitHub repository (``ProductBuildState.gh_repo``); None offline."""
+    issue_url: str | None = None
+    """``https://github.com/<gh_repo>/issues/<n>`` when the build has a repository."""
+    asked_at: datetime | None = None
+    """The attempt's thread's latest checkpoint: when it parked. None without that thread."""
+    answered: bool = False
+    """The workspace's answer file has an answer (``questions.read_answer_file``). The
+    dashboard reads no issue comments: the build does."""
+    answer_file: str | None = None
+    """Where an answer file for this question lives (``questions.answer_path``); None when
+    its id cannot name a file in the workspace's answer directory."""
+
+
+class AnswerRequest(BaseModel):
+    """``POST /api/answer``'s body."""
+
+    root: str
+    thread: str
+    """The build thread (``OpenQuestion.thread_id``)."""
+    question_id: str
+    text: str
+
+
+class AnswerResult(BaseModel):
+    """Where an answer went. With a GitHub repository and an issue number, an ``answer:``
+    comment on the feature's issue (``posted``); in every case the workspace's answer file too
+    (``saved``), so the question reads answered after a reload and the build finds the answer
+    even before it reads the issue. A post that fails or times out still saves the answer, and
+    ``gh_error`` says why the post failed: the answer is never lost, and the failure shows."""
+
+    question_id: str
+    posted: bool = False
+    """An ``answer:`` comment went on the issue."""
+    issue_number: int | None = None
+    """The issue it went to, or failed to go to; None without a repository."""
+    issue_url: str | None = None
+    saved: str | None = None
+    """The answer file written; None only when the question's id cannot name a file and the
+    post went through."""
+    gh_error: str | None = None
+    """The first line of ``gh``'s error when the post failed or timed out; None otherwise."""
+
+
 class UnknownRoot(KeyError):
     """No root has this name (the API answers 404)."""
 
 
 class UnknownThread(KeyError):
     """The root has no checkpoint for this thread (the API answers 404)."""
+
+
+class UnknownQuestion(KeyError):
+    """No build thread of the root has this open question (the API answers 404)."""
 
 
 class DataSource(Protocol):
@@ -392,4 +484,23 @@ class RecoverySource(Protocol):
     def recovery_version(self) -> str:
         """Changes whenever the supervisor writes its store; cheap enough to call every
         second."""
+        ...
+
+
+@runtime_checkable
+class QuestionSource(Protocol):
+    """What the API reads of the open questions (ADR 0020), beside a :class:`DataSource`: a
+    source that also has these methods (``CheckpointDataSource`` has) serves
+    ``/api/questions`` and answers on ``/api/answer``, and says so in the ``/ws`` hello. Both
+    read only; the API, not the source, sends an answer."""
+
+    def questions(self, root: str) -> list[OpenQuestion]:
+        """The root's open questions. Raises :class:`UnknownRoot`, and whatever reading an
+        unreadable DB raises."""
+        ...
+
+    def question(self, root: str, thread_id: str, question_id: str) -> OpenQuestion:
+        """One open question by its id. Raises :class:`UnknownRoot` or
+        :class:`UnknownQuestion` (also for a run that is no longer the feature's latest, or
+        no longer parked)."""
         ...
