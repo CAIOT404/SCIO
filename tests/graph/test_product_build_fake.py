@@ -803,9 +803,10 @@ def test_a_skipped_feature_is_deferred_to_the_next_milestone_not_dropped(tmp_pat
         out = resume_build(ctx, "skip")
         assert out.paused and out.interrupt and out.interrupt["feature"] == "P2"
         out = resume_build(ctx, "skip")
-        # both features skipped: the gate's pass is overridden and the human is asked
+        # both features skipped: nothing was delivered, so the gate's pass is overridden and
+        # the human is asked (a skip alone no longer stops the gate, #140)
         assert out.paused and out.state.phase == "gate", out.state.ledger[-3:]
-        assert out.state.last_gate and "features not passed: P1, P2" in (
+        assert out.state.last_gate and "every feature was deferred by the owner" in (
             out.state.last_gate.reasoning
         )
         out = resume_build(ctx, "proceed")
