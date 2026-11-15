@@ -5,6 +5,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 ### Changed
+- CI runs `tests/live` (the dashboard's browser tests and the docker tests) in a fourth shard of its own, on 2 workers. Beside the unit tests' workers, the browser tests' waits timed out in 2 of 3 runs (I-224).
 - The gate is quick by default (issue #122, W-11 to W-19):
   - It runs lint, types, the tests of the paths changed since the last pass, the evals only when code changed, and the docs check. A Markdown-only change runs only the docs steps. `--full` runs what CI runs.
   - A pass stamps its tree in `.scio/gate/last-pass.json`, and a tree that already passed is not gated again. A leftover `RUNNING` marker shows a gate that died. One gate runs at a time on the machine.

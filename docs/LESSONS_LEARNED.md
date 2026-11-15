@@ -98,6 +98,7 @@ Every bug and every correction becomes one rule here (the owner's rule, 2026-10-
 90. **Never** let a test run the hook or the gate against the machine's real state: every test that runs `push_gate.main` or `gate.main` points the machine directory (the refusal log, the gate lock) at `tmp_path`, or the owner's refusal counts and gate lock fill with test runs (I-214). Guard: `symbol:machine_dir`
 91. **Never** state a fact about CI or the repository's config in a brief from memory: read `ci.yml` and `pyproject.toml` first, and quote what they say. The CI brief said "excluding `tests/live` as today", and CI had always run it (I-215). Guard: `test:test_ci_shards_cover_every_test_directory`
 93. **Always** run every test that names a changed Markdown file when gating a docs change: tests pin rule lines in CLAUDE.md and CONTRIBUTING by their words, and a gate that picks docs tests by file name alone lets a rewording through (I-218). Guard: `test:test_a_docs_only_change_runs_every_test_that_names_the_changed_file`
+97. **Never** run browser tests on the same runner as a CPU-bound parallel suite: give `tests/live` a shard of its own on few workers, or Chromium's fixed waits time out under the other workers' load (I-224). Guard: `test:test_the_browser_tests_run_in_their_own_shard_on_few_workers`
 
 ## Standing pre-flight list (apply at the start of every milestone)
 

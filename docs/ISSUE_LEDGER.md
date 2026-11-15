@@ -2075,3 +2075,16 @@ Template:
 - Sweep: `grep -rln "CLAUDE.md\|CONTRIBUTING.md\|README.md" tests` lists the tests that read those files. With the fix, docs mode runs every one of them for a change to the file they name.
 - Guard: `test_a_docs_only_change_runs_every_test_that_names_the_changed_file`. Guardrail 93.
 - Resolved: 2026-11-15 · Status: resolved
+
+### I-224 · Since CI was sharded, the dashboard's browser tests timed out beside the unit tests' workers
+- Found: 2026-11-15 · PRs #132 and #133's CI, shard 3 · `.github/workflows/ci.yml` (the shard matrix, #122 W-35)
+- Symptom: 2 of 3 runs after the sharding failed one Playwright test in shard 3, each passing on a rerun:
+  - #132's run 43659791456: `tests/live/test_dashboard_page.py::test_a_dropped_socket_reconnects_and_catches_up` (`Locator expected to have text 'gate'`, a 5 s wait);
+  - #133's run 43661201527: `tests/live/test_dashboard_server.py::test_the_real_app_serves_the_page_live_and_stops_cleanly` (`Locator.wait_for: Timeout 10000ms exceeded`).
+
+  Neither PR touched the dashboard.
+- Root cause: W-35 put `tests/unit tests/live` in one shard, run with twice the runner's cores as xdist workers. Chromium's page loads then competed with dozens of unit-test workers on 4 cores, and the browser tests' fixed 5 to 10 s waits ran out. The single tests job before it had mostly product builds waiting on subprocesses; this shard is CPU-bound unit tests. It is the same failure class as I-170, made frequent by the new layout.
+- Fix: a fourth shard runs `tests/live` alone on 2 workers (the matrix's new `workers` key, which the pytest step honours), and shard 3 runs `tests/unit` alone.
+- Sweep: the other shards hold no browser test (`grep -rln "playwright\|chromium" tests` lists only `tests/live`). The docker-live job runs `tests/live/test_docker_live.py` separately, unchanged. I-170 stays open for the waits themselves (#104).
+- Guard: `test_the_browser_tests_run_in_their_own_shard_on_few_workers`. It failed on the old `ci.yml` (`['tests/unit', 'tests/live'] == ['tests/live']`). Guardrail 97.
+- Resolved: 2026-11-15 · Status: resolved
