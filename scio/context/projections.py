@@ -188,10 +188,14 @@ def debug_message(
     previous: WorkerOutput | None = None,
     tree: str | None = None,
     attempt: int = 2,
+    task: TaskSpec | None = None,
 ) -> str:
     """The debugger's message. ``previous``: the last session's report on this step (the
-    coder's, or an earlier debugger's), carried into this fresh session (I-154)."""
-    parts = [
+    coder's, or an earlier debugger's), carried into this fresh session (I-154). ``task``:
+    the task itself, so the debugger reads what the coder read, a bug-fix feature's linked
+    issue included (issue #120); before it the debugger saw only the step and the failure."""
+    parts = [task_block(task), ""] if task is not None else []
+    parts += [
         f"Plan step: {step.id if step else 'S1'}" + (f" ({step.description})" if step else ""),
         f"Repository root: {repo_root}",
         f"Plan step to execute: {step.id if step else 'S1'}",

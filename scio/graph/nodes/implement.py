@@ -370,6 +370,7 @@ def debug(ctx: RunContext) -> Node:
             previous=previous,
             tree=diff_stat(ctx.sandbox, "HEAD") if previous is not None else None,
             attempt=state.progress.attempts_on_step + 1,
+            task=state.task,
         )
         tags = {"thread": ctx.thread_id, "debug": str(state.progress.iterations)}
         before = tree_snapshot(ctx.sandbox)
