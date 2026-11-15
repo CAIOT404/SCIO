@@ -310,6 +310,17 @@ def test_the_argv_loads_scio_rules_under_auto_with_the_deny_list(tmp_path: Path)
     assert _flag(argv, "--name") == "scio-recovery"
 
 
+def test_the_repair_session_cannot_merge_or_enqueue_a_pr() -> None:
+    """A merge is the owner's act: under the merge queue `land.py N --enqueue` is a merge path
+    beside `gh pr merge`, so the repair session is denied both (#141, I-233)."""
+    for rule in (
+        "Bash(gh pr merge*)",
+        "Bash(uv run python scripts/land.py*)",
+        "Bash(python scripts/land.py*)",
+    ):
+        assert rule in DENIED_TOOLS
+
+
 def test_the_environment_drops_secrets_and_nesting_and_stays_offline() -> None:
     env = repair_env(
         {
