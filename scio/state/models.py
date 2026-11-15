@@ -543,7 +543,9 @@ class FeatureRun(BaseModel):
     thread_id: str
     attempt: int = 1
     tier: Tier
-    status: Literal["running", "passed", "failed", "skipped"] = "running"
+    status: Literal["running", "passed", "failed", "skipped", "parked"] = "running"
+    """``parked``: the attempt ended with a design question, which went to the feature's issue
+    and the dashboard, and the build went on without it until the answer comes (ADR 0020)."""
     exit_reason: str | None = None
     commit_sha: str | None = None
     branch: str | None = None
@@ -570,6 +572,10 @@ class FeatureRun(BaseModel):
     """The owner's answer after ``retry`` (``retry: <answer>``, issue #137), in full and in
     the owner's case. Every later attempt of the feature in the milestone reads it, with
     ``question``, in its task. None on a plain retry, any other decision, and old runs."""
+    question_id: str | None = None
+    """A parked run's question id, ``<feature>-a<attempt>`` (:func:`scio.product.questions.
+    question_id`, ADR 0020): how the build finds the answer on the issue or in the workspace's
+    answer file. None on every other run."""
 
 
 class CiStatus(BaseModel):
