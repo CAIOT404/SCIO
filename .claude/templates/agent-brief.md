@@ -60,6 +60,9 @@ The orchestrator owns the shared files and writes them after the wave, from your
 `CLAUDE.md`, `CONTRIBUTING.md`, `docs/ISSUE_LEDGER.md`, `docs/LESSONS_LEARNED.md`,
 `CHANGELOG.md`, `README.md`, `pyproject.toml`, `uv.lock`, `.claude/settings.json`.
 Report what they need under `docs_touchpoints_left`.
+The fragments are yours: write each problem's ledger entry, each rule and each change note as
+its own file (`docs/ledger/I-NNN.md`, `docs/guardrails/NNN.md`, `changes/unreleased/`), at the
+ids this brief assigns. Never write them into the shared files above.
 
 ## Rules
 - **No git writes.** No commit, push, stash, reset, checkout of another branch, merge, rebase or

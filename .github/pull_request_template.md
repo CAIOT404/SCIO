@@ -18,12 +18,12 @@ Closes #
 - [ ] README
 - [ ] docs/ARCHITECTURE.md
 - [ ] ADR (if architectural / high-impact)
-- [ ] CHANGELOG `[Unreleased]`
+- [ ] A change fragment in `changes/unreleased/`
 - [ ] Docstrings for changed public APIs
 - [ ] N/A: no user-facing or architectural change
 
 ## Continuous improvement
-- [ ] Issue ledger updated for every problem hit (ids: )
+- [ ] A ledger fragment (`docs/ledger/I-NNN.md`) for every problem hit (ids: )
 - [ ] Each bug fix was swept across the codebase (pattern searched: )
 - [ ] Milestone retrospective written (milestone-closing PRs only)
 

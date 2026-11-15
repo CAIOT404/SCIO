@@ -54,6 +54,8 @@ CI checks docs: links, runnable examples, architecture diagram vs. the compiled 
   - a heredoc body or a `python -c` script that holds a backslash, and any command with a double backslash, which the Bash tool halves before the shell runs (guardrail 17, I-176). Write such text with the Edit or Write tool, or put a pattern in a file.
   - a check piped into another command without `set -o pipefail` (guardrail 64, I-173). Start the line with `set -o pipefail`, or drop the pipe.
 
+  A second hook, `scripts/hooks/worktree_guard.py`, judges every Edit, Write and NotebookEdit. A session whose working directory is a worktree may not write the main checkout's tree, whose files carry the same names. A path that drops the worktree's segment would otherwise edit the wrong copy (I-226). The refusal names the worktree's copy of the path. Writes outside the repository, in any worktree, and to paths git ignores (`.scio/`) pass. To change the main checkout on purpose, run the session from it.
+
   On the owner's machine the user settings (`~/.claude/settings.json`) run the same hook in every session, any project: a session started outside the repository loads no project hooks (I-178, guardrail 68). That copy runs from `.scio/live-wt`, so a hook change reaches other sessions when the SCIO session moves live-wt after the merge.
 - CI runs `changes`, three `tests` shards, `evals` and `docker-live` side by side (issues #88 and #122):
   - The shards together cover every test file, `tests/live` included (`test_ci_shards_cover_every_test_directory`). Lint, mypy and the docs check run on shard 1. Each shard prints its 30 slowest tests, for rebalancing.

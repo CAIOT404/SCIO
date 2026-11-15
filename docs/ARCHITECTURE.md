@@ -807,7 +807,10 @@ scio/
 │   ├── PROMPT.md
 │   ├── RESEARCH.md
 │   ├── api/                     # generated from docstrings
+│   ├── ledger/                  # one file per issue-ledger entry, I-NNN.md
+│   ├── guardrails/              # one file per Always/Never rule, NNN.md
 │   └── adr/
+├── changes/unreleased/          # one change note per file; the release cut assembles them
 ├── .github/
 │   ├── ISSUE_TEMPLATE/          # feature, bug, chore (exists)
 │   ├── pull_request_template.md # exists
@@ -906,7 +909,7 @@ Assumptions are numbered F‑n and referenced above. Change one by PR; record th
 - A/B configurations are role→model overrides (`evals/configs/*.yaml`, `SCIO_ROLE_OVERRIDES_PATH`) applied over `models.yaml` by `Harness.from_settings`; no code changes between configs.
 - Capability suite: scenario tasks (`fixture:` reuse, `scenario:` switches, `expect_pass`) exercise the escalation paths; a task built to exercise one tier's path sets `tier_pin:` and `route` emits that tier without consulting the classifier, which otherwise prefers the cheaper tier and skips the nodes under test (t008, I-050); the nightly workflow runs capability and regression per config and posts the tables. The Anthropic key is a placeholder on this project (I-019), so the nightly uses the Fake provider unless a repository secret is set.
 - `evals/tune.py` sweeps `repeat_threshold` × `max_stall`; ADR 0006 records the data and the chosen values (spec defaults confirmed by control-flow data) and the coupling `max_stall >= repeat_threshold - 1`, now enforced in `EscalationConfig`.
-- Release: `scripts/release_notes.py` cuts `[Unreleased]` into a version and extracts its notes; `.github/workflows/release.yml` creates the GitHub Release on a `v*` tag.
+- Release: `scripts/release_notes.py --cut` assembles the change fragments in `changes/unreleased/` into a version and extracts its notes; `.github/workflows/release.yml` creates the GitHub Release on a `v*` tag.
 - The real end-to-end run (`NewMe505/scio-eval-sandbox`, issue #1 → PR #2) found that `git add -A` committed bytecode caches; `prepare_repo` now writes repo-local excludes (I-028).
 
 ### Product mode graphs (M7, M8)
