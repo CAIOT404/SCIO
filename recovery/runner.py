@@ -4,6 +4,7 @@ OWNER: wave-1 agent A."""
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import subprocess
 import sys
@@ -14,7 +15,8 @@ from pathlib import Path
 from recovery import procs
 from recovery.commands import Runner, kill_tree, run_command
 from recovery.config import HOME_ENV, WorkspaceConfig, recorded_env
-from recovery.model import ProcessKey, RunRecord, RunStatus
+from recovery.evidence import read_outcome
+from recovery.model import ProcessKey, RunRecord, RunStatus, ThreadSource
 from recovery.store import Store
 
 OUTCOME_SUBCOMMANDS: tuple[str, ...] = ("build", "new", "run", "resume")
@@ -83,7 +85,11 @@ def product_dir(workspace: Path, argv: Sequence[str]) -> Path | None:
 
 
 def build_thread(product: Path | None) -> str:
-    """``build_thread`` from ``<product>/.scio/product/progress.json``, or ""."""
+    """``build_thread`` from ``<product>/.scio/product/progress.json``, or "".
+
+    That is the thread that recorded the product's last finished milestone, not always the
+    one ``scio build`` runs next (I-163), so a run record holds it only as a provisional
+    guess until :func:`recorded_thread` reads the thread SCIO ran (issue #123)."""
     if product is None:
         return ""
     try:
@@ -94,6 +100,98 @@ def build_thread(product: Path | None) -> str:
         return ""
     value = data.get("build_thread") if isinstance(data, dict) else None
     return value if isinstance(value, str) else ""
+
+
+THREAD_LINE = re.compile(r"^(?:build |product )?thread (?P<thread>\S+) phase=")
+"""The first line ``scio build``, ``scio new`` and ``scio run``/``resume`` print when a run
+ends (``build thread build-x-m3 phase=merge_wait exit=None dir ...``), as
+``evidence._HEADER`` reads it. ``scio status``'s ``build thread <id>`` names
+``progress.json``'s thread and has no ``phase=``, so it never matches."""
+
+
+def printed_thread(stdout_path: Path) -> str:
+    """The thread of the last :data:`THREAD_LINE` in SCIO's stdout, or "".
+
+    The whole file is read, not a tail: a pause prints its interrupt JSON after the line.
+    Bytes that are not UTF-8 are replaced (SCIO's output through ``sh`` on Windows is
+    cp1252), so one stray byte never hides the line."""
+    found = ""
+    try:
+        with stdout_path.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if (m := THREAD_LINE.match(line)) and m["thread"] not in ("-", "None"):
+                    found = m["thread"]
+    except OSError:
+        return ""
+    return found
+
+
+FEATURE_SUFFIX = re.compile(r"-p\d+-a\d+$")
+"""A feature run's suffix on its build thread: ``build-x-m3-p26-a4`` runs in ``build-x-m3``
+(``scio/product/build.py``: ``f"{thread}-{feature id}-a{attempt}"``, ids ``P<n>``)."""
+
+LEDGER_THREAD = re.compile(r"^(?:build-.+-m\d+(?:-r\d+)?|new-[0-9a-f]+)$")
+"""A ledger name, its feature suffix stripped, that is a thread SCIO's CLI starts: a build
+thread (``build-<product>-m<n>``, ``-r<n>`` after a halt, ADR 0011) or a product thread
+(``new-<hex>``). A task thread's id is free text, so a task's ledger is never read."""
+
+
+def ledger_thread(workspace: Path, since: float) -> str:
+    """The thread of the newest ``<workspace>/.scio/ledger/*.jsonl`` written at or after
+    ``since``, or "".
+
+    SCIO writes each thread's cost ledger to ``.scio/ledger/<thread id>.jsonl`` under its
+    working directory, the workspace (``scio/graph/run_context.py``). A feature's ledger
+    names its build thread once :data:`FEATURE_SUFFIX` is stripped. Names that are not a
+    thread (:data:`LEDGER_THREAD`) and files older than ``since`` are ignored. ``since`` is
+    a run's ``started_at``: ``time.time()``, seconds since the epoch, the same clock as a
+    file's ``st_mtime``, so the two compare without any time-zone conversion."""
+    newest, found = 0.0, ""
+    for path in (workspace / ".scio" / "ledger").glob("*.jsonl"):
+        thread = FEATURE_SUFFIX.sub("", path.stem)
+        if not LEDGER_THREAD.match(thread):
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime >= since and (not found or mtime > newest):
+            newest, found = mtime, thread
+    return found
+
+
+def recorded_thread(run: RunRecord, product: Path | None) -> tuple[str, ThreadSource]:
+    """The thread SCIO ran in ``run``, and where it was read (issue #123):
+
+    1. ``outcome``: the ``thread`` of SCIO's outcome file, when it is a non-empty string
+       (it is null when SCIO refused before picking one);
+    2. ``stdout``: else the last thread line SCIO printed (:func:`printed_thread`), for a
+       SCIO older than ``--outcome-file`` or a run killed between the line and the file;
+    3. ``ledger``: else the thread of the newest cost ledger the run wrote
+       (:func:`ledger_thread`). SCIO prints its thread line only when a run ends, so this
+       is what names the thread of a build killed as hung;
+    4. ``progress``: else ``progress.json``'s ``build_thread`` (:func:`build_thread`).
+
+    ``("", "progress")`` when none names one. Never raises on a missing or broken file."""
+    outcome = read_outcome(Path(run.outcome_path)) if run.outcome_path else None
+    thread = outcome.get("thread") if outcome is not None else None
+    if isinstance(thread, str) and thread.strip():
+        return thread.strip(), "outcome"
+    printed = printed_thread(Path(run.stdout_path)) if run.stdout_path else ""
+    if printed:
+        return printed, "stdout"
+    written = ledger_thread(Path(run.workspace), run.started_at) if run.workspace else ""
+    if written:
+        return written, "ledger"
+    return build_thread(product), "progress"
+
+
+def _record_thread(run: RunRecord, product: Path | None) -> None:
+    """Replace the run's provisional thread by :func:`recorded_thread`'s, when it names one.
+    Every path that ends a run calls it before the final save."""
+    thread, source = recorded_thread(run, product)
+    if thread:
+        run.build_thread, run.build_thread_source = thread, source
 
 
 def _live_wt_head(cfg: WorkspaceConfig, git: Runner) -> str:
@@ -132,9 +230,9 @@ def supervise(
     - **Lease.** Takes the workspace lease (``cfg.lease_name``). If a live process holds
       it, the record is saved as ``REFUSED`` and returned without starting anything.
     - **Run record.** Records the run before starting it: the ``scio_sha`` (live-wt's
-      HEAD), ``product_dir`` (from ``--product`` or ``--dir``), the build thread (from
-      ``progress.json`` when present), ``run_dir`` under ``home/runs/<run_id>``, and the
-      stdout, stderr and outcome paths.
+      HEAD), ``product_dir`` (from ``--product`` or ``--dir``), a provisional build thread
+      (``progress.json``'s, source ``progress``), ``run_dir`` under ``home/runs/<run_id>``,
+      and the stdout, stderr and outcome paths.
     - **Outcome file.** Appends ``--outcome-file <path>`` when ``argv[0]`` is in
       ``OUTCOME_SUBCOMMANDS``.
     - **While running.** Every ``cfg.limits.poll_s`` seconds it echoes new output to its
@@ -147,7 +245,9 @@ def supervise(
     The child gets ``env`` whole; the record keeps only ``config.recorded_env(env)``. A
     launcher that cannot start is recorded as exit 127, with the reason in stderr.log. A
     ``KeyboardInterrupt`` kills the tree, records the exit, releases the lease and is
-    re-raised. The build thread is read again at exit, when ``progress.json`` names one.
+    re-raised. Every exit records the thread SCIO ran, from :func:`recorded_thread`: the
+    outcome file, else SCIO's thread line, else the ledger the run wrote, else
+    ``progress.json`` again (issue #123).
     """
     args = list(argv)
     me = procs.self_key()
@@ -164,6 +264,7 @@ def supervise(
         scio_sha=_live_wt_head(cfg, git),
         product_dir=str(product) if product is not None else "",
         build_thread=build_thread(product),
+        build_thread_source="progress",
         supervisor_pid=me.pid,
         supervisor_created=me.created,
         run_dir=str(run_dir),
@@ -235,6 +336,7 @@ def _supervise_child(
             run.exit_code = 127
             run.ended_at = clock()
             run.status = RunStatus.EXITED
+            _record_thread(run, product)
             store.save_run(run)
             return run
         key = procs.process_key(popen.pid)
@@ -263,6 +365,7 @@ def _supervise_child(
             run.exit_code = _wait(popen)
         run.ended_at = clock()
         run.status = RunStatus.EXITED
+        _record_thread(run, product)
         store.save_run(run)
         raise
     if echo:
@@ -272,7 +375,7 @@ def _supervise_child(
     if run.status is RunStatus.RUNNING:
         run.status = RunStatus.EXITED
     run.last_progress_at = max(run.last_progress_at, progress_time(cfg.workspace, run))
-    run.build_thread = build_thread(product) or run.build_thread
+    _record_thread(run, product)
     store.save_run(run)
     return run
 
@@ -284,7 +387,8 @@ def find_orphans(
 
     Each one is marked ``ORPHANED``, saved and returned. A run whose supervisor died
     while its child still runs is left alone: the child may finish on its own, and a
-    later tick looks again.
+    later tick looks again. The supervisor never reached the run's end, so its thread is
+    recorded here the way an ending run records it (:func:`recorded_thread`).
     """
     orphans: list[RunRecord] = []
     for run in store.runs(status=RunStatus.RUNNING):
@@ -292,6 +396,7 @@ def find_orphans(
         if alive(run.process) or alive(supervisor):
             continue
         run.status = RunStatus.ORPHANED
+        _record_thread(run, Path(run.product_dir) if run.product_dir else None)
         store.save_run(run)
         orphans.append(run)
     return orphans

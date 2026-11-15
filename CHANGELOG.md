@@ -6,6 +6,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 ## [Unreleased]
 ### Changed
 - CI runs `tests/live` (the dashboard's browser tests and the docker tests) in a fourth shard of its own, on 2 workers. Beside the unit tests' workers, the browser tests' waits timed out in 2 of 3 runs (I-224).
+- Recovery supervisor fixes (issues #123, #126 and #130):
+  - It records the build thread SCIO actually ran: from the outcome file, then SCIO's output, then the ledger the run wrote, then `progress.json`. `build_thread_source` says which. Before, it took `progress.json`'s thread, the last finished milestone's.
+  - A used-up Claude usage window ("You've hit your 5-hour limit · resets …") is transient, never a repair, and the supervisor waits until the named reset time before it replays.
 - The gate is quick by default (issue #122, W-11 to W-19):
   - It runs lint, types, the tests of the paths changed since the last pass, the evals only when code changed, and the docs check. A Markdown-only change runs only the docs steps. `--full` runs what CI runs.
   - A pass stamps its tree in `.scio/gate/last-pass.json`, and a tree that already passed is not gated again. A leftover `RUNNING` marker shows a gate that died. One gate runs at a time on the machine.
@@ -13,6 +16,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   - Every refusal is logged outside the repository, to `hook-refusals.log`. A refused inline script is told which scratch file to write instead.
 
 ### Fixed
+- A feature retry starts from the newest commit the retried attempts verified, instead of the milestone head, and carries those features as passing. Uncommitted leftovers are still discarded. graphcalc's P26 attempt 4 spent about 32 minutes rebuilding two features attempt 3 had committed (issue #119, I-216).
 - On T1 the explorer runs before the planner, and the planner reads its summary. Every planned path is then checked against the tree: a guessed path is replaced by its one localized match, kept as a probable new file when its folder exists, and dropped only when neither, each choice recorded. graphcalc's P26 planned a `graphcalc/evaluator.py` that did not exist (issue #121, I-213).
 
 ### Added

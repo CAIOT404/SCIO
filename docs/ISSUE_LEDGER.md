@@ -1523,6 +1523,7 @@ Template:
 - Root cause: not found. The test's page helpers wait up to 10 s for a thread head or a section to render (`tests/live/test_dashboard_page.py:319-326`); on a loaded runner the page may take longer. Not verified: the failing attempt's page state was not captured.
 - Fix: none yet. The next step is to capture the page (a screenshot and the WebSocket state) when such a wait times out, so a recurrence names its cause, as I-145 asks for its two tests.
 - Sweep: the other fixed 10 s browser waits (`grep -n "timeout=10_000" tests/live`): the three helpers in this file; the reconnect test's 5 s waits (`:694`, `:697`)
+- Recurrence, 2026-11-15: PR #132's CI run 43659791456, attempt 1, failed `tests/live/test_dashboard_page.py::test_a_dropped_socket_reconnects_and_catches_up` with `Locator expected to have text 'gate'`. That is the reconnect test's short wait named in the sweep above. Since #122's W-35 the unit and live tests share shard 3's runner. The rerun of the failed job passed. The fix (capture the page when a wait times out, or lengthen the waits) belongs to #104.
 - Resolved: - · Status: open
 
 ### I-171 · Every Claude Code session SCIO started loaded the CLAUDE.md of the product's parent directories
@@ -2063,6 +2064,29 @@ Template:
 - Guard: `test_ci_shards_cover_every_test_directory`. Guardrail 91.
 - Resolved: 2026-11-14 · Status: resolved
 
+### I-216 · A feature retry started over from the milestone head and redid the work its previous attempt had verified and committed
+- Found: 2026-11-14 · graphcalc P26 attempt 4, issue #119 (graphcalc's P26 retrospective, also #124) · `scio/product/build.py` (the fresh-attempt path), `scio/graph/nodes/prepare.py`
+- Symptom: attempt 3 reached `verify: all checks passed (iteration 3, stall 0)` and `committed F1+F3 as 8b8e8b4f6d59`, then halted (on the budget, since fixed in #115). The retry logged `repository ready on branch agent/18-p26-… at 2cacd08af4e0`, the milestone head, and spent 19:49 to 20:21 UTC rebuilding the same F1 and F3 (`committed F1+F3 as 05be7dff55ad`): about 32 minutes.
+- Root cause: every fresh attempt began with `clean_tree()` on the milestone branch, and `prepare_repo` then ran `checkout -B` on the feature branch, which orphaned the previous attempt's verified checkpoint commits. That was right for uncommitted leftovers (I-067), and wrong for committed, verified work.
+- Fix:
+  - `verified_start` finds the newest commit `git_checkpoint` made in the chain of retried attempts. It reads their checkpointed task state (`FeatureItem.commit_sha`), never ledger text, and follows only runs answered `retry` in this milestone.
+  - When that commit sits on the milestone head and the criteria are unchanged, the new attempt starts from it (`TaskSpec.start_commit`), and its verified features are carried as passing (`TaskSpec.carried`).
+  - Otherwise it starts from the head as before, with a ledger note.
+  - Uncommitted leftovers are still discarded.
+  - The ADR 0011 amendment.
+- Sweep: `grep -rnE '"-B"|base_branch|startswith\("retry"\)|"retry"' scio recovery scripts`. `prepare.py` is fixed. The `_run_batch` SHA base, the release cut and `_ensure_pr` are unaffected. A retry never batches. `recovery/` never answers retry.
+- Guard: the 9 tests in `tests/unit/test_retry_keeps_verified.py`. With `verified_start` forced to None, 5 fail; the idle and stop cases pass by design. Guardrail 92.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-217 · The checkpoint node returns early, without advancing the plan step, when a verify passes and no feature is newly passing
+- Found: 2026-11-14 · building #119 (its agent) · `scio/graph/nodes/checkpoint_gate.py` (`checkpoint`: `if not pending: return {"phase": "document"}`)
+- Symptom: none observed live yet. When a plan step's verify passes and every passing feature already has its `commit_sha`, the checkpoint commits nothing and routes to `document`. It never advances `current_step_id`, so a plan with steps left could go to documentation before its later steps ran. #119 met it: carried features with `commit_sha` set would make the next checkpoint a no-op. So #119 carries them with `commit_sha` unset, and they are committed with the attempt's next checkpoint.
+- Root cause: `checkpoint` decides "nothing to do" from the features alone and ignores the plan.
+- Fix: not yet. When a step passes with nothing new to commit, the checkpoint should still advance to the next unfinished step, or document only when none is left. Needs a test first: a two-step plan whose first step passes with no newly passing feature.
+- Sweep: not yet.
+- Guard: not yet.
+- Resolved: - · Status: open
+
 ### I-218 · Rewriting CLAUDE.md's gate line broke a test that finds it by its words, and the new docs-only gate mode would have skipped that test
 - Found: 2026-11-15 · gate v2's own `gate.py --full` (#122 W-14) · `tests/unit/test_cli_and_nodes.py`, `scripts/gate.py` (`docs_tests`)
 - Symptom: `test_the_local_ci_line_runs_python_tools_as_modules` failed with `StopIteration`. It finds CLAUDE.md's gate line by its opening words, "- Run the CI-equivalent locally", and W-14 had reworded the line to "- Run the gate before every push". The agent's narrowed checks (only its own test files, to spare a loaded machine) did not run this test. The full gate did.
@@ -2075,6 +2099,51 @@ Template:
 - Sweep: `grep -rln "CLAUDE.md\|CONTRIBUTING.md\|README.md" tests` lists the tests that read those files. With the fix, docs mode runs every one of them for a change to the file they name.
 - Guard: `test_a_docs_only_change_runs_every_test_that_names_the_changed_file`. Guardrail 93.
 - Resolved: 2026-11-15 · Status: resolved
+
+### I-220 · The recovery supervisor recorded progress.json's build thread, not the thread SCIO ran
+- Found: 2026-11-14 · graphcalc S14, issue #123 (filed by the graphcalc session) · `recovery/runner.py` (`build_thread`)
+- Symptom: both supervised graphcalc runs that day recorded `build-graphcalc-m2`: `run-20261114184650-920b73` and `run-20261114194904-20a08c`. SCIO ran `build-graphcalc-m3`, as its ledgers, its stop line and its outcome file all say. No incident opened then. If one had, its evidence (`recovery/evidence.py`), the post-repair health check (`report --thread`, `recovery/runtime.py`) and the repair brief would all have targeted the old, halted m2.
+- Root cause: `build_thread()` read `progress.json`'s `build_thread`, the thread that recorded the last *finished* milestone. SCIO's CLI chooses the thread by a different rule (I-163), so the two disagree whenever a build moves to a new thread.
+- Fix: at run end the thread comes from the first source that gives one:
+  1. the outcome file's `thread`;
+  2. SCIO's last thread line in stdout;
+  3. the newest `.scio/ledger/*.jsonl` written since the run started, with `-pN-aN` stripped. This covers a hang-killed run, which prints nothing.
+  4. `progress.json`.
+
+  `build_thread_source` records which one, with `progress` as the default, so old records load. Every end path resolves once: a launcher failure, Ctrl+C, a normal or hang exit, an orphan. The dashboard shows the provisional value while a run is live.
+- Sweep: every consumer of `build_thread` (evidence, brief, health check, dashboard) reads it after the run's final save; only the dashboard's live view reads the provisional value. Both of today's runs resolve to `build-graphcalc-m3`.
+- Guard: `test_the_run_records_the_thread_scio_ran_not_progress_jsons`, `test_a_hung_run_takes_the_thread_from_the_ledger_it_wrote`, and 6 more in `tests/recovery/test_run_thread.py`. All failed on the old code. Guardrail 95.
+- Resolved: 2026-11-15 · Status: resolved
+
+### I-221 · The supervisor read a used-up Claude usage window as a SCIO fault and spent both repairs on it
+- Found: 2026-11-14 · incident `inc-20261114214620-80858c`, issue #126 (opened by the supervisor), graphcalc S15 (#130) · `recovery/classify.py`, `recovery/machine.py`
+- Symptom: at 21:46Z graphcalc's M4 P27 attempt 1 ended with `FatalError: claude -p failed: You've hit your 5-hour limit · resets 2:20pm (America/Los_Angeles)`. The supervisor classified it `harness_suspect` and opened #126. It started two repair sessions, which hit the same limit at once (1 turn each, $0.00), and escalated. Nothing was changed. The limit had stopped this session at the same moment.
+- Root cause: `TRANSIENT_MARKERS` held "usage limit" and "rate limit", not this wording. Even with the class right, the 5/15/30-minute backoff (50 minutes in all) cannot outlast a 5-hour window.
+- Fix:
+  - New markers, the typographic apostrophe included: "you've hit your", "-hour limit", "weekly limit", "limit · resets". A transient marker wins over the harness pattern on a feature line and on a harness stop line.
+  - `classify.usage_reset` reads the reset time in its spellings, and the transient backoff waits until then plus 5 minutes, capped at 8 h.
+  - The tick's Python has no zone database (no tzdata), so the named time is read as this machine's local time, and the timeline says so. An unreadable time keeps the schedule.
+- Sweep: `grep -rn "hit your\|hour limit\|weekly limit" scio recovery`. `scio/` has no such wording: SCIO's provider treats the limit as a `FatalError` (I-223, open).
+- Guard: `test_a_used_up_usage_window_is_transient_not_a_repair` (with #126's exact text), `test_the_backoff_waits_until_the_window_resets` and `test_an_unreadable_reset_time_falls_back_to_the_backoff_schedule`, among 19 that all failed on the old code. Guardrail 96.
+- Resolved: 2026-11-15 · Status: resolved
+
+### I-222 · The Edit tool wrote a `\uXXXX` escape as the character itself, and ruff flagged it
+- Found: 2026-11-15 · the #126 fix, by its agent · the session's tooling, not SCIO's code
+- Symptom: a test literal meant to hold the escape for the typographic apostrophe was written as the literal character, and `ruff check` failed with RUF001 (an ambiguous Unicode character).
+- Root cause: the Edit tool's text is taken literally after the model's own decoding, so an escape sequence typed into it arrives as the character.
+- Fix: both the marker in `recovery/classify.py` and the test spell the character as `chr(0x2019)`, which needs no escape and no literal character. ruff caught the first version before any commit.
+- Sweep: `ruff check` runs on every commit (the hook) and in every gate, and RUF001 is on. No source file holds the literal character.
+- Guard: ruff's RUF001 in the commit hook and the gate (guardrail 17 covers writing text with backslashes through the file tools). Guardrail 17 now cites this id.
+- Resolved: 2026-11-15 · Status: resolved
+
+### I-223 · SCIO's Claude Code provider raises a used-up usage window as a plain FatalError
+- Found: 2026-11-15 · the #126 sweep · `scio/harness/providers/claude_code.py` (`RETRYABLE_ERRORS`, `FATAL_ERRORS`)
+- Symptom: "You've hit your 5-hour limit · resets …" matches neither list, so the feature halts as a harness failure. The supervisor now classifies it correctly (I-221), but SCIO's own halt reason does not say "usage limit", and an unsupervised build tells the owner nothing about the reset time.
+- Root cause: the provider's error lists predate this wording.
+- Fix: not yet. A typed `UsageLimitReached` (or this wording among the retryable errors with a long wait) that names the reset time in the halt reason.
+- Sweep: not yet.
+- Guard: not yet.
+- Resolved: - · Status: open
 
 ### I-224 · Since CI was sharded, the dashboard's browser tests timed out beside the unit tests' workers
 - Found: 2026-11-15 · PRs #132 and #133's CI, shard 3 · `.github/workflows/ci.yml` (the shard matrix, #122 W-35)
