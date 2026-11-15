@@ -12,6 +12,18 @@
         ]
       }
     ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/scripts/session_state.py\" --markdown --write --detach",
+            "timeout": 30,
+            "statusMessage": "session state: writing the facts"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",

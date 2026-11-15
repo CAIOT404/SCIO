@@ -15,6 +15,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 - On T1 the explorer runs before the planner, and the planner reads its summary. Every planned path is then checked against the tree: a guessed path is replaced by its one localized match, kept as a probable new file when its folder exists, and dropped only when neither, each choice recorded. graphcalc's P26 planned a `graphcalc/evaluator.py` that did not exist (issue #121, I-213).
 
 ### Added
+- Session tools (issue #122, W-20 to W-29):
+  - `scripts/session_state.py` is the state-first inspection in one command; with `--markdown` it gives the handoff's facts, which a `Stop` hook writes to `.scio/session-state.md`.
+  - `scripts/next_ids.py` reads the next ledger id and guardrail from every branch and worktree.
+  - `scripts/land.py` takes a PR up to the merge: retarget, update, require a gate stamp, watch CI by commit, mark ready. It prints the merge only for a PR that `.scio/approvals.md` approves. It also has `--body`, `--after-merge` and `--next`.
+  - `scripts/move_live_wt.py --when-idle` moves live-wt only while no supervised build runs.
 - `docs/WORKFLOW_V2.md`, the standing checklist of every change from the 2026-11-14 workflow teardown (issue #122). `scripts/workflow_status.py` computes each item's status from the evidence it names (a test, a symbol, a file or a CLAUDE.md line), so nothing is ticked by hand. A `SessionStart` hook puts the count and the next open items into every session, and the docs check fails on a malformed checklist. CLAUDE.md gains the process rules W-01 to W-09 and W-34.
 - `scripts/dev/`: `read_stream.py` (a `claude -p` stream-json summary), `ledger_pairs.py` (per-call usage in a cost ledger) and `claude_probe.py`. The probe runs one `claude -p` with exactly the worker's flags, through `worker_argv` and `resume_argv`, which are now extracted from `ClaudeCodeWorker` without behaviour change. `scripts/brief.py` fills `.claude/templates/agent-brief.md` from an issue, and `.claude/templates/agent-report.md` is the agents' report schema (issue #122, W-30 to W-33).
 
