@@ -107,10 +107,10 @@ Opus plans, Sonnet implements and verifies one feature at a time, Opus gates. Th
 
 ```mermaid
 flowchart TD
-  P[prepare_repo] --> plan["plan<br/>Opus Planner → Plan(steps) mapped to feature_list"]
+  P[prepare_repo] --> loc["localize<br/>Sonnet Explorer ×1, read-only → summary ≤1.5k tokens,<br/>before the first plan (#121)"]
+  loc --> plan["plan<br/>Opus Planner reads the summary → Plan(steps) mapped to feature_list;<br/>files grounded in the tree, the explorer's files join files_expected (I-151, #121)"]
   plan --> post["post_plan @task<br/>issue comment with checklist"]
-  post --> loc["localize<br/>Sonnet Explorer ×1, read-only → summary ≤1.5k tokens;<br/>its files join the plan's files_expected (I-151)"]
-  loc --> impl["implement<br/>Sonnet Coder, must cite plan step id"]
+  post --> impl["implement<br/>Sonnet Coder, must cite plan step id"]
   impl --> ver{"verify<br/>run_tests(filter) + lint + types"}
   ver -->|pass| cp["git_checkpoint @task<br/>one commit per passing feature"]
   cp -->|features remaining| impl
@@ -184,12 +184,13 @@ graph TD;
 	implement -.-> verify;
 	intake --> route;
 	localize -.-> halt;
-	localize -. &nbsp;verify&nbsp; .-> implement;
+	localize -.-> implement;
+	localize -.-> plan;
 	plan -.-> halt;
 	plan -.-> post_plan;
-	post_plan -.-> implement;
-	post_plan -.-> localize;
+	post_plan --> implement;
 	pr_ready --> merge_wait;
+	prepare_repo -.-> localize;
 	prepare_repo -.-> plan;
 	review -.-> document;
 	review -.-> halt;
@@ -894,8 +895,8 @@ Assumptions are numbered F‑n and referenced above. Change one by PR; record th
 
 ### M4: T1/T2 and escalation
 - One builder (`scio/graph/build.py`) wires every tier; `after_route` sends the run down the chosen tier and the generated sections above are the `tier="T0"|"T1"|"T2"` restrictions of that graph.
-- T2 `scope` (Opus) produces 2–4 exploration questions; `explore` runs them in parallel through LangGraph `Send` with a read-only toolbox and reduces ≤1.5k-token summaries into `explorer_summaries`. T1 runs a single `localize` explorer for the first step.
-- `plan` (Opus) owns the feature list's `test_filter`s and the steps; `post_plan` mirrors the checklist to the issue (idempotent by marker). `implement` executes one step per cycle; `git_checkpoint` commits that step's features and advances the cursor (ADR 0005).
+- T2 `scope` (Opus) produces 2–4 exploration questions; `explore` runs them in parallel through LangGraph `Send` with a read-only toolbox and reduces ≤1.5k-token summaries into `explorer_summaries`. T1 runs a single `localize` explorer before its first plan (issue #121), and the planner reads its summary as T2's planner reads its explorers'.
+- `plan` (Opus) owns the feature list's `test_filter`s and the steps. Every new plan is grounded in the tree: a named file that neither exists nor is declared in `files_new` is replaced by the obvious match, else kept as a probable new file when its directory exists, else dropped, and a test filter that selects nothing is flagged (ADR 0004 amendment, issue #121). `post_plan` mirrors the checklist to the issue (idempotent by marker). `implement` executes one step per cycle; `git_checkpoint` commits that step's features and advances the cursor (ADR 0005).
 - `verify` stores a `TriageDecision` after a failing check; the `triage` edge reads it: `debug` (the default and the never-escalate path), `advise` (any of the six signals while the caps allow), or `halt` with exit `advisor_cap`. `advise` records an `EscalationRecord` (trigger, brief artifact, verdict, tokens, $, outcome) and routes on the verdict; the next verify resolves the record. A *passing* verify with unreviewed high-impact flags also stores an `advise` decision (`review_decision`, ADR 0008): the advisor reviews the diff before commit, `continue` resolves the record and routes straight to `git_checkpoint`, the other verdicts behave as on a failure.
 - `review` is a fresh-context Reviewer over task + diff + test output; its findings go into the PR body. The Documenter writes an ADR in the target repository when the advisor replanned or changed approach, or the diff is high impact.
 - `evals/` carries ten real tasks across the tiers (t001 T0, t002 T1, t003 T0, t004 T1 two steps, t005 T2, t006 T1 multi-file store + CLI change, t007 T1 red CI: the fixture's own `ruff` config and a failing test, which verify's narrow lint does not see; t008 T1 a formatting change that breaks a CLI snapshot test and a README example test a filtered `run_tests` never executes, so verify's full-suite step is what catches it; t009 T1 pinned: an undefined name in a module no test imports, which only verify's lint step sees, so the debugger must run; t010 T1 pinned: a rename used by nine modules, a correct diff of eleven files that passes verify and gets the pre-commit advisor review of ADR 0008); `evals/fake_scripts.TaskScript` drives them deterministically on the Fake provider, including the escalation scenarios.

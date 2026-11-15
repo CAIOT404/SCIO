@@ -10,6 +10,21 @@ SCIO is a model-agnostic LangGraph framework that takes a software task from spe
 4. **Always/Never guardrails, each with a guard that runs.** Every bug and every correction from the owner becomes one rule in `## Guardrails (Always / Never)` at the top of `docs/LESSONS_LEARNED.md`: it starts with **Always** or **Never**, cites its id, and names its guard (`symbol:` a structural fix, `test:` a regression test or a scan, `check:` a docs check, `hook:` a Claude Code hook; `manual:` with the reason only when nothing can check it). `check_guardrails` fails when a resolved ledger entry from I-104 on has no rule, or a named guard does not exist. A rule without a guard is a wish.
 5. **Bottleneck audit after every pass** (a slice, a milestone, a live run): the slowest steps in minutes, work that ran one after another but could have run in parallel, friction that repeated, and 1 or 2 concrete improvements (a file change or a ledger id). It goes in the status report and the retrospective.
 
+## Workflow v2: the standing checklist (issue #122)
+
+- **`docs/WORKFLOW_V2.md` is open work until every item is closed.** The `SessionStart` hook prints its count and next open items at the start of every session. Pick them up as you work, and never tick one by hand: `uv run python scripts/workflow_status.py` computes each item from its evidence in the tree, and the docs check fails on a malformed checklist.
+- Write a problem's ledger entry before starting the gate that carries it: an entry added mid-gate kills the gate or forces a second run (W-01).
+- Live status ("still running", "has not fired yet") goes in a PR comment, never in a gated file. A ledger entry holds settled facts (W-02).
+- Read the workspace's own files (its launcher, RUN_LOG, open issues, the live run's state) before asking the owner anything they may already have answered (W-03).
+- Ask for approvals once per batch, naming the issues or a `Refs #N` set, and record the owner's words with the PR or issue numbers in `.scio/approvals.md`. A merge needs a line there or the owner's own "merge N" (W-04).
+- Inspection scripts live in scripts/dev/ or the scratchpad, written with the file tools, never inline in a heredoc or `python -c` (guardrail 17; W-05).
+- Branch from main; stack a PR on another only when a conflict forces it, and then retarget it the moment its base merges (W-07).
+- An agent reports open questions, never owner decisions. Every invariant the owner stated becomes a named acceptance test in the agent's brief (W-08).
+- When a change depends on how a provider, the `claude` CLI or GitHub behaves, pair it with a research agent that checks the documentation or runs a probe, never memory (W-09).
+- Save each agent's final report to `.scio/agents/<issue>.md`; the PR body, the ledger entry and the review are built from that file, not from the conversation (W-34).
+- Start a session with `uv run python scripts/session_state.py`: the pinned checkouts, every worktree, the PRs, the live-run issues, the recovery incidents, the next ids and the open checklist items, in one command. Take ledger ids and guardrail numbers from it (or `scripts/next_ids.py`), never from memory. The `Stop` hook writes the same facts to `.scio/session-state.md` for the handoff (W-20, W-21, W-28).
+- Land a PR with `uv run python scripts/land.py N`: it retargets, updates, requires a gate stamp, watches CI by commit, marks the PR ready, and prints the merge command only for an approved PR. After the merge, run `land.py N --after-merge`. Move live-wt with `scripts/move_live_wt.py --when-idle`, never mid-build (W-22 to W-27).
+
 ## Engineering rules
 
 - Workflow and commits follow `CONTRIBUTING.md`: issue first, branch `feat/<issue#>-<slug>`, Conventional Commits, draft PR from the template with `Closes #N`, docs in the same PR, human merge.

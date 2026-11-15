@@ -5,10 +5,13 @@ chosen tier. ``tier="T0"|"T1"|"T2"`` restricts the build to that tier's nodes (u
 the registered diagrams and for tests). Shared nodes are added once.
 
     T0: prepare → t0_loop ⇄ verify → git_checkpoint → document → gate → pr_ready → merge_wait
-    T1: prepare → plan → post_plan → localize → implement → verify → {checkpoint | triage}
+    T1: prepare → localize → plan → post_plan → implement → verify → {checkpoint | triage}
     T2: prepare → scope → explore xN → plan → post_plan → implement → verify → {...}
     triage → debug → verify | advise → {implement | plan | halt}
     checkpoint → {implement (next step) | review → document}
+
+Both planned tiers explore before their first plan, and the planner reads the summaries
+(issue #121). Replans (advise, gate) return to ``plan``, so T1's ``localize`` runs once.
 """
 
 from __future__ import annotations
@@ -57,6 +60,8 @@ def after_prepare_factory(tiers: set[str]) -> Any:
             return "t0_loop"
         if tier is Tier.T2 and "T2" in tiers:
             return "scope"
+        if tier is Tier.T1 and "T1" in tiers:
+            return "localize"  # the explorer before the planner (issue #121)
         return "plan"
 
     return after_prepare
@@ -107,6 +112,8 @@ def build_graph(ctx: RunContext | None, tier: TierName | None = None) -> StateGr
         prepare_map["t0_loop"] = "t0_loop"
     if "T2" in tiers:
         prepare_map["scope"] = "scope"
+    if "T1" in tiers:
+        prepare_map["localize"] = "localize"
     if planned:
         prepare_map["plan"] = "plan"
     g.add_conditional_edges("prepare_repo", after_prepare_factory(tiers), prepare_map)
@@ -119,20 +126,13 @@ def build_graph(ctx: RunContext | None, tier: TierName | None = None) -> StateGr
     if planned:
         g.add_conditional_edges("plan", pl.after_plan, {"post_plan": "post_plan", "halt": "halt"})
         if "T1" in tiers:
+            # "implement" only for a checkpoint from before issue #121 (localize after post_plan)
             g.add_conditional_edges(
-                "post_plan",
-                lambda s: (
-                    "localize"
-                    if s.routing and s.routing.tier is Tier.T1 and not s.explorer_summaries
-                    else "implement"
-                ),
-                {"localize": "localize", "implement": "implement"},
+                "localize",
+                pl.after_localize,
+                {"plan": "plan", "implement": "implement", "halt": "halt"},
             )
-            g.add_conditional_edges(
-                "localize", im.after_worker, {"verify": "implement", "halt": "halt"}
-            )
-        else:
-            g.add_edge("post_plan", "implement")
+        g.add_edge("post_plan", "implement")
         g.add_conditional_edges("implement", im.after_worker, {"verify": "verify", "halt": "halt"})
         g.add_conditional_edges("debug", im.after_worker, {"verify": "verify", "halt": "halt"})
         g.add_conditional_edges(

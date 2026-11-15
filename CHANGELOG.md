@@ -4,7 +4,20 @@ All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- On T1 the explorer runs before the planner, and the planner reads its summary. Every planned path is then checked against the tree: a guessed path is replaced by its one localized match, kept as a probable new file when its folder exists, and dropped only when neither, each choice recorded. graphcalc's P26 planned a `graphcalc/evaluator.py` that did not exist (issue #121, I-213).
+
+### Added
+- Session tools (issue #122, W-20 to W-29):
+  - `scripts/session_state.py` is the state-first inspection in one command; with `--markdown` it gives the handoff's facts, which a `Stop` hook writes to `.scio/session-state.md`.
+  - `scripts/next_ids.py` reads the next ledger id and guardrail from every branch and worktree.
+  - `scripts/land.py` takes a PR up to the merge: retarget, update, require a gate stamp, watch CI by commit, mark ready. It prints the merge only for a PR that `.scio/approvals.md` approves. It also has `--body`, `--after-merge` and `--next`.
+  - `scripts/move_live_wt.py --when-idle` moves live-wt only while no supervised build runs.
+- `docs/WORKFLOW_V2.md`, the standing checklist of every change from the 2026-11-14 workflow teardown (issue #122). `scripts/workflow_status.py` computes each item's status from the evidence it names (a test, a symbol, a file or a CLAUDE.md line), so nothing is ticked by hand. A `SessionStart` hook puts the count and the next open items into every session, and the docs check fails on a malformed checklist. CLAUDE.md gains the process rules W-01 to W-09 and W-34.
+- `scripts/dev/`: `read_stream.py` (a `claude -p` stream-json summary), `ledger_pairs.py` (per-call usage in a cost ledger) and `claude_probe.py`. The probe runs one `claude -p` with exactly the worker's flags, through `worker_argv` and `resume_argv`, which are now extracted from `ClaudeCodeWorker` without behaviour change. `scripts/brief.py` fills `.claude/templates/agent-brief.md` from an issue, and `.claude/templates/agent-report.md` is the agents' report schema (issue #122, W-30 to W-33).
+
 ### Changed
+- CI runs its tests in three shards that together cover every test file, and runs the evals only when a pull request touches code. `scripts/ci_changes.py` decides, by a job condition, never a workflow path filter. The required `checks` fails on any failed, cancelled or skipped shard. CI also runs on the merge queue (`merge_group`) (issue #122, W-35 to W-37).
 - A coder or debugger session that runs out of turns without editing anything now escalates cheapest step first, before it can count as a stall (the owner's ladder, issue #116, I-209). First, the same Claude Code session resumes once, with its tools, to write the fix it diagnosed. Then the findings carry into the next session, as before. If nothing was edited still, the next session on the step gets twice the turn cap, once per step, and that iteration counts neither a stall nor a fix attempt. Only after that do stalls count as before. Whether a session edited is judged from git. The worker's stop and edit are kept in the state (ADR 0005 and 0006 amendments).
 - On the Claude subscription the budget is a metric, not a stop (issue #115, the owner's correction, I-208). The new `SCIO_BUDGET_MODE` setting is `auto` by default, with `enforce` and `track` also accepted. `auto` only records the budget when the worker backend and the provider are both `claude_code`; any setup that can bill an API key keeps its caps. A budget that does not bind never refuses a call or ends a run with `budget`, and Claude Code sessions get no `--max-budget-usd`. Dollars and tokens are still recorded in the ledger, `scio report`, `scio status` and the dashboard, which show "(tracked, no cap)". The iteration, stall, turn, tool and advisor caps are unchanged (ADR 0012 amendment).
 

@@ -50,12 +50,24 @@ def explore_message(question: str, *, repo_root: str) -> str:
     )
 
 
+LOCALIZE_ACCEPTANCE_MAX_CHARS = 800
+
+
 def localize_question(step: PlanStep | None, task: TaskSpec) -> str:
     if step is None:
-        return f"Where in this repository should '{task.title}' be implemented and tested?"
+        # T1 explores before its first plan (issue #121): the planner names its files from
+        # this answer, so ask for the files that exist, with citations, not a direction.
+        criteria = "; ".join(task.acceptance)[:LOCALIZE_ACCEPTANCE_MAX_CHARS]
+        return (
+            f"Where in this repository should '{task.title}' be implemented and tested"
+            + (f" (acceptance: {criteria})" if criteria else "")
+            + "? Put the existing files that hold the logic it changes in relevant_files and "
+            "cite them as path:line in findings; say how tests are organized, named and run, "
+            "and which conventions new code must follow."
+        )
     files = ", ".join(step.files_expected) or "the files the plan expects"
-    # The plan was written before any exploration (T1), so its files are guesses; the files
-    # named here join the step's files_expected (I-151).
+    # Only a checkpoint from before issue #121 reaches here (localize then ran after the
+    # plan, so its files were guesses); the files named here join files_expected (I-151).
     return (
         f"For plan step {step.id} ({step.description}): what do {files} currently contain, "
         "how are tests run, and what conventions must new code follow? If a planned file "
@@ -79,7 +91,9 @@ def plan_message(
     if previous is not None:
         steps = "\n".join(
             f"- {s.id} [{'done' if s.done else 'open'}] {s.description} "
-            f"(features {', '.join(s.feature_ids)}; files {', '.join(s.files_expected)})"
+            f"(features {', '.join(s.feature_ids)}; files {', '.join(s.files_expected)}"
+            + (f"; new {', '.join(s.files_new)}" if s.files_new else "")
+            + ")"
             for s in previous.steps
         )
         parts += [
