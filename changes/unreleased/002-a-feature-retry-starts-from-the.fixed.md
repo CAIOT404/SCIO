@@ -1,0 +1,1 @@
+A feature retry starts from the newest commit the retried attempts verified, instead of the milestone head, and carries those features as passing. Uncommitted leftovers are still discarded. graphcalc's P26 attempt 4 spent about 32 minutes rebuilding two features attempt 3 had committed (issue #119, I-216).

@@ -1,0 +1,1 @@
+The docs check fails on a ledger entry that does not close with its `- Resolved: … · Status: …` line. Such an entry is neither open nor resolved, so the guardrails check could not ask it for a rule. I-192 and I-159 gained theirs (I-204).

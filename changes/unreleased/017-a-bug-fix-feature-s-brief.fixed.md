@@ -1,0 +1,1 @@
+A bug-fix feature's brief carries its linked bug issue (`Bug #N`, `#N`, or the product repo's issue URL, read with `--gh`), framed as the operator's unverified report. The debugger's brief now includes the task too. graphcalc's P26 coder spent its whole turn cap re-deriving a root cause that issue #14 already held (issue #120, I-219).

@@ -43,8 +43,16 @@ CI_PENDING = "ci pending"
 """The one problem :func:`verify_claim` reports while CI has not finished (or not started)
 on the PR's head. The caller waits when it is the only problem and retries later."""
 
-LEDGER_PATH = "docs/ISSUE_LEDGER.md"
+LEDGER_DIR = "docs/ledger/"
+"""Where a repair adds its ledger entry: one file per entry, ``I-NNN.md`` (issue #122, W-43)."""
+LEDGER_ENTRY_RE = re.compile(r"^docs/ledger/I-\d{3,}\.md$")
 _ERROR_DETAIL_CHARS = 500
+
+
+def adds_ledger_entry(files: Sequence[str]) -> bool:
+    """Whether a PR's changed files hold a ledger entry, ``docs/ledger/I-NNN.md``. The old
+    ``docs/ISSUE_LEDGER.md`` holds only the ledger's front page since the fragments."""
+    return any(LEDGER_ENTRY_RE.fullmatch(f) for f in files)
 
 
 def branch_name(incident: Incident) -> str:
@@ -392,7 +400,8 @@ def verify_claim(
     - the PR exists, is open or merged, its head is ``branch_name(incident)``, and its
       body says ``Closes #<issue>``;
     - CI for the PR's head SHA is ``success``;
-    - the PR changes a file under ``tests/`` and ``docs/ISSUE_LEDGER.md``;
+    - the PR changes a file under ``tests/`` and holds a ledger entry,
+      ``docs/ledger/I-NNN.md``;
     - ``before == after``: the fingerprints of live-wt, the product and the workspace
       databases are unchanged.
 
@@ -444,6 +453,6 @@ def _pr_problems(verdict: RepairVerdict, incident: Incident, gh: GitHub) -> list
     files = gh.pr_files(number)
     if not any(f.startswith("tests/") for f in files):
         problems.append(f"PR #{number} changes no file under tests/")
-    if LEDGER_PATH not in files:
-        problems.append(f"PR #{number} does not change {LEDGER_PATH}")
+    if not adds_ledger_entry(files):
+        problems.append(f"PR #{number} adds no ledger entry ({LEDGER_DIR}I-NNN.md)")
     return problems

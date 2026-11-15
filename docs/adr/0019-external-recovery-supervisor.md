@@ -152,7 +152,7 @@ live-wt moves only when no `python -m scio` process is running from it. The supe
 - **The supervisor checks the claim and does not trust it** (guardrail 60):
   - the PR exists with that head branch and `Closes #<issue>`;
   - CI is green for that head's full SHA;
-  - the diff changes a file under `tests/` and `docs/ISSUE_LEDGER.md`;
+  - the diff changes a file under `tests/` and adds a ledger entry (since #122, a fragment `docs/ledger/I-NNN.md`; `docs/ISSUE_LEDGER.md` before);
   - live-wt's HEAD, the product's HEAD and the workspace databases' hashes are unchanged.
 
   A failed check counts as a failed attempt. When the attempts run out, the incident escalates with the checkpoint intact.

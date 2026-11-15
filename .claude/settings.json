@@ -35,6 +35,17 @@
             "statusMessage": "push gate: checking CI"
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/scripts/hooks/worktree_guard.py\"",
+            "timeout": 15,
+            "statusMessage": "worktree guard: checking the path"
+          }
+        ]
       }
     ]
   }

@@ -1,0 +1,1 @@
+On T1 the explorer runs before the planner, and the planner reads its summary. Every planned path is then checked against the tree: a guessed path is replaced by its one localized match, kept as a probable new file when its folder exists, and dropped only when neither, each choice recorded. graphcalc's P26 planned a `graphcalc/evaluator.py` that did not exist (issue #121, I-213).

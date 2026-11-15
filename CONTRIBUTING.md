@@ -8,14 +8,14 @@ These rules apply to human contributors and to SCIO's own agents.
 3. **Commits:** [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`). One commit per passing feature.
 4. **Pull request:** open it as a draft using the PR template. Link the issue with `Closes #N`. It becomes ready for review only after all checks pass (and, for agent runs, after the Opus gate passes).
 5. **Merge:** always approved by a human. Before any post-merge step (deleting a branch, branching from `main`, tagging), confirm on GitHub that the PR is merged: `gh pr view N --json mergedAt` must be non-null, in its own step, not inside an `&&` chain (I-087).
-6. **Release after every milestone:** when a milestone PR merges, the next PR is the release: `python scripts/release_notes.py --cut X.Y.Z`, the version in `pyproject.toml`, `scio/__init__.py` and `uv.lock`, the README status line; after its merge, tag `vX.Y.Z` on the merge commit and push the tag. `check_release_cadence` fails when two finished milestones wait unreleased (I-086).
+6. **Release after every milestone:** when a milestone PR merges, the next PR is the release: `python scripts/release_notes.py --cut X.Y.Z` (it writes the new section from `changes/unreleased/` and deletes the fragments), the version in `pyproject.toml`, `scio/__init__.py` and `uv.lock`, the README status line; after its merge, tag `vX.Y.Z` on the merge commit and push the tag. `check_release_cadence` fails when two finished milestones wait unreleased (I-086).
 
 ## Docs-as-code
 Docs change **in the same PR** as the code they describe:
 - `README.md` when usage changes.
 - `docs/ARCHITECTURE.md` and its Mermaid diagrams when the graph changes.
 - `docs/adr/NNNN-title.md` for any architectural decision, replan, or high-impact change.
-- `CHANGELOG.md` under `[Unreleased]`.
+- A change fragment in `changes/unreleased/`, one file per change ([changes/README.md](changes/README.md)), never `CHANGELOG.md` itself: the release cut assembles the fragments into it (#122, W-40).
 - Docstrings for every public API.
 
 CI checks docs: links, runnable examples, architecture diagram vs. the compiled graph, and public-API doc coverage. A docs failure blocks merge just like a test failure.
@@ -54,6 +54,8 @@ CI checks docs: links, runnable examples, architecture diagram vs. the compiled 
   - a heredoc body or a `python -c` script that holds a backslash, and any command with a double backslash, which the Bash tool halves before the shell runs (guardrail 17, I-176). Write such text with the Edit or Write tool, or put a pattern in a file.
   - a check piped into another command without `set -o pipefail` (guardrail 64, I-173). Start the line with `set -o pipefail`, or drop the pipe.
 
+  A second hook, `scripts/hooks/worktree_guard.py`, judges every Edit, Write and NotebookEdit. A session whose working directory is a worktree may not write the main checkout's tree, whose files carry the same names. A path that drops the worktree's segment would otherwise edit the wrong copy (I-226). The refusal names the worktree's copy of the path. Writes outside the repository, in any worktree, and to paths git ignores (`.scio/`) pass. To change the main checkout on purpose, run the session from it.
+
   On the owner's machine the user settings (`~/.claude/settings.json`) run the same hook in every session, any project: a session started outside the repository loads no project hooks (I-178, guardrail 68). That copy runs from `.scio/live-wt`, so a hook change reaches other sessions when the SCIO session moves live-wt after the merge.
 - CI runs `changes`, three `tests` shards, `evals` and `docker-live` side by side (issues #88 and #122):
   - The shards together cover every test file, `tests/live` included (`test_ci_shards_cover_every_test_directory`). Lint, mypy and the docs check run on shard 1. Each shard prints its 30 slowest tests, for rebalancing.
@@ -64,10 +66,10 @@ CI checks docs: links, runnable examples, architecture diagram vs. the compiled 
 ## Continuous improvement protocols
 These five protocols are mandatory for humans and agents. `CLAUDE.md` restates them for AI sessions.
 
-1. **Issue ledger** ([docs/ISSUE_LEDGER.md](docs/ISSUE_LEDGER.md)). Every problem found while working (failing check, wrong assumption, tooling failure, environment quirk) gets an entry *when it is found*, and the entry is completed *when it is resolved*: symptom, root cause, fix, the sweep performed, status. A PR that fixed a problem links its ledger ids. One exception: a habit lapse the push-gate hook refused, with nothing getting through, goes to `hook-refusals.log` instead, and the retrospective reports its count per rule (#122, W-18).
+1. **Issue ledger** ([docs/ledger/](docs/ledger/README.md), one file per entry, `I-NNN.md`). Every problem found while working (failing check, wrong assumption, tooling failure, environment quirk) gets an entry *when it is found*, and the entry is completed *when it is resolved*: symptom, root cause, fix, the sweep performed, status. `uv run python scripts/ledger_new.py --title "…" --where "…"` writes the next id's entry with every field `TODO`; the docs check fails on a `TODO` left in a closed entry (#122, W-38, W-41). A PR that fixed a problem links its ledger ids. One exception: a habit lapse the push-gate hook refused, with nothing getting through, goes to `hook-refusals.log` instead, and the retrospective reports its count per rule (#122, W-18).
 2. **Milestone retrospectives** ([docs/LESSONS_LEARNED.md](docs/LESSONS_LEARNED.md)). At the end of every milestone, record what succeeded, what failed, and the concrete actions taken. Read the whole document before starting the next milestone and cite the lessons that shaped the plan.
 3. **Systemic bug sweeps.** A bug is never fixed in isolation. After the root cause is known, search the entire codebase for the same construct (state the grep or pattern in the ledger entry), fix every instance, and add a guard that prevents recurrence (a test, a lint rule, a docs check, or a CONTRIBUTING rule). "Patched the symptom" is not a valid resolution.
-4. **Always/Never guardrails** ([docs/LESSONS_LEARNED.md](docs/LESSONS_LEARNED.md), `## Guardrails`). Every bug and every correction becomes one rule that starts with **Always** or **Never**, cites its id, and names the guard that fails when the rule is broken: a structural fix, a regression test that failed on the old code, a scan of the codebase, a docs check or a hook; `manual` with the reason only when nothing can check it. `scripts/check_docs.py::check_guardrails` enforces both halves: every resolved ledger entry from I-104 on is cited, and every named guard exists.
+4. **Always/Never guardrails** ([docs/guardrails/](docs/guardrails/), one file per rule, `NNN.md`; how they work: `## Guardrails` in [docs/LESSONS_LEARNED.md](docs/LESSONS_LEARNED.md)). Every bug and every correction becomes one rule that starts with **Always** or **Never**, cites its id, and names the guard that fails when the rule is broken: a structural fix, a regression test that failed on the old code, a scan of the codebase, a docs check or a hook; `manual` with the reason only when nothing can check it. `scripts/check_docs.py::check_guardrails` enforces both halves: every resolved ledger entry from I-104 on is cited, and every named guard exists.
 5. **Bottleneck audit after every pass.** After each slice, milestone or live run, record the slowest steps (minutes), sequential work that could have run in parallel, repeated friction, and one or two concrete improvements (a file change or a ledger id), in the status report and the retrospective.
 
 ## Concurrent sessions

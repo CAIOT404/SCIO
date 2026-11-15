@@ -1,0 +1,1 @@
+`scripts/hooks/worktree_guard.py`, a `PreToolUse` hook on Edit, Write and NotebookEdit: a session working in a worktree may not write the main checkout's tree, and the refusal names the worktree's copy of the path (I-226, guardrail 99).

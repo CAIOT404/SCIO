@@ -110,4 +110,4 @@ The supervisor's state lives under `%LOCALAPPDATA%/SCIO/recovery` (override with
 | `incidents.jsonl` | one line per incident transition, for search |
 | `replays/`, `ticks/` | logs of background replays and ticks |
 
-Recorded incidents are what happened, not lessons. The investigated root cause is the ledger entry the repair PR adds (`docs/ISSUE_LEDGER.md`). A validated lesson is the guardrail with a running guard (`docs/LESSONS_LEARNED.md`).
+Recorded incidents are what happened, not lessons. The investigated root cause is the ledger entry the repair PR adds (a fragment, `docs/ledger/I-NNN.md`). A validated lesson is the guardrail with a running guard (`docs/guardrails/NNN.md`).

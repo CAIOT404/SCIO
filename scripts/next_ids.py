@@ -5,11 +5,14 @@
 A handoff once said "next I-205" while I-205 was already taken on another branch. The next id
 is never remembered: it is the maximum in use anywhere, plus one. "Anywhere" is:
 
-- ``docs/ISSUE_LEDGER.md`` and ``docs/LESSONS_LEARNED.md`` at every local branch and every
-  ``origin/*`` branch, read with one ``git grep`` over all their commits;
-- the same files in every worktree's working copy, committed or not;
-- the fragments, once they exist: ``docs/ledger/I-NNN*.md`` (the id is in the file name) and
-  ``docs/guardrails/*.md`` (the number is the name's first digits, or a rule line inside).
+- the fragments (issue #122, W-38 and W-39): ``docs/ledger/I-NNN.md`` (the id is in the file
+  name) and ``docs/guardrails/NNN.md`` (the number is the name's first digits, or else a rule
+  line inside), at every local and ``origin/*`` branch and in every worktree's working copy,
+  committed or not;
+- ``docs/ISSUE_LEDGER.md`` and ``docs/LESSONS_LEARNED.md`` in the same places, which held
+  every entry and rule before the fragments, and still do on a branch that predates them.
+
+The branches are read with ``git grep`` over their commits, never checked out.
 
 A ledger id counts only from an entry heading (``### I-NNN ``), never from a mention in a
 body. A guardrail counts only from a numbered ``**Always**``/``**Never**`` rule inside
@@ -103,9 +106,9 @@ def ledger_fragment_id(name: str) -> int:
 
 
 def guardrail_fragment_number(name: str, text: str = "") -> int:
-    """A guardrail fragment's number: the first digits of its name (``089-slug.md``,
-    ``G-089.md``), or else the rule line inside it. The fragments' naming is not settled yet
-    (W-39), so both are read."""
+    """A guardrail fragment's number: the first digits of its name (``089.md``, the form
+    ``scripts/check_docs.py`` requires since W-39; ``089-slug.md`` and ``G-089.md`` too), or
+    else the rule line inside it."""
     if name.lower() == "readme.md":
         return 0
     m = DIGITS_RE.search(Path(name).stem)
