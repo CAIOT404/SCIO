@@ -101,6 +101,7 @@ Every bug and every correction becomes one rule here (the owner's rule, 2026-10-
 93. **Always** run every test that names a changed Markdown file when gating a docs change: tests pin rule lines in CLAUDE.md and CONTRIBUTING by their words, and a gate that picks docs tests by file name alone lets a rewording through (I-218). Guard: `test:test_a_docs_only_change_runs_every_test_that_names_the_changed_file`
 95. **Always** record the build thread a supervised run actually ran, from SCIO's own outcome file, then its output, then the ledger it wrote, and never infer it from `progress.json`, which names the last finished milestone's thread (#123, I-220). Guard: `test:test_the_run_records_the_thread_scio_ran_not_progress_jsons`, `test:test_a_hung_run_takes_the_thread_from_the_ledger_it_wrote`
 96. **Never** treat a used-up usage window as a SCIO fault: it is transient, and the supervisor waits until the reset time the message names before it replays. Two repairs into the same limit fix nothing (#126, #130, I-221). Guard: `test:test_a_used_up_usage_window_is_transient_not_a_repair`, `test:test_the_backoff_waits_until_the_window_resets`
+97. **Never** run browser tests on the same runner as a CPU-bound parallel suite: give `tests/live` a shard of its own on few workers, or Chromium's fixed waits time out under the other workers' load (I-224). Guard: `test:test_the_browser_tests_run_in_their_own_shard_on_few_workers`
 
 ## Standing pre-flight list (apply at the start of every milestone)
 

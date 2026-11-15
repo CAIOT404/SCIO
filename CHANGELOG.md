@@ -5,6 +5,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 ### Changed
+- CI runs `tests/live` (the dashboard's browser tests and the docker tests) in a fourth shard of its own, on 2 workers. Beside the unit tests' workers, the browser tests' waits timed out in 2 of 3 runs (I-224).
 - Recovery supervisor fixes (issues #123, #126 and #130):
   - It records the build thread SCIO actually ran: from the outcome file, then SCIO's output, then the ledger the run wrote, then `progress.json`. `build_thread_source` says which. Before, it took `progress.json`'s thread, the last finished milestone's.
   - A used-up Claude usage window ("You've hit your 5-hour limit · resets …") is transient, never a repair, and the supervisor waits until the named reset time before it replays.
