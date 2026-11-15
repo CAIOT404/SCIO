@@ -25,7 +25,9 @@ mode, the time and each step's verdict. The push-gate hook refuses to push a tre
 holds (W-17), and a tree that already passed is not gated again (W-12). ``.scio/gate/RUNNING``
 exists while a gate runs, so a gate killed hard leaves it behind. One gate runs at a time on the
 machine (W-16): a second one waits for ``gate.lock`` under ``%LOCALAPPDATA%/SCIO``
-(``~/.cache/scio`` elsewhere) and says whose gate it waits for.
+(``~/.cache/scio`` elsewhere) and says whose gate it waits for. Every gate that runs its steps
+to a verdict, pass or fail, appends its mode, time and verdict to ``gate-runs.log`` in the same
+directory, which ``scripts/metrics.py`` reads (issue #141).
 
 Every Python tool runs as ``python -m`` with this interpreter: Application Control blocks the
 venv's launcher ``.exe`` files on the dev machine (I-075, I-146). Each step's output goes to a
@@ -598,6 +600,36 @@ def release_lock(path: Path) -> None:
             path.unlink()
 
 
+# --- The gate-time history (issue #141) ------------------------------------------------------
+
+GATE_LOG = "gate-runs.log"
+
+
+def gate_log_path() -> Path:
+    """Every finished gate on this machine, one JSON line each, beside the lock."""
+    return machine_dir() / GATE_LOG
+
+
+def log_gate_run(mode: str, seconds: float, passed: bool, tree: str | None) -> None:
+    """Append ``{at, mode, minutes, passed, tree, worktree}`` for a gate that ran its steps to
+    a verdict, pass or fail; ``scripts/metrics.py`` reads the gate time from it (issue #141).
+    A gate skipped because its tree already passed, or stopped before its steps, is no run.
+    Logging never fails the gate."""
+    entry = {
+        "at": _now(),
+        "mode": mode,
+        "minutes": round(seconds / 60, 2),
+        "passed": passed,
+        "tree": tree,
+        "worktree": str(ROOT),
+    }
+    with contextlib.suppress(OSError):
+        path = gate_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(entry) + "\n")
+
+
 # --- The gate ---------------------------------------------------------------------------------
 
 
@@ -665,6 +697,7 @@ def _gate(full: bool, tree: str | None) -> int:
     marker = _mark_running(logs)
     try:
         code, counts = _execute(plan, logs, start)
+        log_gate_run(plan.mode, time.monotonic() - start, code == 0, tree)
         if code == 0:
             _stamp(tree, plan.mode, counts)
         return code
