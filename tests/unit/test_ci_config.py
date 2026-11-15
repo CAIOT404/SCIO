@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -93,7 +94,7 @@ def test_ci_shards_cover_every_test_directory() -> None:
     assert "strategy" in tests, "the tests job is a single job, not a matrix of shards"
     include = tests["strategy"]["matrix"]["include"]
     shards = {int(entry["shard"]): str(entry["paths"]).split() for entry in include}
-    assert sorted(shards) == list(range(1, len(shards) + 1)) and 2 <= len(shards) <= 3, shards
+    assert sorted(shards) == list(range(1, len(shards) + 1)) and 2 <= len(shards) <= 4, shards
 
     every = _test_files()
     placed: dict[str, int] = {}
@@ -112,6 +113,32 @@ def test_ci_shards_cover_every_test_directory() -> None:
     assert "if" not in step
     assert step["env"]["SHARD_PATHS"] == "${{ matrix.paths }}"
     assert "uv run pytest $SHARD_PATHS " in step["run"]
+
+
+def test_the_browser_tests_run_in_their_own_shard_on_few_workers() -> None:
+    """I-224: with tests/live in the unit shard, Chromium shared one runner with the unit tests'
+    dozens of xdist workers, and its 5 to 10 s waits timed out in 2 of 3 runs (#132, #133).
+    tests/live now has a shard of its own, nothing else in it, on a small worker count that
+    the pytest step honours."""
+    tests = _workflow()["jobs"]["tests"]
+    include = tests["strategy"]["matrix"]["include"]
+    live = [e for e in include if "tests/live" in str(e["paths"]).split()]
+    assert len(live) == 1, "tests/live is in exactly one shard"
+    assert str(live[0]["paths"]).split() == ["tests/live"], "and nothing shares it"
+    assert 1 <= int(live[0]["workers"]) <= 2, live[0]
+    step = next(s for s in tests["steps"] if "pytest" in str(s.get("run", "")))
+    assert "${{ matrix.workers }}" in step["run"] and '-n "$WORKERS"' in step["run"]
+    # Every test that drives a browser lives under tests/live, so no shard but this one runs
+    # Chromium: tests/unit/test_dashboard_recovery.py's two page tests moved there (I-224).
+    root = Path(__file__).resolve().parents[2] / "tests"
+    drives_a_browser = re.compile(r"^\s*from playwright\b", re.MULTILINE)
+    outside = sorted(
+        p.relative_to(root.parent).as_posix()
+        for p in root.rglob("test_*.py")
+        if "live" not in p.relative_to(root).parts[:1]
+        and drives_a_browser.search(p.read_text(encoding="utf-8", errors="replace"))
+    )
+    assert not outside, f"browser tests outside tests/live: {outside}"
 
 
 def _checks_verdict(

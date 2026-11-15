@@ -2116,3 +2116,61 @@ Template:
   - `intake` would replace the description with an issue body only when a feature run has a GitHub client, and `feature_context` sets none.
 - Guard: `test_a_bug_fix_features_task_and_debugger_brief_carry_its_linked_issue`, and the 17 tests in `tests/unit/test_bug_issue_brief.py`. Guardrail 94.
 - Resolved: 2026-11-14 · Status: resolved
+
+### I-220 · The recovery supervisor recorded progress.json's build thread, not the thread SCIO ran
+- Found: 2026-11-14 · graphcalc S14, issue #123 (filed by the graphcalc session) · `recovery/runner.py` (`build_thread`)
+- Symptom: both supervised graphcalc runs that day recorded `build-graphcalc-m2`: `run-20261114184650-920b73` and `run-20261114194904-20a08c`. SCIO ran `build-graphcalc-m3`, as its ledgers, its stop line and its outcome file all say. No incident opened then. If one had, its evidence (`recovery/evidence.py`), the post-repair health check (`report --thread`, `recovery/runtime.py`) and the repair brief would all have targeted the old, halted m2.
+- Root cause: `build_thread()` read `progress.json`'s `build_thread`, the thread that recorded the last *finished* milestone. SCIO's CLI chooses the thread by a different rule (I-163), so the two disagree whenever a build moves to a new thread.
+- Fix: at run end the thread comes from the first source that gives one:
+  1. the outcome file's `thread`;
+  2. SCIO's last thread line in stdout;
+  3. the newest `.scio/ledger/*.jsonl` written since the run started, with `-pN-aN` stripped. This covers a hang-killed run, which prints nothing.
+  4. `progress.json`.
+
+  `build_thread_source` records which one, with `progress` as the default, so old records load. Every end path resolves once: a launcher failure, Ctrl+C, a normal or hang exit, an orphan. The dashboard shows the provisional value while a run is live.
+- Sweep: every consumer of `build_thread` (evidence, brief, health check, dashboard) reads it after the run's final save; only the dashboard's live view reads the provisional value. Both of today's runs resolve to `build-graphcalc-m3`.
+- Guard: `test_the_run_records_the_thread_scio_ran_not_progress_jsons`, `test_a_hung_run_takes_the_thread_from_the_ledger_it_wrote`, and 6 more in `tests/recovery/test_run_thread.py`. All failed on the old code. Guardrail 95.
+- Resolved: 2026-11-15 · Status: resolved
+
+### I-221 · The supervisor read a used-up Claude usage window as a SCIO fault and spent both repairs on it
+- Found: 2026-11-14 · incident `inc-20261114214620-80858c`, issue #126 (opened by the supervisor), graphcalc S15 (#130) · `recovery/classify.py`, `recovery/machine.py`
+- Symptom: at 21:46Z graphcalc's M4 P27 attempt 1 ended with `FatalError: claude -p failed: You've hit your 5-hour limit · resets 2:20pm (America/Los_Angeles)`. The supervisor classified it `harness_suspect` and opened #126. It started two repair sessions, which hit the same limit at once (1 turn each, $0.00), and escalated. Nothing was changed. The limit had stopped this session at the same moment.
+- Root cause: `TRANSIENT_MARKERS` held "usage limit" and "rate limit", not this wording. Even with the class right, the 5/15/30-minute backoff (50 minutes in all) cannot outlast a 5-hour window.
+- Fix:
+  - New markers, the typographic apostrophe included: "you've hit your", "-hour limit", "weekly limit", "limit · resets". A transient marker wins over the harness pattern on a feature line and on a harness stop line.
+  - `classify.usage_reset` reads the reset time in its spellings, and the transient backoff waits until then plus 5 minutes, capped at 8 h.
+  - The tick's Python has no zone database (no tzdata), so the named time is read as this machine's local time, and the timeline says so. An unreadable time keeps the schedule.
+- Sweep: `grep -rn "hit your\|hour limit\|weekly limit" scio recovery`. `scio/` has no such wording: SCIO's provider treats the limit as a `FatalError` (I-223, open).
+- Guard: `test_a_used_up_usage_window_is_transient_not_a_repair` (with #126's exact text), `test_the_backoff_waits_until_the_window_resets` and `test_an_unreadable_reset_time_falls_back_to_the_backoff_schedule`, among 19 that all failed on the old code. Guardrail 96.
+- Resolved: 2026-11-15 · Status: resolved
+
+### I-222 · The Edit tool wrote a `\uXXXX` escape as the character itself, and ruff flagged it
+- Found: 2026-11-15 · the #126 fix, by its agent · the session's tooling, not SCIO's code
+- Symptom: a test literal meant to hold the escape for the typographic apostrophe was written as the literal character, and `ruff check` failed with RUF001 (an ambiguous Unicode character).
+- Root cause: the Edit tool's text is taken literally after the model's own decoding, so an escape sequence typed into it arrives as the character.
+- Fix: both the marker in `recovery/classify.py` and the test spell the character as `chr(0x2019)`, which needs no escape and no literal character. ruff caught the first version before any commit.
+- Sweep: `ruff check` runs on every commit (the hook) and in every gate, and RUF001 is on. No source file holds the literal character.
+- Guard: ruff's RUF001 in the commit hook and the gate (guardrail 17 covers writing text with backslashes through the file tools). Guardrail 17 now cites this id.
+- Resolved: 2026-11-15 · Status: resolved
+
+### I-223 · SCIO's Claude Code provider raises a used-up usage window as a plain FatalError
+- Found: 2026-11-15 · the #126 sweep · `scio/harness/providers/claude_code.py` (`RETRYABLE_ERRORS`, `FATAL_ERRORS`)
+- Symptom: "You've hit your 5-hour limit · resets …" matches neither list, so the feature halts as a harness failure. The supervisor now classifies it correctly (I-221), but SCIO's own halt reason does not say "usage limit", and an unsupervised build tells the owner nothing about the reset time.
+- Root cause: the provider's error lists predate this wording.
+- Fix: not yet. A typed `UsageLimitReached` (or this wording among the retryable errors with a long wait) that names the reset time in the halt reason.
+- Sweep: not yet.
+- Guard: not yet.
+- Resolved: - · Status: open
+
+### I-224 · Since CI was sharded, the dashboard's browser tests timed out beside the unit tests' workers
+- Found: 2026-11-15 · PRs #132 and #133's CI, shard 3 · `.github/workflows/ci.yml` (the shard matrix, #122 W-35)
+- Symptom: 2 of 3 runs after the sharding failed one Playwright test in shard 3, each passing on a rerun:
+  - #132's run 43659791456: `tests/live/test_dashboard_page.py::test_a_dropped_socket_reconnects_and_catches_up` (`Locator expected to have text 'gate'`, a 5 s wait);
+  - #133's run 43661201527: `tests/live/test_dashboard_server.py::test_the_real_app_serves_the_page_live_and_stops_cleanly` (`Locator.wait_for: Timeout 10000ms exceeded`).
+
+  Neither PR touched the dashboard.
+- Root cause: W-35 put `tests/unit tests/live` in one shard, run with twice the runner's cores as xdist workers. Chromium's page loads then competed with dozens of unit-test workers on 4 cores, and the browser tests' fixed 5 to 10 s waits ran out. The single tests job before it had mostly product builds waiting on subprocesses; this shard is CPU-bound unit tests. It is the same failure class as I-170, made frequent by the new layout.
+- Fix: a fourth shard runs `tests/live` alone on 2 workers (the matrix's new `workers` key, which the pytest step honours), and shard 3 runs `tests/unit` alone.
+- Sweep: `grep -rln "playwright\|chromium" tests` also found `tests/unit/test_dashboard_recovery.py`, with two page tests (#102's recovery view) that launch Chromium. They moved, with their `_Server` helper, to `tests/live/test_dashboard_recovery_page.py`; the fixtures stay in the unit module, imported from it. No browser test is left outside `tests/live`. The docker-live job runs `tests/live/test_docker_live.py` separately, unchanged. I-170 stays open for the waits themselves (#104).
+- Guard: `test_the_browser_tests_run_in_their_own_shard_on_few_workers`. It failed on the old `ci.yml` (`['tests/unit', 'tests/live'] == ['tests/live']`), and it now also fails when any test outside `tests/live` drives `sync_playwright`. Guardrail 97.
+- Resolved: 2026-11-15 · Status: resolved

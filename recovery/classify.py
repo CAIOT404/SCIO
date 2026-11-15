@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Sequence
+import zoneinfo
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timedelta, tzinfo
 
 from recovery.model import Classification, Evidence, FailureClass, Frame
 
@@ -33,6 +36,13 @@ TRANSIENT_MARKERS: tuple[str, ...] = (
     "rate_limit",
     "rate limit",
     "usage limit",
+    # a used-up usage window (#126): "You've hit your 5-hour limit · resets 2:20pm (...)".
+    # SCIO's stdout fallback may turn the middle dot into U+FFFD, so it is never needed.
+    "you've hit your",
+    "you" + chr(0x2019) + "ve hit your",  # a typographic apostrophe
+    "-hour limit",
+    "weekly limit",
+    "limit · resets",
     "overloaded",
     "server_error",
     "api_retry",
@@ -436,3 +446,95 @@ def _task_fault(ev: Evidence, frame: str) -> Classification:
 
 def _last_line(text: str) -> str:
     return next((ln for ln in reversed(text.splitlines()) if ln.strip()), "")
+
+
+# The reset time of a used-up usage window (#126)
+
+USAGE_RESET = re.compile(
+    r"\bresets\s+(?:at\s+)?(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?(?!\d)"
+    r"\s*(?P<ampm>[ap]\.?m\b\.?)?"
+    r"(?:\s*\((?P<zone>[A-Za-z][\w+-]*(?:/[\w+-]+)*)\))?",
+    re.IGNORECASE,
+)
+"""``resets 2:20pm (America/Los_Angeles)``: a 12-hour time (minutes optional) or a 24-hour
+``HH:MM``, then an optional IANA zone in parentheses. Anchored on ``resets``, not on the
+middle dot before it, which the stdout fallback may have mangled."""
+
+RESET_MARGIN_S = 300.0
+"""The backoff ends this long after the window resets."""
+
+MAX_RESET_WAIT_S = 8 * 3600.0
+"""The longest wait for a reset, counted from the failure."""
+
+
+@dataclass(frozen=True)
+class UsageReset:
+    """When a used-up usage window resets, read from the failure text."""
+
+    at: float
+    """The reset, in seconds since the epoch."""
+    until: float
+    """The end of the backoff: ``at`` plus :data:`RESET_MARGIN_S`, at most
+    :data:`MAX_RESET_WAIT_S` after the failure."""
+    assumed: str = ""
+    """Why the time was read as this machine's local time, when it was; else ""."""
+
+
+def _has_zone_database(zone: Callable[[str], tzinfo]) -> bool:
+    try:
+        zone("UTC")
+    except (KeyError, ValueError, OSError):
+        return False
+    return True
+
+
+def usage_reset(
+    text: str,
+    failed_at: float,
+    *,
+    zone: Callable[[str], tzinfo] = zoneinfo.ZoneInfo,
+    local: tzinfo | None = None,
+) -> UsageReset | None:
+    """The first reset time ``text`` names, as the next such moment after ``failed_at``.
+
+    None when there is none, or when it cannot be read: an hour or minute out of range, a
+    bare number, or a zone the time zone database does not know. A caller then keeps its
+    backoff schedule.
+
+    The zone is loaded with ``zone`` (:class:`zoneinfo.ZoneInfo`). A Windows Python
+    without ``tzdata`` has no database at all, and every key fails; the supervisor's
+    scheduled tick runs one. ``claude -p`` runs on this machine, as SCIO's child, and names
+    the machine's own zone, so the time is then read as local time: ``local``, or the
+    operating system's own rules when it is None, applied at the reset moment so a
+    daylight-saving change in between is honoured. A message that names no zone is read
+    the same way. ``assumed`` says which of the two happened."""
+    m = USAGE_RESET.search(text)
+    if m is None:
+        return None
+    hour, minute = int(m["hour"]), int(m["minute"] or 0)
+    ampm = (m["ampm"] or "").replace(".", "").lower()
+    if ampm:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if ampm == "pm" else 0)
+    elif m["minute"] is None or hour > 23:
+        return None  # a bare number is no time
+    if minute > 59:
+        return None
+    tz: tzinfo | None = local
+    assumed = "read as this machine's local time: the message names no zone"
+    if m["zone"]:
+        try:
+            tz, assumed = zone(m["zone"]), ""
+        except (KeyError, ValueError, OSError):  # ZoneInfoNotFoundError is a KeyError
+            if _has_zone_database(zone):
+                return None
+            assumed = f"{m['zone']} read as this machine's local time: no time zone database"
+    # tz None: a naive datetime, which the operating system converts as local time
+    start = datetime.fromtimestamp(failed_at, tz)
+    at = start.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if at <= start:
+        at += timedelta(days=1)
+    reset = at.timestamp()
+    until = min(reset + RESET_MARGIN_S, failed_at + MAX_RESET_WAIT_S)
+    return UsageReset(reset, until, assumed)

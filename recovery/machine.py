@@ -512,7 +512,14 @@ def _replay_finished(
         # Even with the same signature: a transient failure is waited out, and
         # WAITING_BACKOFF escalates once max_replays replays have run (orchestrator).
         incident.run_ids.append(rid)
-        return _wait_backoff(incident, deps, f"replay {rid} hit a transient failure", post=False)
+        return _wait_backoff(
+            incident,
+            deps,
+            f"replay {rid} hit a transient failure",
+            post=False,
+            failed=run,
+            summary=found.summary,
+        )
     if found.signature == incident.signature:
         incident.run_ids.append(rid)
         incident.occurrences += 1
@@ -738,7 +745,13 @@ def _on_classified(incident: Incident, deps: Deps) -> Incident:
         if incident.escalation:
             return _escalate(incident, incident.escalation, deps)
         if cls is FailureClass.EXTERNAL_TRANSIENT:
-            return _wait_backoff(incident, deps, "a transient failure")
+            return _wait_backoff(
+                incident,
+                deps,
+                "a transient failure",
+                failed=deps.store.get_run(incident.run_ids[-1]) if incident.run_ids else None,
+                summary=incident.summary,
+            )
         return _replay(incident, deps, count=True, note="an orphan is replayed with no repair")
     number = _ensure_issue(incident, deps)
     incident.issue_number = number
@@ -1118,17 +1131,44 @@ def _replay(incident: Incident, deps: Deps, *, count: bool, note: str) -> Incide
     )
 
 
-def _wait_backoff(incident: Incident, deps: Deps, why: str, *, post: bool = True) -> Incident:
+def _wait_backoff(
+    incident: Incident,
+    deps: Deps,
+    why: str,
+    *,
+    post: bool = True,
+    failed: RunRecord | None = None,
+    summary: str = "",
+) -> Incident:
+    """WAITING_BACKOFF, replayed after ``limits.backoff_s[replays]``.
+
+    ``failed`` is the run whose transient failure is waited out, and ``summary`` its
+    classification's summary. When their failure text names the time a used-up usage
+    window resets (``... 5-hour limit · resets 2:20pm (America/Los_Angeles)``, #126), the
+    backoff lasts until then plus a margin instead (:func:`classify.usage_reset`): a replay
+    on the schedule would only hit the same limit."""
+    now = deps.clock()
     steps = deps.config_for(incident.workspace).limits.backoff_s
     delay = steps[min(incident.replays, len(steps) - 1)] if steps else 0.0
-    incident.backoff_until = deps.clock() + delay
-    return _transition(
-        incident,
-        IncidentState.WAITING_BACKOFF,
-        deps,
-        f"{why}; replayed after {delay:.0f} s",
-        post=post,
-    )
+    incident.backoff_until = now + delay
+    note = f"{why}; replayed after {delay:.0f} s"
+    reset = _usage_reset(failed, summary, deps) if failed is not None else None
+    if reset is not None:
+        incident.backoff_until = reset.until
+        at = datetime.fromtimestamp(reset.at, UTC).strftime("%Y-%m-%d %H:%MZ")
+        assumed = f" ({reset.assumed})" if reset.assumed else ""
+        note = (
+            f"{why}; waiting for the usage window to reset at {at}{assumed}; replayed after "
+            f"{max(0.0, reset.until - now):.0f} s"
+        )
+    return _transition(incident, IncidentState.WAITING_BACKOFF, deps, note, post=post)
+
+
+def _usage_reset(run: RunRecord, summary: str, deps: Deps) -> classify.UsageReset | None:
+    """The reset time the failed run names, read from the whole failure text: the
+    classification's summary is cut at 160 characters."""
+    text = "\n".join((summary, classify.failure_text(evidence.read_evidence(run))))
+    return classify.usage_reset(text, run.ended_at if run.ended_at else deps.clock())
 
 
 def _on_waiting_backoff(incident: Incident, deps: Deps) -> Incident:
