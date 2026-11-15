@@ -48,6 +48,7 @@ from scio.loop.exits import LoopLimits
 from scio.product.acceptance import run_acceptance
 from scio.product.bug_context import feature_bug_brief
 from scio.product.parallel import (
+    drop_misplaced_worktrees,
     ensure_worktree,
     in_worktree,
     merge_feature,
@@ -1494,6 +1495,7 @@ def _run_batch(
     happened (I-164), so the node re-run that the answer starts repeats neither. Worktrees are
     removed only once the node returns."""
     prepare_shared_git(ctx)
+    misplaced = drop_misplaced_worktrees(ctx)  # `git clean -fd` keeps a nested worktree
 
     def clean_tree() -> None:  # the product tree: the milestone branch, nothing left over
         _git(ctx, "checkout", "-q", plan.branch)
@@ -1501,7 +1503,7 @@ def _run_batch(
         _git(ctx, "clean", "-fdq")
 
     carrying_product_md(ctx, clean_tree)  # a hand edit survives and is committed (I-109)
-    entries: list[Any] = []
+    entries: list[Any] = [fact(line) for line in misplaced]
     edit = commit_product_md_edit(ctx, plan, f"batch-{'-'.join(f.id for f in batch)}")
     if edit:
         entries.append(fact(f"hand edit of PRODUCT.md committed at {edit[:12]}"))

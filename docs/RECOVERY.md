@@ -24,7 +24,7 @@ The supervisor never merges. It never answers a human stop (merge, gate, release
    ```toml
    launcher = ["sh", "scio.sh"]          # the workspace's existing launcher, unchanged
    scio_repo = "C:/Users/<you>/OneDrive/Desktop/projects/SCIO"
-   scio_gh_repo = "NewMe505/SCIO"
+   scio_gh_repo = "CAIOT404/SCIO"
    # live_wt = "<scio_repo>/.scio/live-wt"   (default)
    # claude_bin = "claude"                   (default)
 
