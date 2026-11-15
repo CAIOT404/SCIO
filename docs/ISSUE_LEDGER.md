@@ -1523,6 +1523,7 @@ Template:
 - Root cause: not found. The test's page helpers wait up to 10 s for a thread head or a section to render (`tests/live/test_dashboard_page.py:319-326`); on a loaded runner the page may take longer. Not verified: the failing attempt's page state was not captured.
 - Fix: none yet. The next step is to capture the page (a screenshot and the WebSocket state) when such a wait times out, so a recurrence names its cause, as I-145 asks for its two tests.
 - Sweep: the other fixed 10 s browser waits (`grep -n "timeout=10_000" tests/live`): the three helpers in this file; the reconnect test's 5 s waits (`:694`, `:697`)
+- Recurrence, 2026-11-15: PR #132's CI run 43659791456, attempt 1, failed `tests/live/test_dashboard_page.py::test_a_dropped_socket_reconnects_and_catches_up` with `Locator expected to have text 'gate'`. That is the reconnect test's short wait named in the sweep above. Since #122's W-35 the unit and live tests share shard 3's runner. The rerun of the failed job passed. The fix (capture the page when a wait times out, or lengthen the waits) belongs to #104.
 - Resolved: - · Status: open
 
 ### I-171 · Every Claude Code session SCIO started loaded the CLAUDE.md of the product's parent directories
@@ -2045,6 +2046,24 @@ Template:
 - Guard: the 27 tests in `tests/unit/test_grounded_plan.py`. 24 of them failed on the old code. Guardrail 89.
 - Resolved: 2026-11-14 · Status: resolved
 
+### I-214 · The push-gate tests wrote their denials into the machine's real refusal log
+- Found: 2026-11-14 · building gate v2 (#122 W-18), by its agent · `tests/unit/test_push_gate.py`, `tests/unit/test_gate.py`
+- Symptom: after W-18 made the hook log every refusal to `hook-refusals.log` (in `%LOCALAPPDATA%/SCIO`), running the existing hook tests left 4 denials in the real log on the owner's machine: refusals no session ever made. The retrospectives count that log per rule (W-18), so test runs would inflate the real counts.
+- Root cause: the tests run the hook's real entry point, and the new log path resolves from the environment (`LOCALAPPDATA`) unless something redirects it. No fixture did.
+- Fix: autouse `machine_dir` fixtures in both test modules point the hook's machine directory (the refusal log and the gate lock) at `tmp_path`. The 4 stray lines were removed from the real log.
+- Sweep: every test that runs `push_gate.main` or `gate.main` is in these two modules, and both have the fixture. `grep -rn "push_gate\|LOCALAPPDATA" tests` finds no other writer.
+- Guard: the `machine_dir` fixtures, autouse in both modules. Guardrail 90.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-215 · The orchestrator's CI brief assumed the tests job excluded tests/live; it never did
+- Found: 2026-11-14 · the CI agent's report (#122 W-35) · the brief, not the code
+- Symptom: the brief asked for shards covering every test file "excluding `tests/live` as today". CI's tests job has always run `tests/live`: `testpaths=["tests"]` has no ignore, and Chromium is installed for it. That covers the dashboard's browser tests and the docker tests on the plain image. Shards that followed the brief would have silently dropped those tests from CI.
+- Root cause: a fact about CI written into the brief from memory, not read from `ci.yml` and `pyproject.toml`. That is the case W-09 covers (check the source, never memory), applied to the repository's own config.
+- Fix: the agent read the config and kept `tests/live` in shard 3. `test_ci_shards_cover_every_test_directory` checks the full set. On #127's real run, the shards' totals (1182 passed, 7 skipped) equalled the local gate's (1171 passed, 18 skipped): 1189 each, so every test ran exactly once.
+- Sweep: the other Workflow v2 briefs were checked for claims about CI or config. The gate v2 brief's claim that the gate's evals are CI's is guarded by `test_the_gates_regression_evals_are_cis`. No other brief states a CI fact.
+- Guard: `test_ci_shards_cover_every_test_directory`. Guardrail 91.
+- Resolved: 2026-11-14 · Status: resolved
+
 ### I-216 · A feature retry started over from the milestone head and redid the work its previous attempt had verified and committed
 - Found: 2026-11-14 · graphcalc P26 attempt 4, issue #119 (graphcalc's P26 retrospective, also #124) · `scio/product/build.py` (the fresh-attempt path), `scio/graph/nodes/prepare.py`
 - Symptom: attempt 3 reached `verify: all checks passed (iteration 3, stall 0)` and `committed F1+F3 as 8b8e8b4f6d59`, then halted (on the budget, since fixed in #115). The retry logged `repository ready on branch agent/18-p26-… at 2cacd08af4e0`, the milestone head, and spent 19:49 to 20:21 UTC rebuilding the same F1 and F3 (`committed F1+F3 as 05be7dff55ad`): about 32 minutes.
@@ -2067,6 +2086,19 @@ Template:
 - Sweep: not yet.
 - Guard: not yet.
 - Resolved: - · Status: open
+
+### I-218 · Rewriting CLAUDE.md's gate line broke a test that finds it by its words, and the new docs-only gate mode would have skipped that test
+- Found: 2026-11-15 · gate v2's own `gate.py --full` (#122 W-14) · `tests/unit/test_cli_and_nodes.py`, `scripts/gate.py` (`docs_tests`)
+- Symptom: `test_the_local_ci_line_runs_python_tools_as_modules` failed with `StopIteration`. It finds CLAUDE.md's gate line by its opening words, "- Run the CI-equivalent locally", and W-14 had reworded the line to "- Run the gate before every push". The agent's narrowed checks (only its own test files, to spare a loaded machine) did not run this test. The full gate did.
+- Root cause:
+  - A test reads a rule line by its first words, so any rewording breaks it. That part is intended: the test pins the rule.
+  - The new docs-only mode (W-13) chose "the tests that read docs" by file name (`docs`, `guardrail`) only. A CLAUDE.md-only change would have run in docs mode and skipped this test.
+- Fix:
+  - The test finds the line by its new words, keeps its assertions, and also checks that CLAUDE.md names `gate.py --full`.
+  - `docs_tests(changed)` adds every test file that names a changed Markdown file. Both the docs mode and the quick mode's Markdown branch pass the changed paths.
+- Sweep: `grep -rln "CLAUDE.md\|CONTRIBUTING.md\|README.md" tests` lists the tests that read those files. With the fix, docs mode runs every one of them for a change to the file they name.
+- Guard: `test_a_docs_only_change_runs_every_test_that_names_the_changed_file`. Guardrail 93.
+- Resolved: 2026-11-15 · Status: resolved
 
 ### I-219 · A bug-fix feature's brief carried its title and criteria, never the bug issue that held the root cause
 - Found: 2026-11-14 · graphcalc P26 ("Bug #14 fix: …"), issue #120 (graphcalc's P26 retrospective) · `scio/product/build.py` (`feature_task`), `scio/context/projections.py` (`debug_message`)

@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Changed
+- The gate is quick by default (issue #122, W-11 to W-19):
+  - It runs lint, types, the tests of the paths changed since the last pass, the evals only when code changed, and the docs check. A Markdown-only change runs only the docs steps. `--full` runs what CI runs.
+  - A pass stamps its tree in `.scio/gate/last-pass.json`, and a tree that already passed is not gated again. A leftover `RUNNING` marker shows a gate that died. One gate runs at a time on the machine.
+  - The push gate refuses a head whose tree no pass stamped. Tags, deletions, gated merges, docs stamps, `SCIO_ACK_GATE`, the recovery repair worktree and other repositories pass, and an error in the check allows the push.
+  - Every refusal is logged outside the repository, to `hook-refusals.log`. A refused inline script is told which scratch file to write instead.
+
 ### Fixed
 - A bug-fix feature's brief carries its linked bug issue (`Bug #N`, `#N`, or the product repo's issue URL, read with `--gh`), framed as the operator's unverified report. The debugger's brief now includes the task too. graphcalc's P26 coder spent its whole turn cap re-deriving a root cause that issue #14 already held (issue #120, I-219).
 - A feature retry starts from the newest commit the retried attempts verified, instead of the milestone head, and carries those features as passing. Uncommitted leftovers are still discarded. graphcalc's P26 attempt 4 spent about 32 minutes rebuilding two features attempt 3 had committed (issue #119, I-216).
