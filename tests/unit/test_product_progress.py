@@ -297,6 +297,38 @@ def test_feature_task_is_the_typed_handoff_to_the_task_graph() -> None:
     assert "- [ ] c2a" in body and "<!-- scio:feature:P2 -->" in body and "M1" in body
 
 
+def test_a_bug_fix_features_task_and_debugger_brief_carry_its_linked_issue() -> None:
+    """Issue #120: graphcalc P26 ("Bug #14 fix: …") got only its title and criteria, and its
+    coder spent 17 minutes re-deriving the root cause issue #14 recorded. The linked issue now
+    rides in the task's description, which the planner and the coder read, and the debugger's
+    brief now includes the task too (before, it saw only the step and the failure)."""
+    from scio.context.projections import debug_message
+
+    spec = _spec(3)
+    plan = MilestonePlan(
+        number=1,
+        title="Skeleton and core",
+        branch="milestone/1",
+        features=[MilestoneFeatureOutput(id="P2", tier=Tier.T1)],
+    )
+    linked = "[context from operator, issue #14]\nroot cause: eager sympify in calc.evaluate"
+    task = feature_task(spec, plan, plan.features[0], 42, linked_issues=linked)
+    assert "## Linked bug issue (the operator's report, not verified)" in task.description
+    assert "eager sympify in calc.evaluate" in task.description
+    plain = feature_task(spec, plan, plan.features[0], 42)
+    assert "Linked bug issue" not in plain.description
+    brief = debug_message(
+        None,
+        repo_root="/repo",
+        failing_output="1 failed",
+        signature=None,
+        attempts=1,
+        guidance=None,
+        task=task,
+    )
+    assert "eager sympify in calc.evaluate" in brief and "1 failed" in brief
+
+
 def test_walking_skeleton_criteria_never_need_an_installed_entry_point() -> None:
     """M9: two live planners asked for `todo --version` through a console script that no
     sandbox installs; the normaliser rewrites such P1 criteria to the module form."""

@@ -45,6 +45,7 @@ from scio.harness.failures import BudgetExceeded, HarnessError
 from scio.harness.types import Message
 from scio.loop.exits import LoopLimits
 from scio.product.acceptance import run_acceptance
+from scio.product.bug_context import feature_bug_brief
 from scio.product.parallel import (
     ensure_worktree,
     in_worktree,
@@ -405,8 +406,14 @@ def feature_task(
     issue: int | None,
     *,
     repo_dir: str = ".",
+    linked_issues: str | None = None,
 ) -> TaskSpec:
-    """The typed handoff from the product graph to a task subgraph."""
+    """The typed handoff from the product graph to a task subgraph.
+
+    ``linked_issues`` is the bug issue a bug-fix feature links (its symptom, root cause and
+    audit), framed as the operator's unverified report (:mod:`scio.product.bug_context`,
+    issue #120). The planner and every worker brief read it through the task's description.
+    """
     f = _feature(spec, feat.id)
     ids = ", ".join(plan.feature_ids())
     desc = [
@@ -425,6 +432,8 @@ def feature_task(
         "are maintained by the orchestrator; do not edit them. NOTES.md and CHANGELOG.md are "
         "yours to update.",
     ]
+    if linked_issues:  # issue #120
+        desc += ["", "## Linked bug issue (the operator's report, not verified)", linked_issues]
     return TaskSpec(
         title=f"{f.id}: {f.description}",
         description="\n".join(desc),
@@ -1194,8 +1203,19 @@ def feature(ctx: RunContext, saver: BaseCheckpointSaver | None) -> Node:
                 edit = commit_product_md_edit(ctx, plan, f"feature-{feat.id}-a{attempt}")
                 if edit:
                     entries.append(fact(f"hand edit of PRODUCT.md committed at {edit[:12]}"))
+                # A bug-fix feature's brief carries its linked bug issue (#120); the outer
+                # ctx's client, since a feature context has none.
+                bug_text, bug_notes = feature_bug_brief(
+                    _feature(spec, feat.id), ctx.github, own_issue=state.issues.get(feat.id)
+                )
+                entries += [fact(n) for n in bug_notes]
                 task = feature_task(
-                    spec, plan, feat, state.issues.get(feat.id), repo_dir=state.product_dir
+                    spec,
+                    plan,
+                    feat,
+                    state.issues.get(feat.id),
+                    repo_dir=state.product_dir,
+                    linked_issues=bug_text,
                 )
                 # A retry keeps what the attempts before it committed after a passing verify:
                 # the uncommitted leftovers are gone, the verified commits are not (#119).
@@ -1429,6 +1449,15 @@ def _run_batch(
             + " (ADR 0018)"
         )
     )
+    # Each new attempt's brief carries its feature's linked bug issue (#120), read here, once,
+    # with the outer ctx's client (a feature context has none).
+    briefs: dict[str, str | None] = {}
+    for job in jobs:
+        if not thread_started(job.fctx, saver):
+            briefs[job.feat.id], notes = feature_bug_brief(
+                _feature(spec, job.feat.id), ctx.github, own_issue=state.issues.get(job.feat.id)
+            )
+            entries += [fact(n) for n in notes]
 
     def one(job: _BatchJob) -> Any:
         try:
@@ -1436,7 +1465,12 @@ def _run_batch(
                 outcome = resume_graph(job.fctx, None, saver=saver)
             else:
                 task = feature_task(
-                    spec, plan, job.feat, state.issues.get(job.feat.id), repo_dir=str(job.tree)
+                    spec,
+                    plan,
+                    job.feat,
+                    state.issues.get(job.feat.id),
+                    repo_dir=str(job.tree),
+                    linked_issues=briefs.get(job.feat.id),
                 ).model_copy(update={"base_branch": base})  # a SHA: one branch, one worktree
                 outcome = run_graph(job.fctx, task, saver=saver)
             while outcome.paused and outcome.state.phase == "merge_wait":

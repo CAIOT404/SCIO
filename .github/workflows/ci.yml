@@ -97,7 +97,8 @@ jobs:
         if: always()
         run: cat evals/results/*.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
 
-  # The suite in three shards on three runners (issue #122, W-35): the single job's tests took
+  # The suite in four shards on four runners (issue #122, W-35; the fourth, tests/live alone, is
+  # I-224): the single job's tests took
   # 499 to 813 s over the 14 green runs of 2026-11-14 (4 cores, 8 workers); 91% of the tests
   # were done after about 2 min, the rest was a tail of product builds. Each shard is a list
   # of files and directories; together they hold every test file under tests/ exactly once,
@@ -132,7 +133,12 @@ jobs:
               tests/graph/test_t1_t2_fake.py
               tests/recovery
           - shard: 3
-            paths: tests/unit tests/live
+            paths: tests/unit
+          # The browser and docker tests alone, on 2 workers (I-224): beside the unit tests'
+          # dozens of workers, Chromium's 5 to 10 s waits timed out in 2 of 3 runs.
+          - shard: 4
+            paths: tests/live
+            workers: 2
     steps:
       - uses: actions/checkout@v4
 
@@ -174,9 +180,12 @@ jobs:
         env:
           SHARD_PATHS: ${{ matrix.paths }}
         run: |
-          echo "runner cores: $(nproc); shard ${{ matrix.shard }}: $SHARD_PATHS"
+          # A shard may name its worker count (the live shard: 2, I-224); else twice the cores.
+          WORKERS="${{ matrix.workers }}"
+          [ -n "$WORKERS" ] || WORKERS=$(( $(nproc) * 2 ))
+          echo "runner cores: $(nproc); shard ${{ matrix.shard }} on $WORKERS workers: $SHARD_PATHS"
           # SHARD_PATHS unquoted on purpose: one argument per path
-          uv run pytest $SHARD_PATHS -n "$(( $(nproc) * 2 ))" --cov=scio --cov=evals --cov-report=term-missing --durations=30
+          uv run pytest $SHARD_PATHS -n "$WORKERS" --cov=scio --cov=evals --cov-report=term-missing --durations=30
 
       - name: Docs checks
         if: matrix.shard == 1

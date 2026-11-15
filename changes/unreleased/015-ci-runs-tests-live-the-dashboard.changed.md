@@ -1,0 +1,1 @@
+CI runs `tests/live` (the dashboard's browser tests and the docker tests) in a fourth shard of its own, on 2 workers. Beside the unit tests' workers, the browser tests' waits timed out in 2 of 3 runs (I-224).

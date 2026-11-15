@@ -65,6 +65,16 @@ python -m recovery run --workspace <workspace> -- build --product <product dir> 
 
 `run` passes the build's output through and exits with the build's own exit code, so `PAUSED for a human:`, the resume hints and the exit status are exactly what `sh scio.sh` gives. When the build fails and the failure needs recovery, `run` prints one line naming the incident, and the recovery carries on in a background tick.
 
+### Which thread a run records
+
+`progress.json`'s `build_thread` is the thread that recorded the last finished milestone. `scio build` may run a different thread (I-163), so the run record treats that value as provisional. When the run ends, or a tick finds it orphaned, the supervisor records the thread SCIO actually ran (issue #123). It takes the first of these that names a thread:
+1. the `thread` in SCIO's `outcome.json`;
+2. the last `build thread <id> phase=...` line in the run's `stdout.log`;
+3. the newest cost ledger in `<workspace>/.scio/ledger/` written since the run started, with a feature suffix such as `-p26-a4` removed. A build killed as hung has printed nothing yet, so this is the source that names its thread;
+4. `progress.json` again.
+
+The record's `build_thread_source` says which one it was (`outcome`, `stdout`, `ledger` or `progress`). The incident's evidence, the repair brief and the health check's `report --thread` all read the thread after the run ends. The dashboard reads it while the run is live, so until the run ends it shows the provisional `progress.json` thread.
+
 ## What happens to a failure
 
 | The build ended with | The supervisor |
@@ -72,7 +82,7 @@ python -m recovery run --workspace <workspace> -- build --product <product dir> 
 | done, or a human stop | records it; nothing else |
 | a task fault (`integration_failed`, `gate_escalated`, `release_failed`, `stopped`, `budget`, `load_failed`) | records it as a closed incident; the owner decides, as before |
 | a sign-in failure (`not logged in`, `invalid_grant`) | opens an issue labelled `needs-human`: sign in again; no repair |
-| a rate limit, a used-up usage window, a GitHub refusal | replays after a backoff (up to 3 times), then escalates |
+| a rate limit, a used-up usage window (`You've hit your 5-hour limit · resets 2:20pm (America/Los_Angeles)`), a GitHub refusal | replays after a backoff (up to 3 times), then escalates. When the message names a reset time, the backoff lasts until then plus 5 minutes, at most 8 hours after the failure, and the timeline says "waiting for the usage window to reset at <UTC time>". On a Python with no time zone database (Windows without `tzdata`, as the scheduled tick runs), the named time is read as this machine's local time, since `claude -p` runs here. A time it cannot read keeps the 5, 15 and 30 minute schedule (#126) |
 | a traceback in SCIO's code, a harness error in a feature, or a hang | opens a `recovery` issue and starts a repair session; after the owner's merge, it updates live-wt, runs the health check and replays |
 | a reboot or a dead supervisor (orphan) | replays; no repair |
 
