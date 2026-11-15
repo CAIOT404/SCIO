@@ -2044,3 +2044,21 @@ Template:
 - Sweep: `grep -rn "files_expected\|explorer_summaries" scio evals` and `grep -rln localize .`. No hits in `recovery/`, `scripts/` or the product docs. Three tests in `test_t1_t2_fake.py` now expect the grounded list.
 - Guard: the 27 tests in `tests/unit/test_grounded_plan.py`. 24 of them failed on the old code. Guardrail 89.
 - Resolved: 2026-11-14 · Status: resolved
+
+### I-214 · The push-gate tests wrote their denials into the machine's real refusal log
+- Found: 2026-11-14 · building gate v2 (#122 W-18), by its agent · `tests/unit/test_push_gate.py`, `tests/unit/test_gate.py`
+- Symptom: after W-18 made the hook log every refusal to `hook-refusals.log` (in `%LOCALAPPDATA%/SCIO`), running the existing hook tests left 4 denials in the real log on the owner's machine: refusals no session ever made. The retrospectives count that log per rule (W-18), so test runs would inflate the real counts.
+- Root cause: the tests run the hook's real entry point, and the new log path resolves from the environment (`LOCALAPPDATA`) unless something redirects it. No fixture did.
+- Fix: autouse `machine_dir` fixtures in both test modules point the hook's machine directory (the refusal log and the gate lock) at `tmp_path`. The 4 stray lines were removed from the real log.
+- Sweep: every test that runs `push_gate.main` or `gate.main` is in these two modules, and both have the fixture. `grep -rn "push_gate\|LOCALAPPDATA" tests` finds no other writer.
+- Guard: the `machine_dir` fixtures, autouse in both modules. Guardrail 90.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-215 · The orchestrator's CI brief assumed the tests job excluded tests/live; it never did
+- Found: 2026-11-14 · the CI agent's report (#122 W-35) · the brief, not the code
+- Symptom: the brief asked for shards covering every test file "excluding `tests/live` as today". CI's tests job has always run `tests/live`: `testpaths=["tests"]` has no ignore, and Chromium is installed for it. That covers the dashboard's browser tests and the docker tests on the plain image. Shards that followed the brief would have silently dropped those tests from CI.
+- Root cause: a fact about CI written into the brief from memory, not read from `ci.yml` and `pyproject.toml`. That is the case W-09 covers (check the source, never memory), applied to the repository's own config.
+- Fix: the agent read the config and kept `tests/live` in shard 3. `test_ci_shards_cover_every_test_directory` checks the full set. On #127's real run, the shards' totals (1182 passed, 7 skipped) equalled the local gate's (1171 passed, 18 skipped): 1189 each, so every test ran exactly once.
+- Sweep: the other Workflow v2 briefs were checked for claims about CI or config. The gate v2 brief's claim that the gate's evals are CI's is guarded by `test_the_gates_regression_evals_are_cis`. No other brief states a CI fact.
+- Guard: `test_ci_shards_cover_every_test_directory`. Guardrail 91.
+- Resolved: 2026-11-14 · Status: resolved
