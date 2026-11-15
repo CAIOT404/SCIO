@@ -97,7 +97,7 @@ milestone and one issue per feature (or `.scio/product/issues/` offline), and ea
 the task graph on its own checkpoint thread on branch `milestone/<n>`. After the last feature the
 profile's full suite and lint run on the branch, an Opus milestone gate gives a verdict that any failing
 check overrides, and one milestone PR waits for you. A crash at any point resumes without a duplicated
-issue, commit or PR; a feature that halts stops for one decision (`retry`, `skip`, or stop).
+issue, commit or PR; a feature that halts stops for one decision (`retry`, `skip`, or stop); `retry: <answer>` carries the owner's answer into the next attempt's task, with the question it answers (#137).
 `skip` defers the feature to the next milestone; the release waits until every feature in `PRODUCT.md`
 is done, so a feature leaves the product only when you remove it from `PRODUCT.md`.
 Every feature's verify also holds it to the product's coverage floor (`SCIO_COVERAGE_FLOOR`, 80% of
