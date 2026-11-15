@@ -368,6 +368,26 @@ def test_a_docs_only_change_since_a_gated_tree_runs_only_the_docs_steps(
     assert "mypy" in dict(ran) and _stamp(repo)["mode"] == "quick"
 
 
+def test_a_docs_only_change_runs_every_test_that_names_the_changed_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I-218: `test_the_local_ci_line_runs_python_tools_as_modules` reads CLAUDE.md's gate line.
+    A CLAUDE.md-only rewrite of that line, gated in docs mode, would have skipped the test
+    and passed. The docs tests now include every test file that names a changed Markdown
+    file."""
+    gate = _load()
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    unit = tmp_path / "tests" / "unit"
+    unit.mkdir(parents=True)
+    (unit / "test_reads_rules.py").write_text(
+        'TEXT = "CLAUDE.md"\n', encoding="utf-8", newline="\n"
+    )
+    (unit / "test_other.py").write_text('TEXT = "README.md"\n', encoding="utf-8", newline="\n")
+    assert "tests/unit/test_reads_rules.py" in gate.docs_tests(["CLAUDE.md"])
+    assert "tests/unit/test_other.py" not in gate.docs_tests(["CLAUDE.md"])
+    assert "tests/unit/test_reads_rules.py" not in gate.docs_tests([])
+
+
 def test_the_quick_gate_runs_the_tests_of_the_changed_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

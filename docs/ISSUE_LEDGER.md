@@ -2062,3 +2062,16 @@ Template:
 - Sweep: the other Workflow v2 briefs were checked for claims about CI or config. The gate v2 brief's claim that the gate's evals are CI's is guarded by `test_the_gates_regression_evals_are_cis`. No other brief states a CI fact.
 - Guard: `test_ci_shards_cover_every_test_directory`. Guardrail 91.
 - Resolved: 2026-11-14 · Status: resolved
+
+### I-218 · Rewriting CLAUDE.md's gate line broke a test that finds it by its words, and the new docs-only gate mode would have skipped that test
+- Found: 2026-11-15 · gate v2's own `gate.py --full` (#122 W-14) · `tests/unit/test_cli_and_nodes.py`, `scripts/gate.py` (`docs_tests`)
+- Symptom: `test_the_local_ci_line_runs_python_tools_as_modules` failed with `StopIteration`. It finds CLAUDE.md's gate line by its opening words, "- Run the CI-equivalent locally", and W-14 had reworded the line to "- Run the gate before every push". The agent's narrowed checks (only its own test files, to spare a loaded machine) did not run this test. The full gate did.
+- Root cause:
+  - A test reads a rule line by its first words, so any rewording breaks it. That part is intended: the test pins the rule.
+  - The new docs-only mode (W-13) chose "the tests that read docs" by file name (`docs`, `guardrail`) only. A CLAUDE.md-only change would have run in docs mode and skipped this test.
+- Fix:
+  - The test finds the line by its new words, keeps its assertions, and also checks that CLAUDE.md names `gate.py --full`.
+  - `docs_tests(changed)` adds every test file that names a changed Markdown file. Both the docs mode and the quick mode's Markdown branch pass the changed paths.
+- Sweep: `grep -rln "CLAUDE.md\|CONTRIBUTING.md\|README.md" tests` lists the tests that read those files. With the fix, docs mode runs every one of them for a change to the file they name.
+- Guard: `test_a_docs_only_change_runs_every_test_that_names_the_changed_file`. Guardrail 93.
+- Resolved: 2026-11-15 · Status: resolved

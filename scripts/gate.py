@@ -353,12 +353,22 @@ def all_test_files() -> list[str]:
     )
 
 
-def docs_tests() -> list[str]:
+def docs_tests(changed: Sequence[str] = ()) -> list[str]:
+    """The tests that read docs: the docs check's own, every test file whose name holds
+    ``docs`` or ``guardrail``, and every test file that names one of the ``changed`` Markdown
+    files (``CLAUDE.md``, ``CONTRIBUTING.md``, …). The last kind is how a test reads a rule
+    line: ``test_the_local_ci_line_runs_python_tools_as_modules`` reads CLAUDE.md's gate line,
+    and a docs-only gate that skipped it let a rewrite of that line through (I-218)."""
     found = {p for p in DOCS_TESTS if (ROOT / p).is_file()}
+    md_names = {p.rsplit("/", 1)[-1] for p in changed if p.endswith(".md")}
     for path in all_test_files():
         name = path.rsplit("/", 1)[-1]
         if "docs" in name or "guardrail" in name:
             found.add(path)
+        elif md_names:
+            text = (ROOT / path).read_text(encoding="utf-8", errors="replace")
+            if any(md in text for md in md_names):
+                found.add(path)
     return sorted(found)
 
 
@@ -411,7 +421,7 @@ def select_tests(changed: list[str]) -> tuple[list[str], str | None]:
                 selected.add(path)
             continue
         if is_docs(path):
-            selected.update(docs_tests())
+            selected.update(docs_tests([path]))
             continue
         patterns = mention_patterns(path)
         hits = [t for t in tests if any(p.search(text(t)) for p in patterns)]
@@ -448,7 +458,7 @@ def make_plan(full: bool, stamp: dict[str, Any] | None) -> Plan:
         return Plan("full", FIRST, TOGETHER, LAST, [note])
     head = f"{len(changed)} changed path(s) {since}"
     if from_stamp and changed and all(is_docs(p) for p in changed):
-        tests = docs_tests()
+        tests = docs_tests(changed)
         note = f"gate: docs: {head}, all docs; the docs check and {len(tests)} docs test file(s)"
         return Plan("docs", [], [("pytest", pytest_argv(tests))] if tests else [], LAST, [note])
     named = dict(TOGETHER)
