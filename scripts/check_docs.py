@@ -6,9 +6,14 @@ Checks (M1):
 3. ``CHANGELOG.md`` has an ``[Unreleased]`` section.
 
 M2 adds: architecture diagram vs. compiled graph, runnable code samples, public-API
-docstring coverage. Issue #61 adds the guardrails check: the Always/Never rules in
-``docs/LESSONS_LEARNED.md`` cite every resolved ledger entry from I-104 on, and every guard
-they name exists.
+docstring coverage. Issue #61 adds the guardrails check: the Always/Never rules cite every
+resolved ledger entry from I-104 on, and every guard they name exists.
+
+Issue #122 (W-38 to W-41) makes the ledger, the guardrails and the unreleased changes
+fragments, one file each: ``docs/ledger/I-NNN.md``, ``docs/guardrails/NNN.md`` and
+``changes/unreleased/<n>-<slug>.<kind>.md``. Every check here reads them there, and fails on
+an entry, rule or change still written into ``docs/ISSUE_LEDGER.md``,
+``docs/LESSONS_LEARNED.md`` or CHANGELOG.md's ``[Unreleased]``.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 
 ROOT = Path(__file__).resolve().parent.parent
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s#]+)(?:#[^)]*)?\)")
@@ -57,11 +63,13 @@ def _strip_code(text: str) -> str:
     return INLINE_CODE_RE.sub("", FENCE_RE.sub("", text))
 
 
-def links_in(md: Path) -> list[str]:
-    """Broken relative links in one Markdown file, as error strings."""
+def links_in(md: Path, base: Path | None = None) -> list[str]:
+    """Broken relative links in one Markdown file, as error strings. A link is resolved
+    from ``base``, the file's own folder by default."""
     errors: list[str] = []
-    rel = md.relative_to(ROOT) if md.is_relative_to(ROOT) else md.name
+    rel = md.relative_to(ROOT).as_posix() if md.is_relative_to(ROOT) else md.name
     text = _strip_code(md.read_text(encoding="utf-8", errors="replace"))
+    base = base if base is not None else md.parent
     for m in LINK_RE.finditer(text):
         target = m.group(1)
         if re.match(r"^[a-z]+:", target) or target.startswith("mailto:"):
@@ -70,16 +78,19 @@ def links_in(md: Path) -> list[str]:
         if set(target) == {"."} and target != "..":
             errors.append(f"{rel}: broken link -> {target}")
             continue
-        if not (md.parent / target).exists():
+        if not (base / target).exists():
             errors.append(f"{rel}: broken link -> {target}")
     return errors
 
 
 def check_links() -> list[str]:
+    """Every relative link in our Markdown resolves. A change fragment's text is read from
+    the repository's root: the release cut moves it into CHANGELOG.md there (W-40)."""
     errors: list[str] = []
+    changes = ROOT / CHANGES_DIR
     for md in ROOT.rglob("*.md"):
         if not _skip(md):
-            errors.extend(links_in(md))
+            errors.extend(links_in(md, ROOT if md.parent == changes else None))
     return errors
 
 
@@ -100,39 +111,108 @@ def check_model_ids() -> list[str]:
     return errors
 
 
-def check_changelog() -> list[str]:
-    text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    return [] if "## [Unreleased]" in text else ["CHANGELOG.md: missing '## [Unreleased]' section"]
+CHANGES_DIR = Path("changes") / "unreleased"
+"""The unreleased changes, one file per change (issue #122, W-40)."""
+MIGRATE = "uv run python scripts/migrate_fragments.py"
+
+
+def _release_notes() -> ModuleType:
+    """``scripts/release_notes.py``, the reader of the change fragments, loaded by path from
+    this file's own folder (``ROOT`` may point at another checkout in a test)."""
+    path = Path(__file__).resolve().parent / "release_notes.py"
+    spec = importlib.util.spec_from_file_location("release_notes", path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def unreleased_changes(root: Path | None = None) -> str:
+    """The unreleased changes' text: every change fragment, in release order."""
+    rn = _release_notes()
+    folder = (root or ROOT) / CHANGES_DIR
+    return "\n".join(p.read_text(encoding="utf-8") for p in rn.change_fragments(folder))
+
+
+def change_fragment_problems(root: Path | None = None) -> list[str]:
+    """Each file in ``changes/unreleased/`` is a well-named change fragment holding a
+    bullet's text, and CHANGELOG.md's ``[Unreleased]`` holds no change of its own."""
+    root = root or ROOT
+    rn = _release_notes()
+    folder = root / CHANGES_DIR
+    rel = CHANGES_DIR.as_posix()
+    errors = [
+        f"{rel}/{p.name}: not a change fragment's name; it is <n>-<slug>.<added|changed|fixed>.md "
+        "(changes/README.md)"
+        for p in rn.stray_files(folder)
+    ]
+    for p in rn.change_fragments(folder):
+        text = p.read_text(encoding="utf-8")
+        if not text.strip():
+            errors.append(f"{rel}/{p.name}: is empty")
+        elif text.lstrip().startswith("- "):
+            errors.append(
+                f"{rel}/{p.name}: starts with '- '; a fragment holds the bullet's text, and the "
+                "release cut adds the marker"
+            )
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    parts = SECTION_RE.split(changelog)
+    unreleased = dict(zip(parts[1::2], parts[2::2], strict=True)).get("Unreleased", "")
+    errors += [
+        f"CHANGELOG.md: [Unreleased] holds a change ({ln.strip()[:60]!r}); a change is its own "
+        f"file in {rel}/ ({MIGRATE} moves it)"
+        for ln in unreleased.splitlines()
+        if ln.startswith("- ")
+    ]
+    return errors
+
+
+def check_changelog(root: Path | None = None) -> list[str]:
+    """CHANGELOG.md has its ``[Unreleased]`` section, the pointer the release cut writes
+    under, and the unreleased changes are well-formed fragments (W-40)."""
+    root = root or ROOT
+    text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    errors = (
+        [] if "## [Unreleased]" in text else ["CHANGELOG.md: missing '## [Unreleased]' section"]
+    )
+    return errors + change_fragment_problems(root)
 
 
 MILESTONE_RE = re.compile(r"\bM(\d+)\b")
 SECTION_RE = re.compile(r"^## \[([^\]]+)\][^\n]*$", re.MULTILINE)
 
 
-def _product_mode_status() -> str:
-    pm = (ROOT / "docs" / "PRODUCT_MODE.md").read_text(encoding="utf-8")
+def _product_mode_status(root: Path | None = None) -> str:
+    pm = ((root or ROOT) / "docs" / "PRODUCT_MODE.md").read_text(encoding="utf-8")
     return next((ln for ln in pm.splitlines() if ln.startswith("- **Status:**")), "")
 
 
-def unreleased_done_milestones(changelog: str, pm_status: str) -> list[str]:
-    """Milestones the PRODUCT_MODE status line calls done that CHANGELOG.md names under
-    ``[Unreleased]`` and in no released section (I-086)."""
+def unreleased_done_milestones(
+    changelog: str, pm_status: str, unreleased: str | None = None
+) -> list[str]:
+    """Milestones the PRODUCT_MODE status line calls done that the unreleased changes name
+    and no released section does (I-086). The unreleased changes are ``unreleased`` (the
+    change fragments' text) when given, else CHANGELOG.md's ``[Unreleased]`` section."""
     done = set(re.findall(r"\b(M\d+) [A-Za-z +\-]+? done\b", pm_status))
     parts = SECTION_RE.split(changelog)
     bodies = dict(zip(parts[1::2], parts[2::2], strict=True))
-    unreleased = bodies.pop("Unreleased", "")
+    section = bodies.pop("Unreleased", "")
+    unreleased = section if unreleased is None else unreleased
     released = "\n".join(bodies.values())
     named = {f"M{n}" for n in MILESTONE_RE.findall(unreleased)}
     named -= {f"M{n}" for n in MILESTONE_RE.findall(released)}
     return sorted(done & named, key=lambda m: int(m[1:]))
 
 
-def check_release_cadence() -> list[str]:
-    """A release follows every milestone merge: one finished milestone may wait under
-    ``[Unreleased]`` for its release PR, two may not (I-086: M8 to M10 piled up behind
-    v0.5.0 for two weeks)."""
-    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    pending = unreleased_done_milestones(changelog, _product_mode_status())
+def check_release_cadence(root: Path | None = None) -> list[str]:
+    """A release follows every milestone merge: one finished milestone may wait in the
+    unreleased changes for its release PR, two may not (I-086: M8 to M10 piled up behind
+    v0.5.0 for two weeks). The unreleased changes are the fragments (W-40)."""
+    root = root or ROOT
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    pending = unreleased_done_milestones(
+        changelog, _product_mode_status(root), unreleased_changes(root)
+    )
     if len(pending) < 2:
         return []
     return [
@@ -150,21 +230,22 @@ def released_section_changed(current: str, tagged: str, version: str) -> bool:
     return then is not None and (now or "").strip() != then.strip()
 
 
-def check_released_section_frozen() -> list[str]:
+def check_released_section_frozen(root: Path | None = None) -> list[str]:
     """The newest released CHANGELOG section stays what its tag shipped (I-089): a branch
     that merges ``main`` across a release cut gets its own ``[Unreleased]`` entries moved
     under the new version by git's merge, silently. Skipped before the tag exists (the
     release PR itself) and in a clone without tags."""
     import subprocess
 
-    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    root = root or ROOT
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     m = re.search(r"^## \[(\d+\.\d+\.\d+)\]", changelog, re.MULTILINE)
     if not m:
         return []
     version = m.group(1)
     proc = subprocess.run(
         ["git", "show", f"v{version}:CHANGELOG.md"],
-        cwd=ROOT,
+        cwd=root,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -298,25 +379,88 @@ def resolved_ledger_ids(ledger: str, start: int = GUARDRAILS_FROM) -> list[str]:
 
 
 STATUS_LINE_RE = re.compile(r"^- Resolved: [^\n]*· Status: \S", re.MULTILINE)
+STATUS_RE = re.compile(r"^- Resolved: [^\n]*· Status: (\w+)", re.MULTILINE)
+TODO_FIELD_RE = re.compile(
+    r"^- (?:Found|Symptom|Root cause|Fix|Sweep|Guard):(?: [^\n]*·)? TODO\b", re.MULTILINE
+)
+"""A field ``ledger_new.py`` left as ``TODO`` (``- Fix: TODO``, ``- Found: <date> · TODO ·
+<where>``). A field whose prose mentions a TODO is not one."""
 
 
 def ledger_status_problems(ledger: str) -> list[str]:
     """Every ledger entry has its ``- Resolved: <date or -> · Status: <status>`` line. An
     entry without one is neither open nor resolved, so ``check_guardrails`` never asks it
-    for a rule (I-204)."""
+    for a rule (I-204). An entry that is no longer open has no ``TODO`` field left (W-41)."""
     parts = LEDGER_ENTRY_RE.split(ledger)
     entries = zip(parts[1::3], parts[2::3], parts[3::3], strict=True)
-    return [
-        f"{lid} has no '- Resolved: <date or -> . Status: <status>' line"
-        for lid, _n, body in entries
-        if not STATUS_LINE_RE.search(body)
-    ]
+    problems = []
+    for lid, _n, body in entries:
+        status = STATUS_RE.search(body)
+        if not STATUS_LINE_RE.search(body):
+            problems.append(f"{lid} has no '- Resolved: <date or -> . Status: <status>' line")
+        elif status and status.group(1) != "open" and TODO_FIELD_RE.search(body):
+            problems.append(
+                f"{lid} is {status.group(1)} but a field still says TODO; fill it in before "
+                "closing the entry"
+            )
+    return problems
 
 
-def check_ledger_statuses() -> list[str]:
-    """Every entry in docs/ISSUE_LEDGER.md says whether it is open or resolved (I-204)."""
-    ledger = (ROOT / "docs" / "ISSUE_LEDGER.md").read_text(encoding="utf-8")
-    return [f"docs/ISSUE_LEDGER.md: {e}" for e in ledger_status_problems(ledger)]
+LEDGER_DIR = Path("docs") / "ledger"
+"""The ledger: one file per entry, ``I-NNN.md`` (issue #122, W-38). Its README holds the
+template; ``docs/ISSUE_LEDGER.md`` keeps the ledger's front page."""
+LEDGER_FRAGMENT_RE = re.compile(r"^I-(\d{3,})\.md$")
+
+
+def ledger_fragments(root: Path | None = None) -> list[Path]:
+    """The ledger's entry files, in id order."""
+    folder = (root or ROOT) / LEDGER_DIR
+    if not folder.is_dir():
+        return []
+    named = [(m, p) for p in folder.iterdir() if (m := LEDGER_FRAGMENT_RE.match(p.name))]
+    return [p for m, p in sorted(named, key=lambda mp: int(mp[0].group(1)))]
+
+
+def read_ledger(root: Path | None = None) -> str:
+    """The whole ledger as one text: every entry file in id order, a blank line between
+    them, the shape the parsers above read."""
+    return "\n".join(p.read_text(encoding="utf-8") for p in ledger_fragments(root))
+
+
+def ledger_fragment_problems(root: Path | None = None) -> list[str]:
+    """Each file in ``docs/ledger/`` is one entry named by its id, and the old
+    ``docs/ISSUE_LEDGER.md`` holds no entry: an entry written there would be read by no
+    check (a branch that predates the fragments)."""
+    root = root or ROOT
+    folder = root / LEDGER_DIR
+    rel = LEDGER_DIR.as_posix()
+    errors: list[str] = []
+    if folder.is_dir():
+        for p in sorted(folder.iterdir()):
+            if p.name != "README.md" and not LEDGER_FRAGMENT_RE.match(p.name):
+                errors.append(f"{rel}/{p.name}: not an entry's name; an entry is {rel}/I-NNN.md")
+    for p in ledger_fragments(root):
+        text = p.read_text(encoding="utf-8")
+        heads = [m.group(1) for m in LEDGER_ENTRY_RE.finditer(text)]
+        if not text.startswith(f"### {p.stem} "):
+            errors.append(f"{rel}/{p.name}: must start with its heading '### {p.stem} · <title>'")
+        if len(heads) > 1:
+            errors.append(f"{rel}/{p.name}: holds {len(heads)} entries; one file per entry")
+    old = root / "docs" / "ISSUE_LEDGER.md"
+    if old.is_file():
+        errors += [
+            f"docs/ISSUE_LEDGER.md: holds the entry {m.group(1)}; an entry is its own file, "
+            f"{rel}/{m.group(1)}.md ({MIGRATE} moves it)"
+            for m in LEDGER_ENTRY_RE.finditer(old.read_text(encoding="utf-8"))
+        ]
+    return errors
+
+
+def check_ledger_statuses(root: Path | None = None) -> list[str]:
+    """Every ledger entry says whether it is open or resolved (I-204), a closed one has no
+    ``TODO`` left, and every entry is its own well-named file in ``docs/ledger/`` (W-38)."""
+    problems = ledger_status_problems(read_ledger(root))
+    return [f"{LEDGER_DIR.as_posix()}: {e}" for e in problems] + ledger_fragment_problems(root)
 
 
 def guardrail_problems(
@@ -349,16 +493,17 @@ def guardrail_problems(
     return errors
 
 
-def guard_exists(kind: str, name: str) -> bool:
+def guard_exists(kind: str, name: str, root: Path | None = None) -> bool:
     """Whether a named guard is in the repository: a symbol defined in the code, a test
     function under ``tests/``, a check that ``main`` runs, a hook in ``.claude/settings.json``."""
+    root = root or ROOT
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
         return False
     if kind == "check":
-        src = (ROOT / "scripts" / "check_docs.py").read_text(encoding="utf-8")
+        src = Path(__file__).resolve().read_text(encoding="utf-8")  # this file's main
         return f"def {name}(" in src and f"{name}()" in src.split("\ndef main(", 1)[-1]
     if kind == "hook":
-        settings = ROOT / ".claude" / "settings.json"
+        settings = root / ".claude" / "settings.json"
         return settings.exists() and name in settings.read_text(encoding="utf-8")
     if kind == "test":
         pattern = re.compile(rf"^\s*def {name}[\[(]", re.MULTILINE)  # [ : a generic (I-111)
@@ -369,22 +514,82 @@ def guard_exists(kind: str, name: str) -> bool:
     return any(
         pattern.search(p.read_text(encoding="utf-8"))
         for d in dirs
-        for p in (ROOT / d).rglob("*.py")
+        for p in (root / d).rglob("*.py")
         if "__pycache__" not in p.parts
     )
 
 
-def check_guardrails() -> list[str]:
-    """The Always/Never rules are enforced, not just written (issue #61): every resolved
-    ledger entry from I-104 on is cited by a rule, and every guard a rule names exists."""
-    lessons = (ROOT / "docs" / "LESSONS_LEARNED.md").read_text(encoding="utf-8")
-    ledger = (ROOT / "docs" / "ISSUE_LEDGER.md").read_text(encoding="utf-8")
+GUARDRAIL_DIR = Path("docs") / "guardrails"
+"""The guardrails: one file per rule, ``NNN.md``, three digits (issue #122, W-39). The
+``## Guardrails`` section of LESSONS_LEARNED.md says how the rules work and points here."""
+GUARDRAIL_FRAGMENT_RE = re.compile(r"^(\d{3,})\.md$")
+
+
+def guardrail_fragments(root: Path | None = None) -> list[Path]:
+    """The guardrail files, in number order."""
+    folder = (root or ROOT) / GUARDRAIL_DIR
+    if not folder.is_dir():
+        return []
+    named = [(m, p) for p in folder.iterdir() if (m := GUARDRAIL_FRAGMENT_RE.match(p.name))]
+    return [p for m, p in sorted(named, key=lambda mp: int(mp[0].group(1)))]
+
+
+def guardrail_fragment_rules(root: Path | None = None) -> list[str]:
+    """The rule lines of the guardrail files, in number order: what ``guardrail_rules``
+    read from LESSONS_LEARNED.md before the fragments."""
     return [
-        f"docs/LESSONS_LEARNED.md: {e}"
-        for e in guardrail_problems(
-            guardrail_rules(lessons), resolved_ledger_ids(ledger), guard_exists
-        )
+        ln
+        for p in guardrail_fragments(root)
+        for ln in p.read_text(encoding="utf-8").splitlines()
+        if ln.strip()
     ]
+
+
+def guardrail_fragment_problems(root: Path | None = None) -> list[str]:
+    """Each file in ``docs/guardrails/`` is one rule line in a file named by its number, and
+    the ``## Guardrails`` section of LESSONS_LEARNED.md holds no rule: a rule written there
+    would be read by no check (a branch that predates the fragments)."""
+    root = root or ROOT
+    folder = root / GUARDRAIL_DIR
+    rel = GUARDRAIL_DIR.as_posix()
+    errors: list[str] = []
+    if folder.is_dir():
+        for p in sorted(folder.iterdir()):
+            m = GUARDRAIL_FRAGMENT_RE.match(p.name)
+            if p.name != "README.md" and (m is None or p.name != f"{int(m.group(1)):03d}.md"):
+                errors.append(f"{rel}/{p.name}: not a rule's name; a rule is {rel}/NNN.md")
+    for p in guardrail_fragments(root):
+        lines = [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        number = re.match(r"^(\d+)\. ", lines[0]) if len(lines) == 1 else None
+        if len(lines) != 1:
+            errors.append(f"{rel}/{p.name}: holds {len(lines)} lines; a rule is one line")
+        elif number is None or int(number.group(1)) != int(p.stem):
+            got = number.group(1) if number else "no number"
+            errors.append(f"{rel}/{p.name}: holds rule {got}; its file name says {int(p.stem)}")
+    lessons = root / "docs" / "LESSONS_LEARNED.md"
+    if lessons.is_file():
+        errors += [
+            f"docs/LESSONS_LEARNED.md: rule {rule.split('.', 1)[0]} is written in ## Guardrails; "
+            f"a rule is its own file, {rel}/NNN.md ({MIGRATE} moves it)"
+            for rule in guardrail_rules(lessons.read_text(encoding="utf-8"))
+        ]
+    return errors
+
+
+def check_guardrails(root: Path | None = None) -> list[str]:
+    """The Always/Never rules are enforced, not just written (issue #61): every resolved
+    ledger entry from I-104 on is cited by a rule, and every guard a rule names exists. The
+    rules are read from ``docs/guardrails/`` and the entries from ``docs/ledger/`` (W-38,
+    W-39)."""
+    root = root or ROOT
+    problems = guardrail_problems(
+        guardrail_fragment_rules(root),
+        resolved_ledger_ids(read_ledger(root)),
+        lambda kind, name: guard_exists(kind, name, root),
+    )
+    return [f"{GUARDRAIL_DIR.as_posix()}: {e}" for e in problems] + guardrail_fragment_problems(
+        root
+    )
 
 
 def check_workflow_checklist() -> list[str]:

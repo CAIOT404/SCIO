@@ -162,8 +162,10 @@ def build_world(tmp: Path, home: Path) -> World:
     (seed / "scio" / "cli.py").write_text(
         'FLAGS = ["--outcome-file"]\n', encoding="utf-8", newline="\n"
     )
-    (seed / "docs").mkdir()
-    (seed / "docs" / "ISSUE_LEDGER.md").write_text("# ledger\n", encoding="utf-8", newline="\n")
+    (seed / "docs" / "ledger").mkdir(parents=True)
+    (seed / "docs" / "ledger" / "README.md").write_text(
+        "# ledger entries\n", encoding="utf-8", newline="\n"
+    )
     (seed / ".gitignore").write_text("__pycache__/\n", encoding="utf-8", newline="\n")
     git(seed, "add", "-A")
     git(seed, "commit", "-m", "seed")
@@ -221,12 +223,16 @@ def fake_claude(world: World) -> Callable[..., CommandResult]:
         (wt / "tests" / "test_stage.py").write_text(
             "def test_s2_does_not_raise():\n    pass\n", encoding="utf-8", newline="\n"
         )
-        with open(wt / "docs" / "ISSUE_LEDGER.md", "a", encoding="utf-8", newline="\n") as fh:
-            fh.write("### I-180 · a hung claude\n")
+        # The entry is its own file since the ledger fragments (#122, W-43).
+        (wt / "docs" / "ledger" / "I-180.md").write_text(
+            "### I-180 · a hung claude\n- Resolved: 2026-11-14 · Status: resolved\n",
+            encoding="utf-8",
+            newline="\n",
+        )
         git(wt, "add", "-A")
         git(wt, "commit", "-m", f"fix: a timeout is retryable (#{issue})")
         git(wt, "push", "-u", "origin", branch)
-        files = ["scio/stage.py", "tests/test_stage.py", "docs/ISSUE_LEDGER.md"]
+        files = ["scio/stage.py", "tests/test_stage.py", "docs/ledger/I-180.md"]
         pr = world.gh.add_pr(branch, body=f"Fixes the hang.\n\nCloses #{issue}", files=files)
         world.gh.add_run(world.gh.prs[pr]["headRefOid"])
         answer = {

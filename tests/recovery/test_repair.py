@@ -502,7 +502,7 @@ def _pr(**fields: Any) -> PullRequest:
     return PullRequest(**base)
 
 
-GOOD_FILES = ["scio/x.py", "tests/unit/test_x.py", "docs/ISSUE_LEDGER.md"]
+GOOD_FILES = ["scio/x.py", "tests/unit/test_x.py", "docs/ledger/I-219.md"]  # W-43
 
 
 def _gh(
@@ -545,14 +545,15 @@ def test_a_claimed_pr_that_does_not_exist_is_a_problem() -> None:
 
 def test_each_broken_part_of_the_claim_is_its_own_problem() -> None:
     pr = _pr(head_ref="fix/95-other", body="Refs #95", state="CLOSED")
-    problems = _verify(gh=_gh(pr, files=["scio/x.py"], ci="failure"))
+    # The old ledger file is no ledger entry since the fragments (#122, W-43).
+    problems = _verify(gh=_gh(pr, files=["scio/x.py", "docs/ISSUE_LEDGER.md"], ci="failure"))
     assert problems == [
         "PR #101 is closed without a merge",
         f"PR #101 head branch is fix/95-other, not {BRANCH}",
         "PR #101 body has no `Closes #95`",
         f"ci failure on PR #101 head {HEAD_SHA}",
         "PR #101 changes no file under tests/",
-        "PR #101 does not change docs/ISSUE_LEDGER.md",
+        "PR #101 adds no ledger entry (docs/ledger/I-NNN.md)",
     ]
 
 

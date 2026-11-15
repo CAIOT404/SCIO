@@ -4,37 +4,8 @@ All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
-### Changed
-- The gate is quick by default (issue #122, W-11 to W-19):
-  - It runs lint, types, the tests of the paths changed since the last pass, the evals only when code changed, and the docs check. A Markdown-only change runs only the docs steps. `--full` runs what CI runs.
-  - A pass stamps its tree in `.scio/gate/last-pass.json`, and a tree that already passed is not gated again. A leftover `RUNNING` marker shows a gate that died. One gate runs at a time on the machine.
-  - The push gate refuses a head whose tree no pass stamped. Tags, deletions, gated merges, docs stamps, `SCIO_ACK_GATE`, the recovery repair worktree and other repositories pass, and an error in the check allows the push.
-  - Every refusal is logged outside the repository, to `hook-refusals.log`. A refused inline script is told which scratch file to write instead.
 
-### Fixed
-- A feature retry starts from the newest commit the retried attempts verified, instead of the milestone head, and carries those features as passing. Uncommitted leftovers are still discarded. graphcalc's P26 attempt 4 spent about 32 minutes rebuilding two features attempt 3 had committed (issue #119, I-216).
-- On T1 the explorer runs before the planner, and the planner reads its summary. Every planned path is then checked against the tree: a guessed path is replaced by its one localized match, kept as a probable new file when its folder exists, and dropped only when neither, each choice recorded. graphcalc's P26 planned a `graphcalc/evaluator.py` that did not exist (issue #121, I-213).
-
-### Added
-- Session tools (issue #122, W-20 to W-29):
-  - `scripts/session_state.py` is the state-first inspection in one command; with `--markdown` it gives the handoff's facts, which a `Stop` hook writes to `.scio/session-state.md`.
-  - `scripts/next_ids.py` reads the next ledger id and guardrail from every branch and worktree.
-  - `scripts/land.py` takes a PR up to the merge: retarget, update, require a gate stamp, watch CI by commit, mark ready. It prints the merge only for a PR that `.scio/approvals.md` approves. It also has `--body`, `--after-merge` and `--next`.
-  - `scripts/move_live_wt.py --when-idle` moves live-wt only while no supervised build runs.
-- `docs/WORKFLOW_V2.md`, the standing checklist of every change from the 2026-11-14 workflow teardown (issue #122). `scripts/workflow_status.py` computes each item's status from the evidence it names (a test, a symbol, a file or a CLAUDE.md line), so nothing is ticked by hand. A `SessionStart` hook puts the count and the next open items into every session, and the docs check fails on a malformed checklist. CLAUDE.md gains the process rules W-01 to W-09 and W-34.
-- `scripts/dev/`: `read_stream.py` (a `claude -p` stream-json summary), `ledger_pairs.py` (per-call usage in a cost ledger) and `claude_probe.py`. The probe runs one `claude -p` with exactly the worker's flags, through `worker_argv` and `resume_argv`, which are now extracted from `ClaudeCodeWorker` without behaviour change. `scripts/brief.py` fills `.claude/templates/agent-brief.md` from an issue, and `.claude/templates/agent-report.md` is the agents' report schema (issue #122, W-30 to W-33).
-
-### Changed
-- CI runs its tests in three shards that together cover every test file, and runs the evals only when a pull request touches code. `scripts/ci_changes.py` decides, by a job condition, never a workflow path filter. The required `checks` fails on any failed, cancelled or skipped shard. CI also runs on the merge queue (`merge_group`) (issue #122, W-35 to W-37).
-- A coder or debugger session that runs out of turns without editing anything now escalates cheapest step first, before it can count as a stall (the owner's ladder, issue #116, I-209). First, the same Claude Code session resumes once, with its tools, to write the fix it diagnosed. Then the findings carry into the next session, as before. If nothing was edited still, the next session on the step gets twice the turn cap, once per step, and that iteration counts neither a stall nor a fix attempt. Only after that do stalls count as before. Whether a session edited is judged from git. The worker's stop and edit are kept in the state (ADR 0005 and 0006 amendments).
-- On the Claude subscription the budget is a metric, not a stop (issue #115, the owner's correction, I-208). The new `SCIO_BUDGET_MODE` setting is `auto` by default, with `enforce` and `track` also accepted. `auto` only records the budget when the worker backend and the provider are both `claude_code`; any setup that can bill an API key keeps its caps. A budget that does not bind never refuses a call or ends a run with `budget`, and Claude Code sessions get no `--max-budget-usd`. Dollars and tokens are still recorded in the ledger, `scio report`, `scio status` and the dashboard, which show "(tracked, no cap)". The iteration, stall, turn, tool and advisor caps are unchanged (ADR 0012 amendment).
-
-### Fixed
-- A resumed Claude Code call records its own latency, not the whole session's: `duration_api_ms` is cumulative on a `--resume`, so each summary call repeated its session's time (I-210).
-- `scripts/watch_ci.py --sha` finds the run by its commit when no `--branch` is given. It used the current checkout's branch and timed out from the main checkout on a run that existed (I-211).
-- The scheduled recovery tick's recipe in `docs/RECOVERY.md` registers without an administrator. Its logon trigger now names the user, since a trigger on any user's logon is refused with "Access is denied". The docs check now fails on any logon trigger without `-User` in a Markdown code block or a script under `scripts/`, and the recipe's `$py` skips the Microsoft Store alias (I-200, issue #98). It also counts a code block indented in a list item as code, so a link inside one is no longer checked (I-201).
-- The docs check fails on a ledger entry that does not close with its `- Resolved: … · Status: …` line. Such an entry is neither open nor resolved, so the guardrails check could not ask it for a rule. I-192 and I-159 gained theirs (I-204).
-- `scripts/gate.py` refuses to start in an environment that lacks a distribution CI installs (an optional extra or the `dev` group) and prints the `uv sync` to run. A fresh worktree's first `uv run` installs the default groups only, so its gate used to fail mypy on imports nobody changed (I-205).
+The unreleased changes are files, one per change, in `changes/unreleased/` (issue #122, W-40); [changes/README.md](changes/README.md) says how to write one. The release cut, `uv run python scripts/release_notes.py --cut X.Y.Z`, assembles them here into the new version's section and deletes them.
 
 ## [0.10.0] - 2026-11-14
 ### Added

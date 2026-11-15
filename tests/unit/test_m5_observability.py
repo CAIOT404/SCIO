@@ -192,17 +192,22 @@ def test_release_notes_sections_and_cut() -> None:
     assert spec and spec.loader
     rn = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rn)
+    # Since #122 (W-40) [Unreleased] holds a pointer to changes/unreleased/, and the cut takes
+    # the section's body assembled from those fragments; the pointer stays.
     text = (
-        "# Changelog\n\n## [Unreleased]\n### Added\n- new thing\n\n"
+        "# Changelog\n\n## [Unreleased]\n\nThe changes are fragments.\n\n"
         "## [0.0.1] - 2026-01-01\n### Added\n- first\n"
     )
     assert rn.sections(text)["0.0.1"].startswith("### Added\n- first")
-    assert rn.notes_for("Unreleased", text) == "### Added\n- new thing\n"
-    cut_text = rn.cut("0.1.0", text, today="2026-10-10")
-    assert "## [Unreleased]\n\n## [0.1.0] - 2026-10-10\n### Added\n- new thing" in cut_text
+    assert rn.notes_for("Unreleased", text) == "The changes are fragments.\n"
+    cut_text = rn.cut("0.1.0", text, "### Added\n- new thing\n", today="2026-10-10")
+    assert (
+        "## [Unreleased]\n\nThe changes are fragments.\n\n"
+        "## [0.1.0] - 2026-10-10\n### Added\n- new thing\n\n## [0.0.1]"
+    ) in cut_text
     assert rn.notes_for("0.1.0", cut_text).startswith("### Added\n- new thing")
     with pytest.raises(ValueError):
-        rn.cut("0.0.1", text)
+        rn.cut("0.0.1", text, "### Added\n- x\n")
     with pytest.raises(KeyError):
         rn.notes_for("9.9.9", text)
     assert rn.notes_for("Unreleased")  # the repo changelog has an Unreleased section

@@ -178,12 +178,16 @@ def test_it_names_the_files_to_read_first(tmp_path: Path) -> None:
     read_first = section(brief(tmp_path), "## Read first")
     for path in (
         "CLAUDE.md",
-        "docs/ISSUE_LEDGER.md",
+        "docs/ledger/README.md",  # the ledger is one file per entry since #122 (W-43)
+        "docs/guardrails/",  # and the guardrails one file per rule (W-39)
         "docs/LESSONS_LEARNED.md",
         "docs/adr/0019-external-recovery-supervisor.md",
     ):
         assert f"`{path}`" in read_first
     assert "Guardrails (Always / Never)" in read_first
+    contract = section(brief(tmp_path), "## Your contract")
+    assert "`docs/ledger/I-NNN.md`" in contract and "scripts/ledger_new.py" in contract
+    assert "`docs/guardrails/NNN.md`" in contract
 
 
 def test_it_says_where_to_work_and_what_failed(tmp_path: Path) -> None:

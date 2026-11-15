@@ -1,0 +1,1 @@
+CI runs its tests in three shards that together cover every test file, and runs the evals only when a pull request touches code. `scripts/ci_changes.py` decides, by a job condition, never a workflow path filter. The required `checks` fails on any failed, cancelled or skipped shard. CI also runs on the merge queue (`merge_group`) (issue #122, W-35 to W-37).

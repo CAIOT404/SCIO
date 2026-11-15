@@ -22,9 +22,18 @@ READ_FIRST: tuple[tuple[str, str], ...] = (
     ("CLAUDE.md", "the working rules; this session follows all of them"),
     (
         "docs/LESSONS_LEARNED.md",
-        "the `## Guardrails (Always / Never)` section at the top, end to end",
+        "the `## Guardrails (Always / Never)` section at the top: how the rules work",
     ),
-    ("docs/ISSUE_LEDGER.md", "the next free I-NNN id, and the entries named below"),
+    (
+        "docs/guardrails/",
+        "the Always/Never rules, one file per rule (`NNN.md`), every one: "
+        "`cat docs/guardrails/*.md`",
+    ),
+    (
+        "docs/ledger/README.md",
+        "the ledger: one file per entry, `docs/ledger/I-NNN.md`, and its template; the "
+        "entries named below are files there",
+    ),
     (
         "docs/adr/0019-external-recovery-supervisor.md",
         "the recovery supervisor; decision 7 is this session's contract",
@@ -281,11 +290,16 @@ def render_brief(
         "2. Decide whether the cause is in SCIO. If it is not (the product, the machine, a "
         "provider, the login), answer `not_scio` with the evidence in `note`, and change "
         "nothing: no commit, no push, no PR.",
-        f"3. Otherwise follow CLAUDE.md. Take issue #{issue} up with a ledger entry in "
-        "`docs/ISSUE_LEDGER.md` (the root cause, the fix, the sweep with its grep, the "
-        "status). Fix the root cause. Sweep the whole codebase for the same construct. Add "
-        "a regression test and show it fails on the old code. Add an Always/Never "
-        "guardrail with a guard that runs. Run `uv run python scripts/gate.py` until it "
+        f"3. Otherwise follow CLAUDE.md. Take issue #{issue} up with a ledger entry, its "
+        "own new file `docs/ledger/I-NNN.md`: `uv run python scripts/ledger_new.py --title "
+        '"<short title>" --where "<file, command or step>"` writes it with the next free id '
+        "and prints the id. Fill in its fields (the root cause, the fix, the sweep with its "
+        "grep, the guard) and close its status line. Never write an entry into "
+        "`docs/ISSUE_LEDGER.md`: the docs check fails on one there. Fix the root cause. "
+        "Sweep the whole codebase for the same construct. Add a regression test and show it "
+        "fails on the old code. Add an Always/Never guardrail with a guard that runs, as its "
+        "own new file `docs/guardrails/NNN.md` (the next number from "
+        "`uv run python scripts/next_ids.py`). Run `uv run python scripts/gate.py` until it "
         f"passes. Commit, push `{branch}`, and open a draft PR whose body says "
         f"`Closes #{issue}`.",
         f"4. Never touch live-wt (`{live_wt}`), the product (`{product}`), the "
@@ -303,8 +317,8 @@ def render_brief(
         "",
         "The supervisor does not trust your answer (guardrail 60). It checks that the PR "
         f"exists with head branch `{branch}` and `Closes #{issue}`; that CI is green on its "
-        "head's full SHA; that its diff changes a file under `tests/` and "
-        "`docs/ISSUE_LEDGER.md`; and that live-wt, the product and the workspace databases "
+        "head's full SHA; that its diff changes a file under `tests/` and adds a ledger "
+        "entry, `docs/ledger/I-NNN.md`; and that live-wt, the product and the workspace databases "
         "are unchanged. A claim that fails a check counts as a failed attempt. You do not "
         "need to wait for CI to finish; the supervisor reads it later.",
         "",

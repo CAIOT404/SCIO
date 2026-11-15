@@ -1,0 +1,1 @@
+`scripts/gate.py` refuses to start in an environment that lacks a distribution CI installs (an optional extra or the `dev` group) and prints the `uv sync` to run. A fresh worktree's first `uv run` installs the default groups only, so its gate used to fail mypy on imports nobody changed (I-205).
