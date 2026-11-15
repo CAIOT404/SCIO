@@ -67,7 +67,7 @@ SCIO's checkpoint, effect log and `progress.json` are not duplicated.
   - run id, workspace, argv, and the working directory;
   - the environment's variable names, plus values only for an allowlist (`SCIO_*` without secrets, `UV_SYSTEM_CERTS`);
   - the SCIO SHA (live-wt's HEAD);
-  - the product directory, its branch and HEAD, and the build thread (read from `progress.json` and the CLI's `thread` line);
+  - the product directory, its branch and HEAD, and the thread SCIO ran (issue #123). `progress.json`'s `build_thread` names the thread that recorded the last finished milestone, and SCIO's CLI may run another one (I-163). So it is only a provisional value while the run is live. When the run ends, and when a tick finds it orphaned, the thread is read again in this order: SCIO's outcome file, then the last `thread <id> phase=` line SCIO printed, then the newest cost ledger (`.scio/ledger/<thread>[-p<n>-a<n>].jsonl`) written since the run started, then `progress.json`. The record's `build_thread_source` (`outcome`, `stdout`, `ledger` or `progress`) says which one gave it. SCIO prints its thread line only when a run ends, so the ledger is what names the thread of a build killed as hung;
   - PID and creation time, start time, last progress time, end time and exit code;
   - the paths of the output files.
 - **Snapshot on a failure, before anything else:**

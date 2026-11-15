@@ -5,6 +5,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 ### Changed
+- Recovery supervisor fixes (issues #123, #126 and #130):
+  - It records the build thread SCIO actually ran: from the outcome file, then SCIO's output, then the ledger the run wrote, then `progress.json`. `build_thread_source` says which. Before, it took `progress.json`'s thread, the last finished milestone's.
+  - A used-up Claude usage window ("You've hit your 5-hour limit · resets …") is transient, never a repair, and the supervisor waits until the named reset time before it replays.
 - The gate is quick by default (issue #122, W-11 to W-19):
   - It runs lint, types, the tests of the paths changed since the last pass, the evals only when code changed, and the docs check. A Markdown-only change runs only the docs steps. `--full` runs what CI runs.
   - A pass stamps its tree in `.scio/gate/last-pass.json`, and a tree that already passed is not gated again. A leftover `RUNNING` marker shows a gate that died. One gate runs at a time on the machine.

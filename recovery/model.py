@@ -96,6 +96,10 @@ class IncidentState(enum.StrEnum):
 TERMINAL: frozenset[IncidentState] = frozenset({IncidentState.CLOSED, IncidentState.ESCALATED})
 
 
+ThreadSource = Literal["progress", "outcome", "stdout", "ledger"]
+"""Where a run record's ``build_thread`` was read (issue #123)."""
+
+
 class RunStatus(enum.StrEnum):
     RUNNING = "running"
     EXITED = "exited"
@@ -138,6 +142,17 @@ class RunRecord:
     scio_sha: str = ""
     product_dir: str = ""
     build_thread: str = ""
+    """The thread SCIO ran (issue #123). Until the run ends it is ``progress.json``'s
+    ``build_thread``, a provisional guess: that is the thread that recorded the last finished
+    milestone, and SCIO's CLI may run another one (I-163). When the run ends it is read
+    again: from SCIO's outcome file, else from the last ``build thread <id> phase=`` line
+    SCIO printed, else from the newest cost ledger the run wrote, else from
+    ``progress.json``. A ``new``, ``run`` or ``resume`` run records the product or task
+    thread its outcome file names."""
+    build_thread_source: ThreadSource = "progress"
+    """Where ``build_thread`` was read: ``progress`` (the provisional value, or the last
+    fallback), ``outcome``, ``stdout`` or ``ledger``. A record saved before the field
+    existed reads as ``progress``, which is where its thread came from."""
     pid: int = 0
     pid_created: float = 0.0
     supervisor_pid: int = 0
