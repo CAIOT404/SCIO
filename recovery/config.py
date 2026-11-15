@@ -5,7 +5,7 @@ graphcalc, ``graphcalc-run/``)::
 
     launcher = ["sh", "scio.sh"]
     scio_repo = "C:/Users/me/projects/SCIO"
-    scio_gh_repo = "NewMe505/SCIO"
+    scio_gh_repo = "CAIOT404/SCIO"
     # live_wt defaults to "<scio_repo>/.scio/live-wt"
     # claude_bin defaults to "claude"
 
