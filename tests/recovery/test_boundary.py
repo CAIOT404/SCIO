@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "recovery"
 
@@ -34,6 +36,7 @@ def test_the_scan_flags_scio_and_third_party_imports() -> None:
     assert foreign_imports(src) == ["pydantic", "scio.cli"]
 
 
+@pytest.mark.scan
 def test_the_supervisor_imports_only_the_standard_library_and_itself() -> None:
     found = {
         str(path.relative_to(ROOT)): bad

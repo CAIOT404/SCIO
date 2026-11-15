@@ -8,6 +8,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 from scio.settings import REPO_ROOT
 
 NODE_MODULES = [
@@ -52,6 +54,7 @@ def unguarded_model_calls(path: Path) -> list[int]:
     return lines
 
 
+@pytest.mark.scan
 def test_every_model_call_in_a_node_is_inside_a_budget_guard() -> None:
     offenders = [
         f"{path.relative_to(REPO_ROOT).as_posix()}:{line}"

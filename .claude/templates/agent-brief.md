@@ -90,6 +90,7 @@ Run these before you report, and paste the counts:
 ```
 export UV_SYSTEM_CERTS=1 SCIO_PROVIDER_OVERRIDE=fake
 uv run ruff check . && uv run ruff format --check . && uv run python -m mypy && uv run python -m pytest -q -n 4 {{test_files}}
+uv run python -m pytest -q -n 4 -m scan  # the codebase scans: a change anywhere can break them (I-234)
 ```
 
 ## Report

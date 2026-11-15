@@ -54,6 +54,7 @@ For the next one or two graphcalc milestones, add no new workflow item unless it
 - Write files with LF line endings (`newline="\n"` in Python on Windows). Any text with a backslash (Windows paths, regexes, escapes) is written with the file tools, never through a shell-embedded script. Behind a corporate proxy, set `UV_SYSTEM_CERTS=1` for every `uv` command (`--native-tls` and `UV_NATIVE_TLS` are deprecated spellings).
 - Parallel sessions follow the orchestration rules below. That is about how AI sessions build SCIO; the framework's own runtime keeps one writer per product (ARCHITECTURE.md), which these rules do not change.
 - Tests, lint and types are ground truth. Do not weaken a check to make it pass; fix the code or record a ledger entry explaining the exception.
+- An agent's checks also run `uv run python -m pytest -q -n 4 -m scan`: the tests that scan the whole codebase for a forbidden construct, which a change anywhere can break (I-234). The orchestrator's gate stays the backstop for tests that pin behaviour across modules.
 
 ## Existing Codebase Parallel Orchestration Rules (15-Agent Pool)
 
