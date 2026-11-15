@@ -333,7 +333,7 @@ The contract the gate writes, and the hook, `land.py` and `session_state.py` rea
   - Only after W-37 is in: the ruleset requires the merge queue.
   - Under the queue, the human act becomes the enqueue. The CLAUDE.md merge rule, guardrail 8's `mergedAt` step and the handoff's "never `--auto`" are updated to match.
 - PR: last
-- Evidence: `manual:the ruleset is a GitHub setting`, `grep:CLAUDE.md:merge queue`
+- Dropped: GitHub offers merge queues only to organization-owned repositories, and NewMe505/SCIO is owned by a user account. The ruleset API refused the rule with a 422 (I-227). The owner picked "Drop W-44" on 2026-11-15. The fragments (W-38 to W-43) removed the conflicts the queue was meant to absorb, and `scripts/land.py` keeps its local queue.
 
 ### W-45 · graphcalc files its SCIO proposals as issues
 - From: teardown 2, Automate 9 (the owner relayed two pastes between sessions this session).

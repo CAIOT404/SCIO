@@ -1,0 +1,1 @@
+Workflow v2 is complete (issue #122): every item of `docs/WORKFLOW_V2.md` is closed. W-44, the merge queue, is dropped, because GitHub offers merge queues only to organization-owned repositories (I-227). `.claude/templates/research-brief.md` now asks first whether this repository can have a feature at all (guardrail 100).

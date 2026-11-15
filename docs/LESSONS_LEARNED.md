@@ -744,3 +744,40 @@ On the final commit `dda626f` all three pass, one trial each, run in parallel: $
 - **Improvements:**
   1. Move the ledger resolver into `scripts/` with a test, so a merge's ledger conflict is one command.
   2. Fix I-195, so the next repair session's cost and length are read from its transcript.
+
+## Workflow v2 (2026-11-14 to 11-15, issue #122, PRs #125, #127, #128, #131, #132, #135, #138 and the W-44 PR)
+
+The owner asked for every change from the workflow teardown, tracked in a checklist that every session reads until all of it is in. From the approval (21:12 UTC) to the last item took about 5.5 hours, with one stop for a used-up usage window. The checklist's 45 items: 43 done, W-42 superseded by the fragments, and W-44 dropped on the owner's word.
+
+### What succeeded
+- **The checklist computed itself.** `scripts/workflow_status.py` derived every status from evidence in the tree, and no PR edited the checklist to record progress, so it never conflicted. The `SessionStart` hook showed the open items in every session, including after a context compaction.
+- **Agents ran in parallel worktrees, each from a brief.** `scripts/brief.py` filled the brief, and each agent's report went to `.scio/agents/` (W-34). The PR bodies and ledger entries were built from those reports.
+- **The fragments removed the shared-file conflicts.** From #138 on, a ledger entry, a rule or a change note is its own file. The migration moved 217 entries, 93 rules and 14 changes byte for byte, and a rerun writes nothing.
+- **Gate v2.** The gate is quick by default, stamps the tree it passed, and is enforced by the push hook. `--full` ran where it had to: the fragments PR's full gate took 8.2 minutes, with 1297 passed and evals pass^5 1.00.
+
+### What failed
+- **Rewording CLAUDE.md broke a test** that finds the gate line by its words (I-218).
+- **Browser tests timed out** beside the unit tests' workers once CI was sharded (I-224).
+- **A push was rejected** because a GitHub update-branch commit had not been fetched (I-225).
+- **An Edit landed in the main checkout** instead of the worktree (I-226).
+- **W-44 was planned for a feature this repository cannot have.** GitHub offers merge queues only to organization-owned repositories (I-227).
+- **Inline scripts with backslashes** were refused 4 times by the hook (`hook-refusals.log`: backslash 2, double-backslash 2), and one push was refused for want of a gate stamp (push-gate 1).
+
+### Actions
+- `docs/WORKFLOW_V2.md`, `scripts/workflow_status.py` and the `SessionStart` and `Stop` hooks (#125).
+- CI shards and the evals gate (#127, #135). The dev helpers and the agent brief and report templates (#128). `session_state`, `next_ids`, `land` and `move_live_wt` (#131). Gate v2 and its stamp (#132).
+- The fragments, `ledger_new.py` and `migrate_fragments.py` (#138).
+- `scripts/hooks/worktree_guard.py` (I-226, guardrail 99). `.claude/templates/research-brief.md` (I-227, guardrail 100).
+- Guardrails 85 to 100. I-217 and I-223 stay open.
+
+### Bottleneck audit
+- **Slowest steps:**
+  - The full gate: 8.2 minutes.
+  - CI: about 10 minutes a run.
+  - #128 waited about 2 hours from open to merge, across the stop for the usage window.
+  - Every other #122 PR merged 5 to 20 minutes after it opened.
+- **Serial work that could have run in parallel:** each merge still forces the next PR through an update-branch and a new CI run, because the ruleset requires an up-to-date branch. Without a merge queue (I-227), `land.py --next` is what overlaps one PR's gate with the previous one's CI.
+- **Repeated friction:** before the fragments, every PR conflicted on the ledger, LESSONS and CHANGELOG, and `merge_ids.py` was run by hand at each merge. From #138 on, a PR adds files instead.
+- **Improvements:**
+  1. Land every queued PR with `scripts/land.py N --next`, so the next gate runs during this PR's CI.
+  2. Close I-223: the provider raises a used-up usage window as its own error. The supervisor then reads it from the error's type, not from its wording.
