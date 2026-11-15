@@ -10,10 +10,10 @@ A model-agnostic, multi-agent framework built on LangGraph that turns a prompt i
 > - `scio new` and `scio build` have bootstrapped and built live products on the Claude Code backend: `todo_tags`, `bookmarks_api` (Python) and `notes_service` (TypeScript).
 >
 > **New in 0.10.0:**
-> - [`python -m recovery`](docs/RECOVERY.md), the external recovery supervisor ([PR #96](https://github.com/NewMe505/SCIO/pull/96)). It catches SCIO's own harness failures from outside SCIO and has Claude repair SCIO in a tested PR. After the owner's merge, it resumes the interrupted build from its checkpoint.
-> - The live drill passed ([issue #95](https://github.com/NewMe505/SCIO/issues/95)):
+> - [`python -m recovery`](docs/RECOVERY.md), the external recovery supervisor ([PR #96](https://github.com/CAIOT404/SCIO/pull/96)). It catches SCIO's own harness failures from outside SCIO and has Claude repair SCIO in a tested PR. After the owner's merge, it resumes the interrupted build from its checkpoint.
+> - The live drill passed ([issue #95](https://github.com/CAIOT404/SCIO/issues/95)):
 >   - A real defect (I-180, a hung `claude` call) crashed a live build after its first milestone.
->   - The supervisor opened [#105](https://github.com/NewMe505/SCIO/issues/105), and a repair session fixed SCIO in [PR #110](https://github.com/NewMe505/SCIO/pull/110).
+>   - The supervisor opened [#105](https://github.com/CAIOT404/SCIO/issues/105), and a repair session fixed SCIO in [PR #110](https://github.com/CAIOT404/SCIO/pull/110).
 >   - After the merge, the scheduled tick moved live-wt and replayed the build, unattended. The build went on to the next milestone, with no commit of the first one duplicated.
 > - `python -m recovery watch` follows an incident live, and `scio dashboard` shows the supervisor's incidents and stopped builds.
 > - Opt-in parallel features.
@@ -21,21 +21,21 @@ A model-agnostic, multi-agent framework built on LangGraph that turns a prompt i
 > - Faster gates, and push-gate hooks that run in every session.
 > - The graphcalc run's fixes.
 >
-> **In progress:** the `graphcalc` live product run, a TI-Nspire-style graphing calculator, which is next to run under the supervisor ([#98](https://github.com/NewMe505/SCIO/issues/98)).
+> **In progress:** the `graphcalc` live product run, a TI-Nspire-style graphing calculator, which is next to run under the supervisor ([#98](https://github.com/CAIOT404/SCIO/issues/98)).
 >
-> **Next:** see the [roadmap](#roadmap) and the [board](https://github.com/users/NewMe505/projects/1). Decision records are in [docs/adr/](docs/adr/), and the [milestones](https://github.com/NewMe505/SCIO/milestones) list on GitHub.
+> **Next:** see the [roadmap](#roadmap) and the [board](https://github.com/users/NewMe505/projects/1). Decision records are in [docs/adr/](docs/adr/), and the [milestones](https://github.com/CAIOT404/SCIO/milestones) list on GitHub.
 
 ## Product Mode in one paragraph
 A product orchestrator sits above the proven task graph. It interviews you (two to four Opus questions), writes a normalised `PRODUCT.md`, picks a toolchain profile, and bootstraps a repository with CI and a walking skeleton. Then, milestone by milestone, it decomposes work into GitHub issues, runs each feature through the task graph with the tier pinned, verifies the integrated result against a fixed quality bar (tests with a coverage floor, lint, types, build, smoke and e2e against the running app, dependency audit, secret scan, working README instructions), and opens one milestone PR for a human to merge. Any failing check overrides any model verdict. There is one writer, so a product builds serially; there is no product-level dollar cap by default, but per-feature tier caps, stall caps and iteration caps remain as runaway guards, and cost is reported at every approval stop.
 
 | Milestone | Deliverable | Done when |
 |---|---|---|
-| [M6 Foundations](https://github.com/NewMe505/SCIO/milestone/1) (done, [ADR 0009](docs/adr/0009-toolchain-profiles.md)) | Toolchain profiles behind one protocol; `--tier` pins the route; declared settings read | regression pass^5 = 1.00, live t001 unchanged, no Python command outside the profile |
-| [M7 Greenfield bootstrap](https://github.com/NewMe505/SCIO/milestone/2) (done, [ADR 0010](docs/adr/0010-product-graph-and-bootstrap.md)) | `scio new`: interview, `PRODUCT.md`, scaffold, git init, CI, walking skeleton | an empty directory becomes a repo with green CI and a smoke test, Fake and live |
-| [M8 Decompose + milestone loop](https://github.com/NewMe505/SCIO/milestone/3) (done, [ADR 0011](docs/adr/0011-milestone-loop.md)) | progress file, GitHub milestones and issues, features in sequence, integration verify, milestone PR, resume | a two-milestone Fake product survives crash and resume; one live milestone (`todo_tags`) |
-| [M9 Dependencies + runtime](https://github.com/NewMe505/SCIO/milestone/4) (done, [ADR 0013](docs/adr/0013-product-runtime.md)) | product environment and install phase, `install_deps` / `run_app` / `delete_file`, quality bar, acceptance against the started app, Docker default with an egress-proxy allowlist | a product with a third-party dependency and an HTTP server passes black-box e2e: Fake `todo_api` and live `bookmarks_api` |
-| [M10 Second stack](https://github.com/NewMe505/SCIO/milestone/5) (done, [ADR 0014](docs/adr/0014-second-stack-node-ts.md), [PR #52](https://github.com/NewMe505/SCIO/pull/52)) | `node-ts` profile, stack detection, stack-neutral acceptance | the same spec builds in Python and TypeScript: `todo_api` on the Fake in both stacks; live `notes_service` (TypeScript, zod) M1 merged |
-| [M11 Product-ready + evals](https://github.com/NewMe505/SCIO/milestone/6) (done, [ADR 0015](docs/adr/0015-product-ready-release-and-product-evals.md), [PR #56](https://github.com/NewMe505/SCIO/pull/56)) | honest coverage floor checked in every feature, secret scan, release files, README run check, Dockerfiles, release gate (tag, artifact, GitHub Release); `scio new --spec`; p001 CLI, p002 REST API, p003 web app | p001 to p003 pass live on one commit, graded by hidden black-box tests (p003 in a real browser): $11.63 estimated, nothing billed; rows in [EVAL_HISTORY](docs/EVAL_HISTORY.md) |
+| [M6 Foundations](https://github.com/CAIOT404/SCIO/milestone/1) (done, [ADR 0009](docs/adr/0009-toolchain-profiles.md)) | Toolchain profiles behind one protocol; `--tier` pins the route; declared settings read | regression pass^5 = 1.00, live t001 unchanged, no Python command outside the profile |
+| [M7 Greenfield bootstrap](https://github.com/CAIOT404/SCIO/milestone/2) (done, [ADR 0010](docs/adr/0010-product-graph-and-bootstrap.md)) | `scio new`: interview, `PRODUCT.md`, scaffold, git init, CI, walking skeleton | an empty directory becomes a repo with green CI and a smoke test, Fake and live |
+| [M8 Decompose + milestone loop](https://github.com/CAIOT404/SCIO/milestone/3) (done, [ADR 0011](docs/adr/0011-milestone-loop.md)) | progress file, GitHub milestones and issues, features in sequence, integration verify, milestone PR, resume | a two-milestone Fake product survives crash and resume; one live milestone (`todo_tags`) |
+| [M9 Dependencies + runtime](https://github.com/CAIOT404/SCIO/milestone/4) (done, [ADR 0013](docs/adr/0013-product-runtime.md)) | product environment and install phase, `install_deps` / `run_app` / `delete_file`, quality bar, acceptance against the started app, Docker default with an egress-proxy allowlist | a product with a third-party dependency and an HTTP server passes black-box e2e: Fake `todo_api` and live `bookmarks_api` |
+| [M10 Second stack](https://github.com/CAIOT404/SCIO/milestone/5) (done, [ADR 0014](docs/adr/0014-second-stack-node-ts.md), [PR #52](https://github.com/CAIOT404/SCIO/pull/52)) | `node-ts` profile, stack detection, stack-neutral acceptance | the same spec builds in Python and TypeScript: `todo_api` on the Fake in both stacks; live `notes_service` (TypeScript, zod) M1 merged |
+| [M11 Product-ready + evals](https://github.com/CAIOT404/SCIO/milestone/6) (done, [ADR 0015](docs/adr/0015-product-ready-release-and-product-evals.md), [PR #56](https://github.com/CAIOT404/SCIO/pull/56)) | honest coverage floor checked in every feature, secret scan, release files, README run check, Dockerfiles, release gate (tag, artifact, GitHub Release); `scio new --spec`; p001 CLI, p002 REST API, p003 web app | p001 to p003 pass live on one commit, graded by hidden black-box tests (p003 in a real browser): $11.63 estimated, nothing billed; rows in [EVAL_HISTORY](docs/EVAL_HISTORY.md) |
 
 ## Task mode in one paragraph
 A cheap router classifies each task into an effort tier (T0, T1 or T2). **Opus 5.5** plans, advises and checks that the objective was met before finishing. **Sonnet 5** does the work: coding, testing, debugging and documentation. Only one agent writes code. Parallel fan-out is used only for read-only exploration and review. Tests, linters and type checks decide pass/fail, not LLM opinion. Sonnet escalates to Opus only on specific signals (repeated errors, stalls, low confidence, plan drift, high-impact changes), with a cap on how often. Every run produces a GitHub PR, and the docs are updated in that same PR.
@@ -97,7 +97,7 @@ milestone and one issue per feature (or `.scio/product/issues/` offline), and ea
 the task graph on its own checkpoint thread on branch `milestone/<n>`. After the last feature the
 profile's full suite and lint run on the branch, an Opus milestone gate gives a verdict that any failing
 check overrides, and one milestone PR waits for you. A crash at any point resumes without a duplicated
-issue, commit or PR; a feature that halts stops for one decision (`retry`, `skip`, or stop).
+issue, commit or PR; a feature that halts stops for one decision (`retry`, `skip`, or stop); `retry: <answer>` carries the owner's answer into the next attempt's task, with the question it answers (#137).
 `skip` defers the feature to the next milestone; the release waits until every feature in `PRODUCT.md`
 is done, so a feature leaves the product only when you remove it from `PRODUCT.md`.
 Every feature's verify also holds it to the product's coverage floor (`SCIO_COVERAGE_FLOOR`, 80% of
@@ -264,31 +264,31 @@ Product Mode ([docs/PRODUCT_MODE.md](docs/PRODUCT_MODE.md), ADR 0007; tracked on
 - M11 (done, 0.7.0): product-ready quality bar, release gate, product eval suite p001 to p003 passing live (ADR 0015)
 - post-M11 (done, 0.8.0): squash-safe `--gh` merges, a release PR, `scio upgrade`, Node in the Docker sandbox, `run_app` in a container, parallel CI tests (ADR 0016)
 - dashboard (done, 0.9.0): `scio dashboard`, a live read-only view of every thread across workspaces (ADR 0017)
-- parallel features (done, 0.10.0, [issue #82](https://github.com/NewMe505/SCIO/issues/82)): opt-in `SCIO_PARALLEL_FEATURES`, independent features in worktrees, merged and rechecked by one integrator (ADR 0018)
+- parallel features (done, 0.10.0, [issue #82](https://github.com/CAIOT404/SCIO/issues/82)): opt-in `SCIO_PARALLEL_FEATURES`, independent features in worktrees, merged and rechecked by one integrator (ADR 0018)
 - the graphcalc live run's fixes (done, 0.10.0): S6 to S11 (issues #75, #77, #79, #84), Claude Code sessions in `--safe-mode` (#87), faster gates with evals beside tests (#88), and push-gate hooks that follow Git Bash paths and run in every session (#91, #93)
 
-Self-healing ([ADR 0019](docs/adr/0019-external-recovery-supervisor.md), [docs/RECOVERY.md](docs/RECOVERY.md), milestone [Self-healing supervisor](https://github.com/NewMe505/SCIO/milestone/7)):
-- the external recovery supervisor (done, 0.10.0, [PR #96](https://github.com/NewMe505/SCIO/pull/96)). `python -m recovery` is the parent of `scio build`, uses the standard library only, and never imports `scio`. When the build fails on a SCIO harness fault, it backs up the workspace's state and opens a `recovery` issue. A headless Claude Code session then repairs SCIO in a tested PR, its claims are checked on GitHub, and the supervisor waits for the owner's merge. After the merge it moves live-wt, health-checks the halted thread and replays the original command. An offline end-to-end test covers the loop with real processes and real git.
-- `python -m recovery watch` (done, 0.10.0, [PR #108](https://github.com/NewMe505/SCIO/pull/108)): one incident's state, timeline and repair session, live.
-- the dashboard's recovery view (done, 0.10.0, [PR #112](https://github.com/NewMe505/SCIO/pull/112)): incidents linked to their threads, and stopped supervised builds.
-- the live drill (done, 0.10.0, [issue #95](https://github.com/NewMe505/SCIO/issues/95)):
+Self-healing ([ADR 0019](docs/adr/0019-external-recovery-supervisor.md), [docs/RECOVERY.md](docs/RECOVERY.md), milestone [Self-healing supervisor](https://github.com/CAIOT404/SCIO/milestone/7)):
+- the external recovery supervisor (done, 0.10.0, [PR #96](https://github.com/CAIOT404/SCIO/pull/96)). `python -m recovery` is the parent of `scio build`, uses the standard library only, and never imports `scio`. When the build fails on a SCIO harness fault, it backs up the workspace's state and opens a `recovery` issue. A headless Claude Code session then repairs SCIO in a tested PR, its claims are checked on GitHub, and the supervisor waits for the owner's merge. After the merge it moves live-wt, health-checks the halted thread and replays the original command. An offline end-to-end test covers the loop with real processes and real git.
+- `python -m recovery watch` (done, 0.10.0, [PR #108](https://github.com/CAIOT404/SCIO/pull/108)): one incident's state, timeline and repair session, live.
+- the dashboard's recovery view (done, 0.10.0, [PR #112](https://github.com/CAIOT404/SCIO/pull/112)): incidents linked to their threads, and stopped supervised builds.
+- the live drill (done, 0.10.0, [issue #95](https://github.com/CAIOT404/SCIO/issues/95)):
   - A real SCIO defect (I-180, a hung `claude` call that ended a build with a traceback) crashed a live build after its first milestone merged.
-  - The supervisor opened [issue #105](https://github.com/NewMe505/SCIO/issues/105), and a repair session fixed SCIO in [PR #110](https://github.com/NewMe505/SCIO/pull/110).
+  - The supervisor opened [issue #105](https://github.com/CAIOT404/SCIO/issues/105), and a repair session fixed SCIO in [PR #110](https://github.com/CAIOT404/SCIO/pull/110).
   - After the owner's merge, the scheduled tick moved live-wt, ran the health check and replayed the build, unattended.
   - The build planned and built the next milestone, and the first milestone's commits appear once.
 
 In progress:
-- **The graphcalc live product run** (a TI-Nspire-style graphing calculator, [issue #63](https://github.com/NewMe505/SCIO/issues/63) for its retrospective), paused at M3 since 2026-11-05.
+- **The graphcalc live product run** (a TI-Nspire-style graphing calculator, [issue #63](https://github.com/CAIOT404/SCIO/issues/63) for its retrospective), paused at M3 since 2026-11-05.
 
 Proposed next (each one on the [board](https://github.com/users/NewMe505/projects/1)):
-- run graphcalc under the supervisor ([#98](https://github.com/NewMe505/SCIO/issues/98); the tick is registered, and graphcalc's M3 runs supervised since 2026-11-14)
-- on the Claude subscription the budget is a metric, never a stop ([#115](https://github.com/NewMe505/SCIO/issues/115), done, on `main` for the next release)
-- a capped worker session that edited nothing escalates cheapest step first: resume it, carry its findings, twice the turns once, then halt as before ([#116](https://github.com/NewMe505/SCIO/issues/116), done, on `main`; a tier change mid-feature stays a possible later step)
-- Workflow v2: every change from the 2026-11-14 workflow teardown, tracked item by item in [docs/WORKFLOW_V2.md](docs/WORKFLOW_V2.md), whose status is computed from the code ([#122](https://github.com/NewMe505/SCIO/issues/122))
-- keep verified work across a retry ([#119](https://github.com/NewMe505/SCIO/issues/119)), give a bug-fix feature's brief its bug issue ([#120](https://github.com/NewMe505/SCIO/issues/120)), and ground a feature's plan in the repository ([#121](https://github.com/NewMe505/SCIO/issues/121)), from graphcalc's P26
-- guard every orchestrator node's harness errors, I-182 ([#99](https://github.com/NewMe505/SCIO/issues/99))
-- move the nightly live suite to the Claude Code backend, or retire it, I-181 ([#101](https://github.com/NewMe505/SCIO/issues/101))
-- the dashboard's last two follow-ups: Claude Code spans (I-122) and the thread id in telemetry (I-123) ([#102](https://github.com/NewMe505/SCIO/issues/102))
-- a credential pre-flight before live product commands ([#103](https://github.com/NewMe505/SCIO/issues/103))
-- close the oldest open ledger entries, I-145, I-159 and I-170 ([#104](https://github.com/NewMe505/SCIO/issues/104))
+- run graphcalc under the supervisor ([#98](https://github.com/CAIOT404/SCIO/issues/98); the tick is registered, and graphcalc's M3 runs supervised since 2026-11-14)
+- on the Claude subscription the budget is a metric, never a stop ([#115](https://github.com/CAIOT404/SCIO/issues/115), done, on `main` for the next release)
+- a capped worker session that edited nothing escalates cheapest step first: resume it, carry its findings, twice the turns once, then halt as before ([#116](https://github.com/CAIOT404/SCIO/issues/116), done, on `main`; a tier change mid-feature stays a possible later step)
+- Workflow v2: every change from the 2026-11-14 workflow teardown, tracked item by item in [docs/WORKFLOW_V2.md](docs/WORKFLOW_V2.md), whose status is computed from the code ([#122](https://github.com/CAIOT404/SCIO/issues/122))
+- keep verified work across a retry ([#119](https://github.com/CAIOT404/SCIO/issues/119)), give a bug-fix feature's brief its bug issue ([#120](https://github.com/CAIOT404/SCIO/issues/120)), and ground a feature's plan in the repository ([#121](https://github.com/CAIOT404/SCIO/issues/121)), from graphcalc's P26
+- guard every orchestrator node's harness errors, I-182 ([#99](https://github.com/CAIOT404/SCIO/issues/99))
+- move the nightly live suite to the Claude Code backend, or retire it, I-181 ([#101](https://github.com/CAIOT404/SCIO/issues/101))
+- the dashboard's last two follow-ups: Claude Code spans (I-122) and the thread id in telemetry (I-123) ([#102](https://github.com/CAIOT404/SCIO/issues/102))
+- a credential pre-flight before live product commands ([#103](https://github.com/CAIOT404/SCIO/issues/103))
+- close the oldest open ledger entries, I-145, I-159 and I-170 ([#104](https://github.com/CAIOT404/SCIO/issues/104))
 - read a repair session's turns and time from its transcript, I-195

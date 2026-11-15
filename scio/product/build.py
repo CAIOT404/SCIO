@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Callable
+import string
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
@@ -47,6 +48,7 @@ from scio.loop.exits import LoopLimits
 from scio.product.acceptance import run_acceptance
 from scio.product.bug_context import feature_bug_brief
 from scio.product.parallel import (
+    drop_misplaced_worktrees,
     ensure_worktree,
     in_worktree,
     merge_feature,
@@ -104,6 +106,11 @@ STOP_ANSWERS = ("stop", "abort", "no", "halt")
 RECHECK_ANSWERS = ("recheck",)
 """At a merge stop with GitHub: push the branch's new commits (a ``scio upgrade`` made at the
 stop) and read the PR's CI again (I-141)."""
+DESIGN_QUESTION = "design decision needed:"
+"""How the coder's ledger line names its design question (``scio/graph/nodes/worker.py``):
+the question a feature stop carries into the retried attempt's task (issue #137)."""
+ANSWERS_HEADING = "## The owner's answers to earlier attempts' questions"
+"""The section of a feature task that holds the owner's ``retry: <answer>`` replies (#137)."""
 
 
 @dataclass
@@ -407,12 +414,17 @@ def feature_task(
     *,
     repo_dir: str = ".",
     linked_issues: str | None = None,
+    answers: Sequence[tuple[int, str, str]] = (),
 ) -> TaskSpec:
     """The typed handoff from the product graph to a task subgraph.
 
     ``linked_issues`` is the bug issue a bug-fix feature links (its symptom, root cause and
     audit), framed as the operator's unverified report (:mod:`scio.product.bug_context`,
     issue #120). The planner and every worker brief read it through the task's description.
+
+    ``answers`` are the owner's answers to the questions earlier attempts of this feature
+    stopped with, ``(attempt, question, answer)`` oldest first (:func:`owner_answers`,
+    issue #137). Without any, the description is what it was before #137, byte for byte.
     """
     f = _feature(spec, feat.id)
     ids = ", ".join(plan.feature_ids())
@@ -434,6 +446,11 @@ def feature_task(
     ]
     if linked_issues:  # issue #120
         desc += ["", "## Linked bug issue (the operator's report, not verified)", linked_issues]
+    if answers:  # issue #137
+        desc += ["", ANSWERS_HEADING]
+        for i, (attempt, question, answer) in enumerate(answers):
+            desc += [""] if i else []
+            desc += [f"Attempt {attempt}", f"Question: {question}", f"Answer: {answer}"]
     return TaskSpec(
         title=f"{f.id}: {f.description}",
         description="\n".join(desc),
@@ -542,6 +559,58 @@ def retried_runs(state: ProductBuildState, feature_id: str, milestone: str) -> l
             break
         out.append(run)
     return out
+
+
+# ---------- the owner's answer reaches the retried attempt (issue #137) ----------
+
+
+ANSWER_SEPARATORS = string.whitespace + ":-,"
+"""What may follow ``retry`` for the rest of the reply to be the owner's answer (#137)."""
+
+
+def retry_answer(reply: str) -> str | None:
+    """The owner's answer in a ``retry`` reply: the text after the keyword, without its
+    leading ``:``, ``-``, ``,`` and whitespace, in the owner's case. None for a plain
+    ``retry``, and when the keyword runs on into a word (``retrying please``): that reply is
+    still a retry, as before, with no answer. The caller has matched the keyword,
+    case-insensitively."""
+    rest = reply.strip()[len("retry") :]
+    if rest and rest[0] not in ANSWER_SEPARATORS:
+        return None
+    return rest.lstrip(ANSWER_SEPARATORS) or None
+
+
+def stop_question(final: SCIOState, feature_id: str, reason: str, attempt: int) -> str:
+    """The question an attempt stopped with, as the owner saw it at the stop. First the
+    worker's own ``design_question``: on T1/T2 the advisor gets it first, and no ledger line
+    names it. Then the coder's ``design decision needed: ...`` line (T0), which the stop
+    shows in its ``ledger_tail``; the task graph's own interrupt asks only "The run needs a
+    human decision.". The stop's own line, ``Feature <id> (<reason>, attempt <n>)``, when
+    the attempt asked nothing."""
+    worker = final.last_worker_output
+    if worker is not None and worker.design_question and worker.design_question.strip():
+        return worker.design_question.strip()
+    for entry in reversed(final.task_ledger):
+        if entry.text.startswith(DESIGN_QUESTION):
+            return entry.text
+    return f"Feature {feature_id} ({reason}, attempt {attempt})"
+
+
+def owner_answers(
+    state: ProductBuildState, feature_id: str, milestone: str
+) -> list[tuple[int, str, str]]:
+    """Every answer the owner gave after ``retry`` to an attempt of ``feature_id`` in
+    ``milestone``, oldest first, as ``(attempt, question, answer)``: the next attempt's task
+    carries them all (:func:`feature_task`). Unlike :func:`retried_runs`, a plain retry, a
+    harness failure or a stop in between does not end the list, since an answer stays true."""
+    return [
+        (run.attempt, run.question or "", run.answer)
+        for run in state.feature_runs
+        if run.feature_id == feature_id
+        and run.milestone == milestone
+        and run.decision == "retry"
+        and run.answer
+    ]
 
 
 def task_thread_state(
@@ -1144,9 +1213,11 @@ def feature(ctx: RunContext, saver: BaseCheckpointSaver | None) -> Node:
     The thread id is deterministic per attempt, so a crash mid-feature resumes the same
     subgraph; its ``merge_wait`` is answered by the orchestrator (the milestone PR is the
     human's stop); any other pause or a failed exit stops here for one human decision:
-    ``retry`` (a new attempt), ``skip``, or anything else to stop the build. ``skip`` defers
-    the feature: this milestone goes on without it, it stays open in ``progress.json`` and the
-    next milestone plans it again; only removing it from ``PRODUCT.md`` drops it (I-116).
+    ``retry`` (a new attempt; ``retry: <answer>`` carries the owner's answer, with the
+    question it answers, into its task, issue #137), ``skip``, or anything else to stop the
+    build. ``skip`` defers the feature: this milestone goes on without it, it stays open in
+    ``progress.json`` and the next milestone plans it again; only removing it from
+    ``PRODUCT.md`` drops it (I-116).
     """
 
     def node(state: ProductBuildState) -> dict[str, Any]:
@@ -1216,6 +1287,7 @@ def feature(ctx: RunContext, saver: BaseCheckpointSaver | None) -> Node:
                     state.issues.get(feat.id),
                     repo_dir=state.product_dir,
                     linked_issues=bug_text,
+                    answers=owner_answers(state, feat.id, plan.id),  # issue #137
                 )
                 # A retry keeps what the attempts before it committed after a passing verify:
                 # the uncommitted leftovers are gone, the verified commits are not (#119).
@@ -1316,16 +1388,23 @@ def _feature_decision(
 ) -> dict[str, Any]:
     """The one human decision on a feature that paused or exited without success:
     ``retry``, ``skip`` (I-116) or stop. ``before`` is the run list its record joins: the
-    state's, plus the runs a batch finished in the same node (ADR 0018)."""
+    state's, plus the runs a batch finished in the same node (ADR 0018). ``retry: <answer>``
+    records the answer with the question the attempt stopped with, and every later attempt
+    of the feature in this milestone reads both in its task (issue #137)."""
     final = outcome.state
     thread = fctx.thread_id
     reason = final.exit_reason.value if final.exit_reason else "paused"
+    # Read before the subgraph's interrupt is closed below. A node run that resumes this
+    # stop re-runs the paused attempt first, so a stop reached before #137 reads it too.
+    question = stop_question(final, feat.id, reason, attempt)
     answer = str(
         interrupt(
             {
                 # I-116: a skip defers, it never drops; the question says so plainly.
                 "question": f"Feature {feat.id} ({reason}, attempt {attempt}) needs a "
-                "decision: reply 'retry' to run it again; 'skip' to defer it: this "
+                "decision: reply 'retry' to run it again (add your answer after it, for "
+                "example 'retry: <your answer>', and the next attempt's task carries it "
+                "with the question this attempt stopped with); 'skip' to defer it: this "
                 "milestone goes on without it, it stays open and the next milestone plans "
                 "it again (the release waits for it; to drop it for good, remove it from "
                 "PRODUCT.md); anything else to stop the build.",
@@ -1335,7 +1414,7 @@ def _feature_decision(
                 "inner": outcome.interrupt,
                 "ledger_tail": [e.text for e in final.task_ledger[-5:]],
                 "cost_usd": total_usd(state),
-                "resume": _resume(ctx, "<retry|skip|stop>"),
+                "resume": _resume(ctx, "<retry[: your answer]|skip|stop>"),
             }
         )
     )
@@ -1345,10 +1424,12 @@ def _feature_decision(
     choice = answer.strip().lower()
     notes = [f"{feat.id} attempt {attempt}: human said {answer.strip()[:120]!r}"]
     if choice.startswith("retry"):
-        # Only a retry carries this attempt's verified commits into the next one (issue #119).
-        record = feature_run_from_state(run, final, status="failed").model_copy(
-            update={"decision": "retry"}
-        )
+        # Only a retry carries this attempt's verified commits into the next one (issue #119),
+        # and its answer, with the question it answers, into every later attempt (#137).
+        update: dict[str, Any] = {"decision": "retry"}
+        if said := retry_answer(answer):
+            update |= {"question": question, "answer": said}
+        record = feature_run_from_state(run, final, status="failed").model_copy(update=update)
         entries.append(decision(f"{feat.id} failed ({reason}); retrying", source=Role.HUMAN))
         return {
             "feature_runs": [*before, record],
@@ -1414,6 +1495,7 @@ def _run_batch(
     happened (I-164), so the node re-run that the answer starts repeats neither. Worktrees are
     removed only once the node returns."""
     prepare_shared_git(ctx)
+    misplaced = drop_misplaced_worktrees(ctx)  # `git clean -fd` keeps a nested worktree
 
     def clean_tree() -> None:  # the product tree: the milestone branch, nothing left over
         _git(ctx, "checkout", "-q", plan.branch)
@@ -1421,7 +1503,7 @@ def _run_batch(
         _git(ctx, "clean", "-fdq")
 
     carrying_product_md(ctx, clean_tree)  # a hand edit survives and is committed (I-109)
-    entries: list[Any] = []
+    entries: list[Any] = [fact(line) for line in misplaced]
     edit = commit_product_md_edit(ctx, plan, f"batch-{'-'.join(f.id for f in batch)}")
     if edit:
         entries.append(fact(f"hand edit of PRODUCT.md committed at {edit[:12]}"))
@@ -1471,6 +1553,7 @@ def _run_batch(
                     state.issues.get(job.feat.id),
                     repo_dir=str(job.tree),
                     linked_issues=briefs.get(job.feat.id),
+                    answers=owner_answers(state, job.feat.id, plan.id),  # issue #137
                 ).model_copy(update={"base_branch": base})  # a SHA: one branch, one worktree
                 outcome = run_graph(job.fctx, task, saver=saver)
             while outcome.paused and outcome.state.phase == "merge_wait":

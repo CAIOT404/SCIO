@@ -24,6 +24,7 @@ SCIO is a model-agnostic LangGraph framework that takes a software task from spe
 - Save each agent's final report to `.scio/agents/<issue>.md`; the PR body, the ledger entry and the review are built from that file, not from the conversation (W-34).
 - Start a session with `uv run python scripts/session_state.py`: the pinned checkouts, every worktree, the PRs, the live-run issues, the recovery incidents, the next ids and the open checklist items, in one command. Take ledger ids and guardrail numbers from it (or `scripts/next_ids.py`), never from memory. The `Stop` hook writes the same facts to `.scio/session-state.md` for the handoff (W-20, W-21, W-28).
 - Land a PR with `uv run python scripts/land.py N`: it retargets, updates, requires a gate stamp, watches CI by commit, marks the PR ready, and prints the merge command only for an approved PR. After the merge, run `land.py N --after-merge`. Move live-wt with `scripts/move_live_wt.py --when-idle`, never mid-build (W-22 to W-27).
+- The repository is `CAIOT404/SCIO`, owned by an organization so that `main` can require a merge queue (#141; the old `NewMe505/SCIO` path redirects). A branch need not be up to date with `main`. A green, approved PR is added to the queue, and the queue merges it after its own `merge_group` CI run. So confirm `mergedAt` in a later step, never in the same command. `gh pr merge` cannot do the adding here: it tries auto-merge, which this repository does not allow (I-233). Never `--admin`, which bypasses the queue.
 
 ## Engineering rules
 
