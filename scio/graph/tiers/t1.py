@@ -1,4 +1,4 @@
-"""T1 diagram: plan → localize → implement/verify/triage loop → review → document → gate."""
+"""T1 diagram: localize → plan → implement/verify/triage loop → review → document → gate."""
 
 from __future__ import annotations
 

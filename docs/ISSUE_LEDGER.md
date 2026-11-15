@@ -2025,3 +2025,53 @@ Template:
 - Sweep: none needed. The hook refuses every such command, so none got through.
 - Guard: guardrail 17 (`hook:push_gate`), which held. Its rule now cites this id too. Four recurrences confirm that the hook is the guard that works.
 - Resolved: 2026-11-14 · Status: resolved
+
+### I-213 · On T1 the planner planned blind and its guessed paths stayed in the plan
+- Found: 2026-11-14 · graphcalc P26 attempts 3 and 4, issue #121 (graphcalc's P26 retrospective, relayed by the owner) · `scio/graph/build.py` (the T1 edges), `scio/graph/nodes/planning.py`
+- Symptom: in both attempts the planner ran before the explorer (a3 planned at 18:47:16 and localized at 18:48:46; a4 at 19:49:29 and 19:51:28). It said so itself: "No exploration summaries were provided, so the file paths (graphcalc/evaluator.py, graphcalc/state.py) are guesses". `graphcalc/evaluator.py` does not exist; the evaluator is `graphcalc/calc.py`. `localize` then *appended* the explorer's files (`S1 += graphcalc/calc.py, …`), and the guesses stayed in the plan.
+- Root cause: on T1, `post_plan` routed to `localize` only after the first plan, so the planner never saw an exploration summary. Nothing checked a planned path against the tree.
+- Fix:
+  - T1 runs `localize` once before the first `plan` (`prepare_repo → localize → plan → post_plan → implement`), and the planner reads its summary through `summaries_text`, as T2's `explore` feeds `plan`. Replans (advise, the gate's I-043) return to `plan`, so `localize` still runs once.
+  - `ground_plan` (inside `keep_localized_files`, for every plan, replan and advisor revision on T1 and T2) handles each named path in order:
+    1. kept when it exists or is declared new in the new `PlanStep.files_new`;
+    2. replaced by its one localized match;
+    3. kept as a probable new file when its directory exists;
+    4. dropped only when neither holds.
+
+    Every choice is a ledger fact. A test filter that matches nothing is flagged, never dropped.
+  - Planner prompt v3; the ADR 0004 amendment.
+  - The orchestrator's review changed one rule: a drop when the directory exists would have made the coder's creating that file count as drift (the S8 pattern). graphcalc's guessed `state.py` was such a file, created by attempt 4.
+- Sweep: `grep -rn "files_expected\|explorer_summaries" scio evals` and `grep -rln localize .`. No hits in `recovery/`, `scripts/` or the product docs. Three tests in `test_t1_t2_fake.py` now expect the grounded list.
+- Guard: the 27 tests in `tests/unit/test_grounded_plan.py`. 24 of them failed on the old code. Guardrail 89.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-214 · The push-gate tests wrote their denials into the machine's real refusal log
+- Found: 2026-11-14 · building gate v2 (#122 W-18), by its agent · `tests/unit/test_push_gate.py`, `tests/unit/test_gate.py`
+- Symptom: after W-18 made the hook log every refusal to `hook-refusals.log` (in `%LOCALAPPDATA%/SCIO`), running the existing hook tests left 4 denials in the real log on the owner's machine: refusals no session ever made. The retrospectives count that log per rule (W-18), so test runs would inflate the real counts.
+- Root cause: the tests run the hook's real entry point, and the new log path resolves from the environment (`LOCALAPPDATA`) unless something redirects it. No fixture did.
+- Fix: autouse `machine_dir` fixtures in both test modules point the hook's machine directory (the refusal log and the gate lock) at `tmp_path`. The 4 stray lines were removed from the real log.
+- Sweep: every test that runs `push_gate.main` or `gate.main` is in these two modules, and both have the fixture. `grep -rn "push_gate\|LOCALAPPDATA" tests` finds no other writer.
+- Guard: the `machine_dir` fixtures, autouse in both modules. Guardrail 90.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-215 · The orchestrator's CI brief assumed the tests job excluded tests/live; it never did
+- Found: 2026-11-14 · the CI agent's report (#122 W-35) · the brief, not the code
+- Symptom: the brief asked for shards covering every test file "excluding `tests/live` as today". CI's tests job has always run `tests/live`: `testpaths=["tests"]` has no ignore, and Chromium is installed for it. That covers the dashboard's browser tests and the docker tests on the plain image. Shards that followed the brief would have silently dropped those tests from CI.
+- Root cause: a fact about CI written into the brief from memory, not read from `ci.yml` and `pyproject.toml`. That is the case W-09 covers (check the source, never memory), applied to the repository's own config.
+- Fix: the agent read the config and kept `tests/live` in shard 3. `test_ci_shards_cover_every_test_directory` checks the full set. On #127's real run, the shards' totals (1182 passed, 7 skipped) equalled the local gate's (1171 passed, 18 skipped): 1189 each, so every test ran exactly once.
+- Sweep: the other Workflow v2 briefs were checked for claims about CI or config. The gate v2 brief's claim that the gate's evals are CI's is guarded by `test_the_gates_regression_evals_are_cis`. No other brief states a CI fact.
+- Guard: `test_ci_shards_cover_every_test_directory`. Guardrail 91.
+- Resolved: 2026-11-14 · Status: resolved
+
+### I-218 · Rewriting CLAUDE.md's gate line broke a test that finds it by its words, and the new docs-only gate mode would have skipped that test
+- Found: 2026-11-15 · gate v2's own `gate.py --full` (#122 W-14) · `tests/unit/test_cli_and_nodes.py`, `scripts/gate.py` (`docs_tests`)
+- Symptom: `test_the_local_ci_line_runs_python_tools_as_modules` failed with `StopIteration`. It finds CLAUDE.md's gate line by its opening words, "- Run the CI-equivalent locally", and W-14 had reworded the line to "- Run the gate before every push". The agent's narrowed checks (only its own test files, to spare a loaded machine) did not run this test. The full gate did.
+- Root cause:
+  - A test reads a rule line by its first words, so any rewording breaks it. That part is intended: the test pins the rule.
+  - The new docs-only mode (W-13) chose "the tests that read docs" by file name (`docs`, `guardrail`) only. A CLAUDE.md-only change would have run in docs mode and skipped this test.
+- Fix:
+  - The test finds the line by its new words, keeps its assertions, and also checks that CLAUDE.md names `gate.py --full`.
+  - `docs_tests(changed)` adds every test file that names a changed Markdown file. Both the docs mode and the quick mode's Markdown branch pass the changed paths.
+- Sweep: `grep -rln "CLAUDE.md\|CONTRIBUTING.md\|README.md" tests` lists the tests that read those files. With the fix, docs mode runs every one of them for a change to the file they name.
+- Guard: `test_a_docs_only_change_runs_every_test_that_names_the_changed_file`. Guardrail 93.
+- Resolved: 2026-11-15 · Status: resolved

@@ -16,26 +16,46 @@
 4. A heredoc body or a ``python -c`` script holding a backslash, or a double backslash
    anywhere, is denied (guardrail 17, issue #88, I-176): the Bash tool halves ``\\\\`` before
    the shell runs, and the shell rewrites escapes in scripts; the Edit and Write tools carry
-   text as it is.
+   text as it is. The denial names a file to write the script to instead (W-19):
+   ``scripts/dev/scratch_<name>.py`` in SCIO, else ``scio-scratch/scratch_<name>.py`` in the
+   temp directory.
 5. A check (pytest, mypy, ruff, the gate, the CI watcher, the docs check, the evals) piped
-   into another command is denied unless the line sets ``pipefail`` (I-018, I-173): the
-   pipe's status is the last command's, so a failed check reads as success.
+   into another command is rewritten to set ``pipefail`` first (I-018, I-173, I-188): the
+   pipe's status is the last command's, so a failed check would read as success.
+6. In SCIO (a root whose ``scripts/gate.py`` defines ``write_stamp``), ``git push`` of a branch
+   waits for the gate (W-17): the pushed head's tree must be a tree that a gate in this
+   worktree, or in any other worktree of the repository, stamped as passed
+   (``.scio/gate/last-pass.json``). Tags, deletions, dry runs and the recovery repair
+   worktrees (``.claude/worktrees/recovery-*``, which run their own gate) pass; so does a push
+   that says why it skips the gate: ``SCIO_ACK_GATE=<reason> git push ...``. The hook runs
+   before the line, so after a ``git commit`` earlier in it, the pushed tree is the working
+   tree's; after a merge, rebase, reset or other HEAD move in the line, the push must run in a
+   command of its own.
+7. Every denial appends one JSON line to ``hook-refusals.log`` in SCIO's per-machine directory
+   (``%LOCALAPPDATA%/SCIO``, ``~/.cache/scio`` elsewhere), never inside a repository (W-18): a
+   lapse the hook refused is counted there, not in the ledger.
 
 Reads the hook JSON (``tool_input.command``, ``cwd``) from stdin and prints a deny decision as
 JSON; anything else is allowed silently. A failure of the gate itself (no ``gh``, offline, not a
-GitHub repository) allows the command with a warning: a broken gate must not stop all work.
-Standard library only, so it runs on whatever ``python`` the shell finds.
+GitHub repository, an unreadable stamp) allows the command with a warning: a broken gate must
+not stop all work. Standard library only, so it runs on whatever ``python`` the shell finds.
 """
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 GREEN = {"success", "skipped", "neutral"}
@@ -52,29 +72,60 @@ PYTHON_C_RE = re.compile(
 )
 
 
-def backslash_reason(command: str) -> str | None:
+def backslash_rule(command: str) -> str | None:
+    """Which backslash refusal ``command`` meets: ``double-backslash``, ``backslash`` (one in
+    a heredoc body or a ``python -c`` script), or None."""
+    if "\\\\" in command:
+        return "double-backslash"
+    bodies = [m.group(0).split("\n", 1)[-1] for m in HEREDOC_RE.finditer(command)]
+    bodies += [m.group("body") for m in PYTHON_C_RE.finditer(command)]
+    return "backslash" if any("\\" in body for body in bodies) else None
+
+
+def scratch_file(command: str, cwd: str | None = None) -> str:
+    """W-19: a concrete file to write the refused script to, absolute and with forward
+    slashes, so the Write tool takes it and a later ``python <path>`` in Git Bash keeps it:
+    ``scripts/dev/<name>.py`` in SCIO's worktree, else ``scio-scratch/<name>.py`` under the
+    system temp directory. The name is ``scratch_``, the command's program and a hash of the
+    command: an untracked file in the worktree counts toward the tree a gate stamps, so
+    ``scripts/dev/scratch_*.py`` is meant to be git-ignored."""
+    first = next(iter(segments(command)), [])
+    words = [w for w in first if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w)]
+    program = re.sub(r"[^a-z0-9]+", "_", os.path.basename(words[0]).lower()) if words else ""
+    digest = hashlib.sha1(command.encode("utf-8", "replace")).hexdigest()[:8]
+    name = f"scratch_{program.strip('_') or 'script'}_{digest}.py"  # `scratch_*`: git-ignorable
+    root = scio_root(native_dir(cwd)) if cwd else None
+    if root is not None:
+        return (Path(root) / "scripts" / "dev" / name).as_posix()
+    return (Path(tempfile.gettempdir()) / "scio-scratch" / name).as_posix()
+
+
+def backslash_reason(command: str, cwd: str | None = None) -> str | None:
     """Guardrail 17 as a gate (issue #88): a heredoc body or a ``python -c`` script holding a
     backslash is refused. The shell layer has rewritten such backslashes (``\\n``, ``\\\\``,
     Windows paths) six times (I-027, I-071, I-072, I-157, I-162, I-167); the Edit and Write
     tools carry text as it is. A plain command's own arguments (a ``grep`` pattern) are left
-    alone: they are not a script."""
-    if "\\\\" in command:
+    alone: they are not a script. The refusal names the file to write instead (W-19)."""
+    rule = backslash_rule(command)
+    if rule is None:
+        return None
+    path = scratch_file(command, cwd)
+    script = (
+        f" For a script, write it to `{path}` with the Write tool, then run `python {path}` (W-19)."
+    )
+    if rule == "double-backslash":
         return (
             "This command holds a double backslash, and the Bash tool halves it before the "
             "shell runs (`printf %s 'x\\\\y'` printed `x\\y`; I-176, guardrail 17). Put the "
             "pattern or text in a file with the Write tool and pass the file (`grep -f`, "
-            "`jq -f`, `python <file>`), or find a spelling without the escape."
+            "`jq -f`), or find a spelling without the escape." + script
         )
-    bodies = [m.group(0).split("\n", 1)[-1] for m in HEREDOC_RE.finditer(command)]
-    bodies += [m.group("body") for m in PYTHON_C_RE.finditer(command)]
-    if any("\\" in body for body in bodies):
-        return (
-            "This command carries a backslash inside a heredoc or a `python -c` script, and "
-            "the shell layer may rewrite it (guardrail 17). Make the edit with the Edit or Write "
-            "tool, or write the text or script to a file with Write and pass the file "
-            "(`--body-file`, `-F`, `python <file>`)."
-        )
-    return None
+    return (
+        "This command carries a backslash inside a heredoc or a `python -c` script, and "
+        "the shell layer may rewrite it (guardrail 17). Make the edit with the Edit or Write "
+        "tool, or write the text to a file with Write and pass the file (`--body-file`, `-F`)."
+        + script
+    )
 
 
 CHECKS = {
@@ -283,8 +334,8 @@ def push_reason(branch: str, run: dict[str, Any] | None, acks: set[str]) -> str 
     return None
 
 
-def _run(argv: list[str], cwd: str) -> str:
-    r = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=20)
+def _run(argv: list[str], cwd: str, env: dict[str, str] | None = None) -> str:
+    r = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=20, env=env)
     if r.returncode != 0:
         raise RuntimeError(f"{' '.join(argv[:3])} failed: {(r.stderr or r.stdout).strip()[:200]}")
     # rstrip, not strip: a porcelain line starts with a space (" M a.py"), and stripping the
@@ -376,10 +427,246 @@ def latest_run(branch: str, cwd: str) -> dict[str, Any] | None:
     return runs[0] if runs else None
 
 
+# --- The gate stamp (W-17) --------------------------------------------------------------------
+
+PUSH_OPTS_WITH_VALUE = {"--repo", "-o", "--push-option", "--receive-pack", "--exec"}
+PUSH_SKIPS = {"--dry-run", "-n", "--delete", "-d"}
+PUSH_EVERY_BRANCH = {"--all", "--branches", "--mirror"}
+EVERY_BRANCH = "--all"
+RECOVERY_WORKTREES = "/.claude/worktrees/recovery-"
+GATE_ACK_RE = re.compile(r"""\bSCIO_ACK_GATE=(?:"[^"]+"|'[^']+'|[^\s;&|"']+)""")
+
+
+def pushed_sources(args: list[str]) -> list[str] | None:
+    """The local refs whose trees a ``git push`` sends to branches, or None when it sends none:
+    a dry run, a deletion (``-d``, ``--delete``, ``:branch``), tags only (``--tags``,
+    ``refs/tags/x``, ``tag x``). ``HEAD`` stands for a push that names no refspec, and ``--all``
+    for every local branch. A bare name that is a tag is dropped later, by ``stamp_reason``."""
+    flags: list[str] = []
+    positional: list[str] = []
+    words = iter(_operands(args))
+    for arg in words:
+        if arg in PUSH_OPTS_WITH_VALUE:
+            next(words, None)
+        elif arg.startswith("--"):
+            flags.append(arg.split("=", 1)[0])
+        elif arg.startswith("-o"):
+            continue  # -o<option>: a push option, not flags
+        elif arg.startswith("-") and len(arg) > 1:
+            flags += [f"-{letter}" for letter in arg[1:]]
+        else:
+            positional.append(arg)
+    if PUSH_SKIPS & set(flags):
+        return None
+    if PUSH_EVERY_BRANCH & set(flags):
+        return [EVERY_BRANCH]
+    refspecs = positional[1:]  # the first is the remote
+    if not refspecs:
+        return None if "--tags" in flags else ["HEAD"]
+    sources: list[str] = []
+    after_tag = False
+    for spec in refspecs:
+        if after_tag:
+            after_tag = False
+        elif spec == "tag":
+            after_tag = True
+        else:
+            source = spec.lstrip("+").split(":", 1)[0]
+            if source and not source.startswith("refs/tags/"):
+                sources.append(source)
+    return sources or None
+
+
+def gate_acknowledged(command: str) -> bool:
+    return GATE_ACK_RE.search(strip_heredocs(command)) is not None
+
+
+def scio_root(directory: str) -> str | None:
+    """The root of the SCIO worktree ``directory`` is in, or None: another repository, no
+    repository, or a SCIO checkout older than the stamp (its ``scripts/gate.py`` defines no
+    ``write_stamp``). Silent on every error: the user-level hook runs in every project."""
+    try:
+        root = _run(["git", "rev-parse", "--show-toplevel"], directory)
+        with open(os.path.join(root, "scripts", "gate.py"), encoding="utf-8") as f:
+            return root if "def write_stamp" in f.read() else None
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def is_recovery_worktree(root: str) -> bool:
+    """A repair session's worktree (``recovery/repair.py``), which runs its own gate."""
+    return RECOVERY_WORKTREES in os.path.normcase(root).replace(os.sep, "/").lower()
+
+
+def stamped_trees(root: str) -> dict[str, str]:
+    """``{tree: mode}`` of the last pass stamped in each worktree of ``root``'s repository."""
+    listing = _run(["git", "worktree", "list", "--porcelain"], root)
+    roots = [root] + [
+        ln[len("worktree ") :] for ln in listing.splitlines() if ln.startswith("worktree ")
+    ]
+    trees: dict[str, str] = {}
+    for worktree in dict.fromkeys(roots):
+        try:
+            with open(
+                os.path.join(worktree, ".scio", "gate", "last-pass.json"), encoding="utf-8"
+            ) as f:
+                stamp = json.load(f)
+        except (OSError, ValueError):
+            continue  # no pass there yet, or a worktree git still lists after its deletion
+        if isinstance(stamp, dict) and isinstance(stamp.get("tree"), str):
+            trees[stamp["tree"]] = str(stamp.get("mode", ""))
+    return trees
+
+
+def _is_ok(argv: list[str], cwd: str) -> bool:
+    return subprocess.run(argv, cwd=cwd, capture_output=True, timeout=20).returncode == 0
+
+
+HEAD_MOVERS = {"commit", "merge", "pull", "rebase", "cherry-pick", "revert", "am", "reset"}
+BRANCH_ONLY = {"-b", "-B", "-c", "-C", "--"}  # `checkout -b x`, `checkout -- f`: same commit
+
+
+def moves_head(sub: str, args: list[str]) -> bool:
+    """Whether a git subcommand may move HEAD to another tree before a later push runs."""
+    if sub in ("checkout", "switch"):
+        return not BRANCH_ONLY & set(args)
+    return sub in HEAD_MOVERS
+
+
+def worktree_tree(root: str) -> str:
+    """The tree ``git add -A`` and a commit would record now: what ``scripts/gate.py`` stamps
+    for a gate run before the commit (``tested_tree`` there)."""
+    if not _run(["git", "status", "--porcelain", "--untracked-files=all"], root).strip():
+        return _run(["git", "rev-parse", "HEAD^{tree}"], root)
+    index = _run(["git", "rev-parse", "--git-path", "index"], root)
+    index = index if os.path.isabs(index) else os.path.join(root, index)
+    with tempfile.TemporaryDirectory() as tmp:
+        scratch = os.path.join(tmp, "index")
+        env = {**os.environ, "GIT_INDEX_FILE": scratch}
+        if os.path.isfile(index):
+            shutil.copyfile(index, scratch)
+        else:
+            _run(["git", "read-tree", "HEAD"], root, env)
+        _run(["git", "add", "-A"], root, env)
+        return _run(["git", "write-tree"], root, env)
+
+
+def _untracked(root: str) -> list[str]:
+    with contextlib.suppress(OSError, RuntimeError, subprocess.TimeoutExpired):
+        return _run(["git", "ls-files", "--others", "--exclude-standard"], root).split("\n")
+    return []
+
+
+def stamp_reason(
+    args: list[str], repo: str, command: str, moved: frozenset[str] = frozenset()
+) -> str | None:
+    """Why a ``git push`` from ``repo`` must wait for the gate, or None (W-17). ``moved`` holds
+    the subcommands earlier in the line that move HEAD in ``repo``: the hook runs before the
+    line, so after a ``git commit`` there it checks the tree the commit will record (the
+    working tree's), and after anything else that moves HEAD it cannot know the tree.
+
+    Outside SCIO, and for what ``pushed_sources`` lets through, it reads nothing. Inside, an
+    error raises: the caller warns and lets the push through, since the hook fails open (I-179)."""
+    sources = pushed_sources(args)
+    if sources is None or gate_acknowledged(command):
+        return None
+    root = scio_root(repo)
+    if root is None or is_recovery_worktree(root):
+        return None
+    others = sorted(moved - {"commit"})
+    if others:
+        return (
+            f"This line runs `git {others[0]}` before `git push`, and the hook runs before the "
+            "line, so it cannot read the tree the push will send (W-17). Push in a command of "
+            "its own."
+        )
+    if sources == [EVERY_BRANCH]:
+        sources = _run(
+            ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads"], root
+        ).split()
+    trees = stamped_trees(root)
+    current = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], root) if moved else ""
+    ungated: list[str] = []
+    for source in sources:
+        if (
+            source != "HEAD"
+            and _is_ok(["git", "show-ref", "--verify", "--quiet", f"refs/tags/{source}"], root)
+            and not _is_ok(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{source}"], root)
+        ):
+            continue  # `git push origin v0.10.0`: a tag by its bare name
+        if moved and source in ("HEAD", current):
+            tree = worktree_tree(root)  # what this line's commit will record
+        else:
+            tree = _run(["git", "rev-parse", "--verify", "--quiet", f"{source}^{{tree}}"], root)
+        if tree not in trees:
+            ungated.append(f"{source} (tree {tree[:12]})")
+    if not ungated:
+        return None
+    reason = (
+        f"No gate has passed what this push sends: {', '.join(ungated)}. A pass stamps its "
+        "tree in `.scio/gate/last-pass.json`, and no worktree of this repository holds that "
+        "tree (W-17). Run `uv run python scripts/gate.py` first: it is quick, and it skips a "
+        "tree that already passed. To push without it, say why: "
+        "`SCIO_ACK_GATE=<reason> git push ...`."
+    )
+    untracked = [p for p in _untracked(root) if p]
+    if untracked:
+        reason += (
+            f" Untracked files count toward the tree a gate stamps ({', '.join(untracked[:5])}"
+            f"{', ...' if len(untracked) > 5 else ''}): commit them, or delete or ignore them, "
+            "then gate again."
+        )
+    return reason
+
+
+# --- The refusal log (W-18) -------------------------------------------------------------------
+
+REFUSAL_LOG = "hook-refusals.log"
+
+
+def machine_dir() -> str:
+    """SCIO's per-machine directory, outside every repository (``scripts/gate.py`` keeps its
+    lock there too): ``%LOCALAPPDATA%/SCIO`` on Windows, ``$XDG_CACHE_HOME/scio``
+    (``~/.cache/scio``) elsewhere."""
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Local"
+        )
+        return os.path.join(local, "SCIO")
+    cache = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(cache, "scio")
+
+
+def log_refusal(rule: str, command: str, cwd: str) -> None:
+    """Append one refusal to the machine's log (W-18). A lapse the hook refused, with nothing
+    getting through, is counted here and in the retrospective, not in the ledger. Logging
+    never fails the hook."""
+    entry = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "rule": rule,
+        "command": command[:200],
+        "cwd": cwd,
+    }
+    with contextlib.suppress(
+        Exception
+    ):  # the log is a count; a hook that cannot write still judges
+        directory = machine_dir()
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, REFUSAL_LOG), "a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(entry) + "\n")
+
+
 def evaluate(command: str, cwd: str) -> tuple[str | None, str | None]:
     """``(deny reason, warning)`` for one Bash command line."""
+    reason, warning, _ = judge(command, cwd)
+    return reason, warning
+
+
+def judge(command: str, cwd: str) -> tuple[str | None, str | None, str]:
+    """``(deny reason, warning, the rule that denied it)`` for one Bash command line."""
     here = cwd
     scope: Scope | None = []  # what the line stages before a commit; None: the whole tree
+    moved: dict[str, frozenset[str]] = {}  # per repository: what moved HEAD before a push
     for words in segments(command):
         if words[0] == "cd" and len(words) > 1:
             here = os.path.join(here, native_dir(words[1]))
@@ -396,6 +683,7 @@ def evaluate(command: str, cwd: str) -> tuple[str | None, str | None]:
                 "A bare `git stash` pushes onto the stash stack that parallel sessions share. "
                 "Copy the files aside or make a temporary commit instead.",
                 None,
+                "stash",
             )
         if sub in ("add", "commit"):
             paths = work_tree_paths(sub, args)
@@ -406,20 +694,34 @@ def evaluate(command: str, cwd: str) -> tuple[str | None, str | None]:
             try:
                 reason = commit_reason(repo, scope)
             except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as e:
-                return None, f"commit gate could not run ruff, commit allowed: {e}"
+                return None, f"commit gate could not run ruff, commit allowed: {e}", ""
             if reason:
-                return reason, None
+                return reason, None, "commit-lint"
+        where = os.path.normcase(os.path.abspath(repo))
+        if moves_head(sub, args):
+            moved[where] = moved.get(where, frozenset()) | {sub}
         if sub == "push":
+            stamp_warning = None
+            try:
+                reason = stamp_reason(args, repo, command, moved.get(where, frozenset()))
+            except Exception as e:  # the hook fails open (I-179): warn, and check CI still
+                reason = None
+                stamp_warning = f"push gate could not check the gate stamp, push allowed: {e}"
+            if reason:
+                return reason, None, "push-gate"
             try:
                 branch = pushed_branch(args) or _run(
                     ["git", "rev-parse", "--abbrev-ref", "HEAD"], repo
                 )
                 reason = push_reason(branch, latest_run(branch, repo), acknowledged(command))
             except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as e:
-                return None, f"push gate could not check CI, push allowed: {e}"
+                warning = f"push gate could not check CI, push allowed: {e}"
+                return None, " ".join(w for w in (stamp_warning, warning) if w), ""
             if reason:
-                return reason, None
-    return None, None
+                return reason, None, "push-ci"
+            if stamp_warning:
+                return None, stamp_warning, ""
+    return None, None, ""
 
 
 PIPEFAIL_PREFIX = "set -o pipefail; "
@@ -446,14 +748,17 @@ def main() -> int:
     except json.JSONDecodeError:
         return 0
     tool_input = dict(data.get("tool_input") or {})
-    command = str(tool_input.get("command", ""))
-    reason, warning = backslash_reason(command), None
+    command = sent = str(tool_input.get("command", ""))
+    cwd = str(data.get("cwd") or os.getcwd())
+    rule = backslash_rule(command) or ""
+    reason, warning = backslash_reason(command, cwd) if rule else None, None
     fixed = None if reason else with_pipefail(command)
     if fixed is not None:
         command = fixed  # the git gates judge the command that will run
     if reason is None and "git" in command:
-        reason, warning = evaluate(command, str(data.get("cwd") or os.getcwd()))
+        reason, warning, rule = judge(command, cwd)
     if reason:
+        log_refusal(rule, sent, cwd)
         decision = {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
