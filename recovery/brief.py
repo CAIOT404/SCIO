@@ -26,8 +26,9 @@ READ_FIRST: tuple[tuple[str, str], ...] = (
     ),
     (
         "docs/guardrails/",
-        "the Always/Never rules, one file per rule (`NNN.md`), every one: "
-        "`cat docs/guardrails/*.md`",
+        "the Always/Never rules, one file per rule (`NNN.md`); read every active one: "
+        "`uv run python scripts/check_docs.py --active` prints them (a rule with a `Status:` "
+        "line is merged or retired)",
     ),
     (
         "docs/ledger/README.md",
