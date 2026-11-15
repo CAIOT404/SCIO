@@ -37,3 +37,19 @@ def test_the_offline_answer_file_round_trips(tmp_path: Path) -> None:
     path = write_answer_file(tmp_path, Q.question_id, "  both  ")
     assert path == tmp_path / ".scio" / "answers" / "P29-a1.md"
     assert read_answer_file(tmp_path, Q.question_id) == "both"
+
+
+def test_a_given_qid_is_the_question_id_everywhere(tmp_path: Path) -> None:
+    """The build passes the attempt's thread id: the marker, the answer and the answer file
+    all use it, and an answer to the same feature and attempt under another id is not it."""
+    m4 = Question("P29", 1, "Which rule?", qid="build-graphcalc-m4-p29-a1")
+    m5 = Question("P29", 1, "Which rule?", qid="build-graphcalc-m5-p29-a1")
+    assert m4.question_id == "build-graphcalc-m4-p29-a1" and Q.question_id == "P29-a1"
+    assert format_question(m4).splitlines()[0] == (
+        "<!-- scio:question feature=P29 attempt=1 id=build-graphcalc-m4-p29-a1 -->"
+    )
+    comments = [format_question(m4), "answer: rule A", format_question(m5)]
+    assert parse_answer(comments, m4.question_id) == "rule A"
+    assert parse_answer(comments, m5.question_id) is None
+    write_answer_file(tmp_path, m4.question_id, "rule A")
+    assert read_answer_file(tmp_path, m5.question_id) is None

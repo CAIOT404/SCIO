@@ -964,7 +964,9 @@ graph TD;
 	load(load)
 	plan_milestone(plan_milestone)
 	issues(issues)
+	answers(answers)
 	feature(feature)
+	questions_wait(questions_wait)
 	integrate(integrate)
 	milestone_gate(milestone_gate)
 	gate_decision(gate_decision)
@@ -979,13 +981,16 @@ graph TD;
 	done(done)
 	__end__([<p>__end__</p>]):::last
 	__start__ --> load;
+	answers -.-> feature;
+	answers -.-> integrate;
+	answers -.-> questions_wait;
+	feature -.-> answers;
 	feature -. &nbsp;halt&nbsp; .-> done;
-	feature -.-> integrate;
 	gate_decision -. &nbsp;halt&nbsp; .-> done;
 	gate_decision -. &nbsp;pr&nbsp; .-> milestone_pr;
 	integrate -. &nbsp;halt&nbsp; .-> done;
 	integrate -. &nbsp;gate&nbsp; .-> milestone_gate;
-	issues --> feature;
+	issues --> answers;
 	load -. &nbsp;halt&nbsp; .-> done;
 	load -. &nbsp;plan&nbsp; .-> plan_milestone;
 	merge_wait -. &nbsp;halt&nbsp; .-> done;
@@ -997,6 +1002,9 @@ graph TD;
 	plan_milestone -. &nbsp;halt&nbsp; .-> done;
 	plan_milestone -.-> issues;
 	plan_milestone -. &nbsp;release&nbsp; .-> release_check;
+	questions_wait -. &nbsp;halt&nbsp; .-> done;
+	questions_wait -.-> feature;
+	questions_wait -.-> integrate;
 	release -. &nbsp;merge_wait&nbsp; .-> release_merge_wait;
 	release -. &nbsp;publish&nbsp; .-> release_publish;
 	release_check -.-> done;
@@ -1010,8 +1018,8 @@ graph TD;
 	update_progress -. &nbsp;plan&nbsp; .-> plan_milestone;
 	update_progress -. &nbsp;release&nbsp; .-> release_check;
 	done --> __end__;
-	feature -.-> feature;
 	merge_wait -.-> merge_wait;
+	questions_wait -.-> questions_wait;
 	release_decision -.-> release_decision;
 	release_merge_wait -.-> release_merge_wait;
 	classDef default fill:#f2f0ff,line-height:1.2

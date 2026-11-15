@@ -248,6 +248,14 @@ class GitHubClient:
                 return int(c["id"])
         return None
 
+    def issue_comments(self, issue: int) -> list[str]:
+        """The bodies of the issue's comments, oldest first (ADR 0020: an answer is the first
+        ``answer:`` comment after its question). GitHub lists them by ascending id, checked
+        live on gh 2.103.3; they are sorted by id here too, so the order is this method's
+        contract, not the server's. ``--paginate`` joins the pages into one array (I-150)."""
+        rows = self._json("api", "--paginate", f"repos/{self.repo}/issues/{issue}/comments") or []
+        return [str(c.get("body") or "") for c in sorted(rows, key=lambda c: int(c["id"]))]
+
     # -- idempotent writes ---------------------------------------------------
 
     def ensure_branch(self, name: str, from_sha: str) -> bool:
@@ -365,6 +373,43 @@ class GitHubClient:
         )
         self._record("upsert_issue_comment", f"#{issue}", noop=False, detail=f"created {d['id']}")
         return int(d["id"])
+
+    def comment_once(self, issue: int, body: str, *, marker: str) -> int:
+        """Post ``body`` as a new comment, as it is, unless a comment containing ``marker``
+        is already on the issue (a resumed build, or a later build thread, asks once). Unlike
+        :meth:`upsert_issue_comment`, nothing is appended and nothing is edited: a question's
+        marker must stay its first line (ADR 0020). Returns the comment id."""
+        existing = self.find_comment(issue, marker)
+        if existing is not None:
+            self._record("comment_once", f"#{issue}", noop=True, detail=f"{existing}")
+            return existing
+        d = self._json(
+            "api", "-X", "POST", f"repos/{self.repo}/issues/{issue}/comments", "--input", "-",
+            stdin=json.dumps({"body": body}),
+        )  # fmt: skip
+        self._record("comment_once", f"#{issue}", noop=False, detail=f"created {d['id']}")
+        return int(d["id"])
+
+    def add_label(self, issue: int, label: str) -> bool:
+        """Put ``label`` on the issue unless it is there. The label is created first when the
+        repository lacks it, as for ``issue create`` (I-113). True if added."""
+        if label in self.get_issue(issue).labels:
+            self._record("add_label", f"#{issue}", noop=True, detail=label)
+            return False
+        self.ensure_label(label)
+        self._gh("issue", "edit", str(issue), "-R", self.repo, "--add-label", label)
+        self._record("add_label", f"#{issue}", noop=False, detail=label)
+        return True
+
+    def remove_label(self, issue: int, label: str) -> bool:
+        """Take ``label`` off the issue when it is there; read first, so an absent label is
+        a no-op rather than whatever ``gh`` does with it. True if removed."""
+        if label not in self.get_issue(issue).labels:
+            self._record("remove_label", f"#{issue}", noop=True, detail=label)
+            return False
+        self._gh("issue", "edit", str(issue), "-R", self.repo, "--remove-label", label)
+        self._record("remove_label", f"#{issue}", noop=False, detail=label)
+        return True
 
     def ensure_draft_pr(self, *, head: str, base: str, title: str, body: str) -> PullRequestInfo:
         """Open a draft PR for ``head`` unless one is already open.

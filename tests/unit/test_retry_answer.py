@@ -25,9 +25,17 @@ QUESTION = "Should unicode letters be kept?"
 HEADING = "## The owner's answers to earlier attempts' questions"
 
 
+def _stop_line(attempt: int) -> str:
+    """The question a P1 stop carries when the attempt asked none (``stop_question``): since
+    ADR 0020 a design question parks the feature instead of stopping the build, so these
+    stops come from the feature gate's own escalation (``gate``)."""
+    return f"Feature P1 (escalate_human, attempt {attempt})"
+
+
 def _build(tmp_path: Path, modes: dict[str, str]) -> RunContext:
-    """A bootstrapped Fake product whose P1 attempts behave as ``modes`` says (``design``:
-    the T0 coder stops on its design question); every other attempt solves its feature."""
+    """A bootstrapped Fake product whose P1 attempts behave as ``modes`` says (``gate``: the
+    feature gate escalates once, a stop without a question; ``idle``: the coder changes
+    nothing); every other attempt solves its feature."""
     harness = _bootstrap(tmp_path, _PerAttempt(modes))
     return _ctx(tmp_path, harness, build_thread_id(PRODUCT))
 
@@ -58,11 +66,12 @@ def _section(description: str) -> str:
 def test_a_retry_with_an_answer_carries_it_and_the_question_into_the_next_task(
     tmp_path: Path,
 ) -> None:
-    """P29's shape: the coder stops on a design question (``escalate_human``); the owner
-    answers ``retry: <answer>``; attempt 2's task holds the question and the answer, in the
-    owner's case. The stop is a pending interrupt, so a build halted there before the
-    upgrade resumes the same way."""
-    ctx = _build(tmp_path, {"-p1-a1": "design"})
+    """A feature stop (``escalate_human``, the attempt's own interrupt); the owner answers
+    ``retry: <answer>``; attempt 2's task holds the question and the answer, in the owner's
+    case. The stop is a pending interrupt, so a build halted there before the upgrade
+    resumes the same way. (P29's design question now parks the feature, ADR 0020:
+    ``tests/unit/test_question_channel.py``.)"""
+    ctx = _build(tmp_path, {"-p1-a1": "gate"})
     try:
         out = run_build(ctx)
         assert out.paused and out.interrupt and out.interrupt["thread"].endswith("-p1-a1")
@@ -76,14 +85,15 @@ def test_a_retry_with_an_answer_carries_it_and_the_question_into_the_next_task(
     answer = "Use rule A, and keep '1.2.3' an error"
     description = a2.task.description
     section = _section(description)
-    assert f"Question: {QUESTION}" in section and f"Answer: {answer}" in section
-    assert section.index(QUESTION) < section.index(answer)
+    assert f"Question: {_stop_line(1)}" in section and f"Answer: {answer}" in section
+    assert section.index(_stop_line(1)) < section.index(answer)
     assert "Attempt 1" in section
-    # the rest of the task is the one a plain retry builds, and the answers come last
+    # the rest of the task is the one a plain retry builds, then the answers (and the note
+    # that attempt 2 continues from attempt 1's verified commit, #119)
     assert description.startswith(_plain_description(s) + "\n\n" + HEADING)
     a1 = _run(s, 1)
     assert a1.decision == "retry" and a1.status == "failed"
-    assert a1.answer == answer and a1.question == QUESTION  # the coder's own words
+    assert a1.answer == answer and a1.question == _stop_line(1)  # it asked no question
     # the stop said how: an answer after `retry`, carried with the question
     assert "'retry: <your answer>'" in stop["question"] and "with the question" in stop["question"]
     assert "'skip' to defer it" in stop["question"]  # the rest of the stop is unchanged
@@ -92,8 +102,9 @@ def test_a_retry_with_an_answer_carries_it_and_the_question_into_the_next_task(
 
 def test_a_plain_retry_builds_the_same_task_as_before(tmp_path: Path) -> None:
     """A plain ``retry`` (any case) records no question or answer, and the next attempt's
-    task is ``feature_task`` without answers, byte for byte."""
-    ctx = _build(tmp_path, {"-p1-a1": "design"})
+    task is ``feature_task`` without answers, byte for byte. (An idle attempt commits
+    nothing, so no verified commit is carried either, #119.)"""
+    ctx = _build(tmp_path, {"-p1-a1": "idle"})
     try:
         out = run_build(ctx)
         assert out.paused and out.interrupt and out.interrupt["thread"].endswith("-p1-a1")
@@ -118,7 +129,7 @@ def test_every_answered_retry_of_a_feature_reaches_its_later_attempts(tmp_path: 
     """Answers accumulate, oldest first, each under its attempt's number: attempt 1 is
     answered, attempt 2 is retried plainly, attempt 3 is answered; attempts 2 and 3 still
     read attempt 1's answer, and attempt 4 reads both."""
-    ctx = _build(tmp_path, {"-p1-a1": "design", "-p1-a2": "design", "-p1-a3": "design"})
+    ctx = _build(tmp_path, {"-p1-a1": "gate", "-p1-a2": "gate", "-p1-a3": "gate"})
     try:
         out = run_build(ctx)
         assert out.paused and out.interrupt and out.interrupt["thread"].endswith("-p1-a1")
@@ -140,7 +151,8 @@ def test_every_answered_retry_of_a_feature_reaches_its_later_attempts(tmp_path: 
     assert section.index("Attempt 1") < section.index(first) < section.index("Attempt 3")
     assert section.index("Attempt 3") < section.index(second)
     assert "Attempt 2" not in section  # a plain retry answered nothing
-    assert section.count(QUESTION) == 2
+    assert _stop_line(1) in section and _stop_line(3) in section
+    assert _stop_line(2) not in section
     assert [(r.attempt, r.decision, r.answer) for r in s.feature_runs if r.feature_id == "P1"] == [
         (1, "retry", first),
         (2, "retry", None),

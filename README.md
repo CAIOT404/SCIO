@@ -98,6 +98,7 @@ the task graph on its own checkpoint thread on branch `milestone/<n>`. After the
 profile's full suite and lint run on the branch, an Opus milestone gate gives a verdict that any failing
 check overrides, and one milestone PR waits for you. A crash at any point resumes without a duplicated
 issue, commit or PR; a feature that halts stops for one decision (`retry`, `skip`, or stop); `retry: <answer>` carries the owner's answer into the next attempt's task, with the question it answers (#137).
+A feature whose coder asks a design question does not stop the build: it is parked. The question goes to the feature's issue (label `needs-answer`) and to the dashboard, and the other features keep building. Your `answer:` comment, or the dashboard's answer box, gives the feature its next attempt with your answer. The milestone waits once, at `questions_wait`, only when nothing else can build; `proceed` there defers the parked features (#141, ADR 0020).
 `skip` defers the feature to the next milestone; the release waits until every feature in `PRODUCT.md`
 is done, so a feature leaves the product only when you remove it from `PRODUCT.md`.
 Every feature's verify also holds it to the product's coverage floor (`SCIO_COVERAGE_FLOOR`, 80% of
@@ -114,6 +115,7 @@ uv run scio build --product ./todo --decision recheck     # with --gh: push the 
 uv run scio build --product ./todo --decision release     # at the release gate (or "stop")
 uv run scio build --product ./todo --decision "merge and stop"   # record the milestone, end the thread
 uv run scio build --product ./todo --decision skip        # defer it; or retry / stop, when a feature halted
+uv run scio build --product ./todo --decision proceed     # at questions_wait: defer the parked features (or answer them, then rerun)
 uv run scio status --product ./todo                       # progress.json as text
 uv run scio report --thread build-todo_cli                # feature runs, cost, escalations
 uv run scio upgrade --product ./todo                      # bring an older product to today's bar

@@ -35,15 +35,21 @@ class Question:
     feature: str
     attempt: int
     text: str
+    qid: str | None = None
+    """The question's id. The build passes the attempt's thread id
+    (``build-graphcalc-m4-p29-a2``), which is unique across milestones and build threads, so
+    an old question's marker or answer never stands for a new one. None: :func:`question_id`."""
 
     @property
     def question_id(self) -> str:
-        """Stable across reruns: the same attempt always gets the same id."""
-        return question_id(self.feature, self.attempt)
+        """``qid`` when given, else ``<feature>-a<attempt>``. Stable across reruns: the same
+        attempt always gets the same id."""
+        return self.qid or question_id(self.feature, self.attempt)
 
 
 def question_id(feature: str, attempt: int) -> str:
-    """``P29-a1`` for feature P29's first attempt."""
+    """``P29-a1`` for feature P29's first attempt: the id of a question asked without a
+    ``qid``. Not unique: attempts are numbered again in a new build thread."""
     return f"{feature}-a{attempt}"
 
 
