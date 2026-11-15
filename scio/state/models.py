@@ -135,6 +135,13 @@ class TaskSpec(BaseModel):
     """One line each; becomes ``feature_list``."""
     repo_url: str
     base_branch: str = "main"
+    start_commit: str | None = None
+    """Where the task's branch starts when it is not ``base_branch``'s head (issue #119): a
+    retried product feature starts from the newest commit an earlier attempt made after a
+    passing verify, a descendant of ``base_branch``. ``base_sha`` stays ``base_branch``'s
+    head, so the diff, verify's change check and the gate see the whole feature."""
+    carried: list[FeatureItem] = Field(default_factory=list)
+    """The features ``start_commit`` proved, imported as passing (issue #119)."""
     issue_number: int | None = None
     tier_hint: Tier | None = None
     constraints: list[str] = Field(default_factory=list)
@@ -551,6 +558,9 @@ class FeatureRun(BaseModel):
     """The milestone this run belongs to (``M2``). A build thread keeps its runs across
     milestones, and a skip defers a feature to the next one (I-116), so "finished" and "this
     milestone's cost" are per milestone. None on a run recorded before the field existed."""
+    decision: Literal["retry", "skip", "stop"] | None = None
+    """The owner's answer when the run halted (issue #119): only a ``retry`` carries the
+    run's verified commits into the next attempt. None when no one was asked."""
 
 
 class CiStatus(BaseModel):

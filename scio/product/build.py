@@ -33,9 +33,10 @@ from scio.aci.runtime import ToolContext, ensure_product_env
 from scio.aci.sandbox.base import Sandbox
 from scio.aci.tools import SCIO_GIT_IDENTITY, ToolError, find_commit, git_push, head_sha
 from scio.context.artifacts import ArtifactStore
+from scio.graph.build import build_graph
 from scio.graph.checkpointer import DURABILITY, open_checkpointer
 from scio.graph.effects import run_effect
-from scio.graph.nodes.common import decision, git_out
+from scio.graph.nodes.common import decision, features_from_acceptance, git_out
 from scio.graph.nodes.common import fact as ledger_fact
 from scio.graph.run import resume_graph, run_graph, thread_started
 from scio.graph.run_context import T0_TOOL_CAP, RunContext, product_sandbox_backend
@@ -74,7 +75,9 @@ from scio.state.models import (
     Budget,
     CiStatus,
     ExitReason,
+    FeatureItem,
     FeatureRun,
+    FeatureStatus,
     GateOutput,
     LedgerEntry,
     MilestoneFeatureOutput,
@@ -451,6 +454,157 @@ def feature_run_from_state(
             "human_notes": list(final.human_notes),
         }
     )
+
+
+# ---------- a retry keeps the verified commits (issue #119) ----------
+
+
+@dataclass
+class VerifiedStart:
+    """Where a retried feature attempt starts: the newest commit an earlier attempt's
+    ``git_checkpoint`` made, which it makes only after a passing verify with the whole suite
+    green, and the features committed up to it (issue #119)."""
+
+    commit: str
+    attempt: int
+    """The attempt whose checkpoint made ``commit``."""
+    features: list[FeatureItem]
+
+    def ids(self) -> str:
+        """The carried feature ids, ``F1, F3``."""
+        return ", ".join(f.id for f in self.features)
+
+    def carry_into(self, task: TaskSpec, attempt: int) -> TaskSpec:
+        """``task`` starting at ``commit`` with ``features`` imported as passing; its brief
+        says so, so the planner and the coder build only what is left."""
+        note = (
+            f"Attempt {attempt} continues from commit {self.commit[:12]}: {self.ids()} passed "
+            f"verify in attempt {self.attempt}, and their code and tests are in the tree. They "
+            "start as passing; build what is left and keep them passing."
+        )
+        return task.model_copy(
+            update={
+                "start_commit": self.commit,
+                "carried": [
+                    FeatureItem(
+                        id=f.id,
+                        description=f.description,
+                        test_filter=f.test_filter,
+                        status=FeatureStatus.PASSING,
+                    )
+                    for f in self.features
+                ],
+                "description": f"{task.description}\n\n{note}",
+            }
+        )
+
+    def line(self, feature_id: str, attempt: int, branch: str) -> str:
+        """The orchestrator's ledger line for the attempt that starts here."""
+        return (
+            f"{feature_id} attempt {attempt} starts from {self.commit[:12]} ({self.ids()} "
+            f"verified in attempt {self.attempt}), not from the head of {branch} (issue #119)"
+        )
+
+
+def started_line(feature_id: str, attempt: int, task: TaskSpec) -> str | None:
+    """The ledger line for a resumed attempt that started from a carried commit, read from
+    its own task; None when it started from the milestone head. A node run that pauses for
+    a decision loses its facts, so the run that resumes the thread says it again (#119)."""
+    if not task.start_commit:
+        return None
+    ids = ", ".join(f.id for f in task.carried) or "none"
+    return (
+        f"{feature_id} attempt {attempt} started from {task.start_commit[:12]} ({ids} carried "
+        "as passing; issue #119)"
+    )
+
+
+def retried_runs(state: ProductBuildState, feature_id: str, milestone: str) -> list[FeatureRun]:
+    """The runs of ``feature_id`` in ``milestone`` that the owner answered ``retry``, newest
+    first, up to the first one that was not. Their verified commits are what the next attempt
+    may start from (issue #119). A skip, a stop, a harness failure (no one was asked) or an
+    earlier milestone ends the chain, so the attempt after one starts from the milestone head,
+    as before."""
+    out: list[FeatureRun] = []
+    for run in reversed(state.feature_runs):
+        if run.feature_id != feature_id:
+            continue
+        if run.milestone != milestone or run.decision != "retry":
+            break
+        out.append(run)
+    return out
+
+
+def task_thread_state(
+    ctx: RunContext, saver: BaseCheckpointSaver | None, thread_id: str
+) -> SCIOState | None:
+    """The last checkpointed state of a feature attempt's task-graph thread, or None."""
+    config = {"configurable": {"thread_id": thread_id}}
+
+    def read(cp: BaseCheckpointSaver) -> dict[str, Any]:
+        graph: Any = build_graph(None).compile(checkpointer=cp)
+        return dict(graph.get_state(config).values)
+
+    if saver is not None:
+        values = read(saver)
+    else:
+        with open_checkpointer(ctx.settings.checkpoint_dsn) as opened:
+            values = read(opened)
+    return SCIOState.model_validate(values) if values else None
+
+
+def _is_ancestor(ctx: RunContext, older: str, newer: str) -> bool:
+    """``older`` is ``newer`` or one of its ancestors; False when either is not a commit."""
+    r = ctx.sandbox.exec(["git", "merge-base", "--is-ancestor", older, newer], timeout_s=30)
+    return r.ok
+
+
+def verified_start(
+    ctx: RunContext,
+    saver: BaseCheckpointSaver | None,
+    state: ProductBuildState,
+    plan: MilestonePlan,
+    feature_id: str,
+    task: TaskSpec,
+) -> tuple[VerifiedStart | None, list[str]]:
+    """Where a new attempt of ``feature_id`` starts (issue #119). After a ``retry``, the
+    newest commit that a retried attempt's ``git_checkpoint`` made, read from that attempt's
+    own checkpointed state: a feature's ``commit_sha`` is set by that node alone, after a
+    passing verify. The features committed up to it are carried as passing. Only features
+    whose ids come from the acceptance criteria are carried (the planner's own ids may mean
+    something else next time), and only while the criteria are the ones the attempt built.
+
+    The commit must sit on the milestone branch's head: the milestone branch takes a feature
+    only by fast-forward or merge once the whole feature has passed, and a head that moved
+    since (a hand edit of PRODUCT.md committed at the stop) would make that fast-forward
+    fail. Otherwise, and with no verified commit, the attempt starts from the head, as
+    before. Returns the start (None: the head) and notes for the ledger."""
+    stable = {f.id for f in features_from_acceptance(task.acceptance)}
+    for run in retried_runs(state, feature_id, plan.id):
+        inner = task_thread_state(ctx, saver, run.thread_id)
+        if inner is None:
+            continue
+        if inner.task.acceptance != task.acceptance:
+            return None, [
+                f"{feature_id}: its acceptance criteria changed since attempt {run.attempt}, so "
+                "its verified commits are not carried; this attempt starts from the head of "
+                f"{plan.branch} (issue #119)"
+            ]
+        committed = [f for f in inner.feature_list if f.commit_sha and f.id in stable]
+        if not committed:
+            continue  # nothing verified in this attempt: an earlier retried one may have
+        shas = list(dict.fromkeys(str(f.commit_sha) for f in committed))
+        newest = next((s for s in shas if all(_is_ancestor(ctx, o, s) for o in shas)), None)
+        head = git_out(ctx.sandbox, "rev-parse", plan.branch)
+        if newest is None or not _is_ancestor(ctx, head, newest):
+            what = f"commit {newest[:12]}" if newest else "commits"
+            return None, [
+                f"{feature_id}: attempt {run.attempt}'s verified {what} "
+                f"({', '.join(f.id for f in committed)}) is not on top of {plan.branch} at "
+                f"{head[:12]}, so this attempt starts from the head (issue #119)"
+            ]
+        return VerifiedStart(newest, run.attempt, committed), []
+    return None, []
 
 
 def issue_title(f: ProductFeature) -> str:
@@ -1016,6 +1170,11 @@ def feature(ctx: RunContext, saver: BaseCheckpointSaver | None) -> Node:
         try:
             if thread_started(fctx, saver):
                 entries.append(fact(f"{feat.id}: resuming thread {thread} (attempt {attempt})"))
+                # a paused node run's facts are lost, so the start is said again (#119)
+                if (inner := task_thread_state(ctx, saver, thread)) is not None and (
+                    line := started_line(feat.id, attempt, inner.task)
+                ):
+                    entries.append(fact(line))
                 outcome = resume_graph(fctx, None, saver=saver)
             else:
                 entries.append(fact(f"{feat.id}: starting thread {thread} at {tier}"))
@@ -1038,6 +1197,13 @@ def feature(ctx: RunContext, saver: BaseCheckpointSaver | None) -> Node:
                 task = feature_task(
                     spec, plan, feat, state.issues.get(feat.id), repo_dir=state.product_dir
                 )
+                # A retry keeps what the attempts before it committed after a passing verify:
+                # the uncommitted leftovers are gone, the verified commits are not (#119).
+                start, notes = verified_start(ctx, saver, state, plan, feat.id, task)
+                entries += [fact(n) for n in notes]
+                if start is not None:
+                    task = start.carry_into(task, attempt)
+                    entries.append(fact(start.line(feat.id, attempt, plan.branch)))
                 outcome = run_graph(fctx, task, saver=saver)
             while outcome.paused and outcome.state.phase == "merge_wait":
                 outcome = resume_graph(
@@ -1159,7 +1325,10 @@ def _feature_decision(
     choice = answer.strip().lower()
     notes = [f"{feat.id} attempt {attempt}: human said {answer.strip()[:120]!r}"]
     if choice.startswith("retry"):
-        record = feature_run_from_state(run, final, status="failed")
+        # Only a retry carries this attempt's verified commits into the next one (issue #119).
+        record = feature_run_from_state(run, final, status="failed").model_copy(
+            update={"decision": "retry"}
+        )
         entries.append(decision(f"{feat.id} failed ({reason}); retrying", source=Role.HUMAN))
         return {
             "feature_runs": [*before, record],
@@ -1169,7 +1338,9 @@ def _feature_decision(
             **ctx.budget_update(),
         }
     if choice.startswith("skip"):
-        record = feature_run_from_state(run, final, status="skipped")
+        record = feature_run_from_state(run, final, status="skipped").model_copy(
+            update={"decision": "skip"}
+        )
         entries.append(
             decision(
                 f"{feat.id} skipped by human ({reason}): deferred to the next milestone, "
@@ -1184,7 +1355,9 @@ def _feature_decision(
             "ledger": entries,
             **ctx.budget_update(),
         }
-    record = feature_run_from_state(run, final, status="failed")
+    record = feature_run_from_state(run, final, status="failed").model_copy(
+        update={"decision": "stop"}
+    )
     entries.append(decision(f"{feat.id} failed ({reason}); build stopped", source=Role.HUMAN))
     return {
         "feature_runs": [*before, record],
