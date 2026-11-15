@@ -27,6 +27,7 @@ from recovery.model import RunRecord
 from recovery.runtime import (
     HEALTH_TIMEOUT_S,
     RuntimeRefused,
+    contains,
     head,
     health_check,
     lock_changed,
@@ -263,6 +264,36 @@ def test_lock_changed_never_answers_unchanged_when_git_cannot_answer(repos: Repo
         lock_changed(repos.cfg, repos.base, "0123456789abcdef0123456789abcdef01234567")
     with pytest.raises(RuntimeError):
         lock_changed(repos.cfg, repos.base, "--cached")
+
+
+# --- contains (I-237) -----------------------------------------------------------------------
+
+
+def test_contains_answers_whether_live_wt_already_holds_a_commit(repos: Repos) -> None:
+    fix = repos.push_main("scio.py", "fixed\n", "fix")
+    newer = repos.push_main("scio.py", "fixed again\n", "later")
+    # Not fetched yet: live-wt does not know the fix, so its HEAD cannot contain it. This
+    # is the usual case, since move_live_wt is what fetches.
+    git = RecordingGit()
+    assert contains(repos.live_wt, fix, git=git) is False
+    assert not git.ran("merge-base")
+    _git(repos.live_wt, "fetch", "-q", "origin")
+    assert contains(repos.live_wt, fix) is False  # behind the fix
+    assert contains(repos.live_wt, repos.base) is True  # a commit contains itself
+    _git(repos.live_wt, "checkout", "-q", "--detach", newer)
+    assert contains(repos.live_wt, fix) is True
+    assert contains(repos.live_wt, fix[:8]) is True
+
+
+def test_contains_never_answers_yes_when_git_cannot_answer(repos: Repos) -> None:
+    with pytest.raises(RuntimeError):
+        contains(repos.live_wt, "--all")
+    hung = RecordingGit(fake={("merge-base",): CommandResult(-1, "", "", timed_out=True)})
+    with pytest.raises(RuntimeError):
+        contains(repos.live_wt, repos.base, git=hung)
+    broken = RecordingGit(fake={("merge-base",): CommandResult(128, "", "fatal: bad object")})
+    with pytest.raises(RuntimeError):
+        contains(repos.live_wt, repos.base, git=broken)
 
 
 # --- health_check ---------------------------------------------------------------------------

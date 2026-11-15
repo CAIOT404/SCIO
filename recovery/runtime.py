@@ -98,6 +98,31 @@ def _head_or_none(path: Path, git: Runner) -> str | None:
         return None
 
 
+def contains(path: Path, sha: str, *, git: Runner = run_command) -> bool:
+    """True when ``path``'s HEAD already contains the commit ``sha`` (HEAD is ``sha`` or a
+    descendant of it): ``git -C <path> merge-base --is-ancestor <sha> HEAD`` exits 0.
+
+    A commit git does not know in ``path`` (a merge live-wt has not fetched yet) answers
+    False: HEAD's history cannot hold an object the repository lacks, and ``merge-base``
+    would exit 128 on it. Raises ``RuntimeError`` when ``sha`` is not a SHA, or when git
+    cannot answer for a known commit (a timeout, an unreadable HEAD): an unknown answer
+    never counts as "contains", which would keep live-wt off a fix (I-237).
+    """
+    if not _REV.fullmatch(sha):
+        raise RuntimeError(f"{sha!r} is not a commit SHA")
+    full = _resolve(path, sha, git)
+    if full is None:
+        return False
+    result = _git(git, path, "merge-base", "--is-ancestor", full, "HEAD")
+    if not result.timed_out and result.code == 0:
+        return True
+    if not result.timed_out and result.code == 1:
+        return False
+    raise RuntimeError(
+        f"git merge-base --is-ancestor {full} HEAD in {path} failed ({_why(result)})"
+    )
+
+
 def move_live_wt(
     cfg: WorkspaceConfig,
     target_sha: str,

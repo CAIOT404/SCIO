@@ -50,6 +50,8 @@ FC = FailureClass
 OLD_SHA = "a" * 40
 MERGE_SHA = "b" * 40
 HEAD_SHA = "c" * 40
+NEWER_SHA = "e" * 40
+"""A later commit on main that contains the repair's merge (I-237)."""
 ME = ProcessKey(1, 1.0)
 """The test process's lease key."""
 
@@ -165,6 +167,8 @@ class World:
     replays: list[tuple[str, str, list[str]]] = field(default_factory=list)
     jsonl: list[str] = field(default_factory=list)
     live_wt: str = OLD_SHA
+    ancestry: set[tuple[str, str]] = field(default_factory=set)
+    """``(older, newer)`` pairs: ``newer`` contains ``older``. A commit contains itself."""
     refuse: runtime.RuntimeRefused | None = None
     lock_changed: bool = False
     health: list[str] = field(default_factory=list)
@@ -332,6 +336,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
         },
         runtime: {
             "head": lambda *_, **__: w.live_wt,
+            "contains": lambda _p, sha, **__: sha == w.live_wt or (sha, w.live_wt) in w.ancestry,
             "move_live_wt": move,
             "rollback_live_wt": rollback,
             "lock_changed": lambda *_, **__: w.lock_changed,
@@ -665,6 +670,147 @@ def test_a_live_wt_already_on_the_target_rolls_back_to_the_runs_sha(world: World
     w.live_wt = MERGE_SHA  # someone moved it by hand
     inc = w.step(iid)
     assert inc.state is S.RUNTIME_UPDATED and inc.prev_live_wt_sha == "d" * 40
+
+
+# --- I-237: live-wt is never moved backwards -------------------------------------------------
+
+
+def _awaiting_a_green_merge(w: World) -> str:
+    """An incident whose repair PR #7 merged as MERGE_SHA with green CI on main."""
+    w.verdicts = [_repaired()]
+    iid = w.open("run-1", HARNESS)
+    w.drive_to(iid, S.AWAITING_MERGE)
+    w.merged_and_green()
+    return iid
+
+
+def _owner_moves_live_wt_past_the_fix(w: World) -> None:
+    """``scripts/move_live_wt.py`` put live-wt on main's tip, which contains the merge."""
+    w.live_wt, w.ancestry = NEWER_SHA, {(MERGE_SHA, NEWER_SHA), (OLD_SHA, NEWER_SHA)}
+
+
+NOT_MOVED = f"live-wt at {NEWER_SHA[:12]} already contains the fix {MERGE_SHA[:12]}; not moved"
+
+
+def test_a_live_wt_that_already_contains_the_fix_is_not_moved_back(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Invariant 1 (I-237): a live-wt already past the repair's merge stays where it is,
+    with a note, and the health check and the resume go ahead on that HEAD."""
+    w = world
+    iid = _awaiting_a_green_merge(w)
+    _owner_moves_live_wt_past_the_fix(w)
+    checked_on: list[str] = []
+
+    def health(*_: Any, **__: Any) -> list[str]:
+        checked_on.append(w.live_wt)
+        return []
+
+    monkeypatch.setattr(runtime, "health_check", health)
+    inc = w.step(iid)
+    assert inc.state is S.RUNTIME_UPDATED, inc.escalation
+    assert w.live_wt == NEWER_SHA and w.n("move") == 0
+    assert inc.merge_sha == MERGE_SHA and inc.live_wt_target == NEWER_SHA
+    assert inc.prev_live_wt_sha == NEWER_SHA  # the HEAD before the step
+    last = w.store.events(iid)[-1][1]
+    assert NOT_MOVED in last and "moved from" not in last
+    assert w.step(iid).state is S.HEALTHY and checked_on == [NEWER_SHA]
+    assert w.step(iid).state is S.RESUMING and w.n("replay") == 1
+    assert w.live_wt == NEWER_SHA and w.n("move") == w.n("rollback") == 0
+
+
+def test_a_live_wt_moved_past_the_fix_while_the_move_waited_is_not_moved_back(
+    world: World,
+) -> None:
+    """Invariant 1, the held incident's path (#142): the move waited on a running SCIO after
+    the rollback point was recorded, the owner held the incident, moved live-wt to main's
+    tip and released it. Neither the stored rollback point nor the merge SHA moves it back."""
+    w = world
+    iid = _awaiting_a_green_merge(w)
+    w.refuse = runtime.RuntimeRefused("SCIO is running (pid 7)", retryable=True)
+    assert w.step(iid).state is S.AWAITING_MERGE
+    assert w.store.step_done(iid, "live-wt-prev")  # OLD_SHA, recorded before the refusal
+    w.refuse = None
+    machine.hold(iid, w.deps)
+    _owner_moves_live_wt_past_the_fix(w)
+    machine.release(iid, w.deps)
+    inc = w.step(iid)
+    assert inc.state is S.RUNTIME_UPDATED and w.live_wt == NEWER_SHA and w.n("move") == 0
+    assert inc.prev_live_wt_sha == NEWER_SHA and inc.live_wt_target == NEWER_SHA
+
+
+def test_a_live_wt_behind_the_fix_still_moves_to_the_merge_sha(world: World) -> None:
+    """Invariant 2 (I-237): otherwise live-wt moves to the merge SHA, as before, and the
+    merge SHA is the effective target recorded on the incident."""
+    w = world
+    iid = _awaiting_a_green_merge(w)
+    w.ancestry = {(OLD_SHA, MERGE_SHA)}  # live-wt is behind: the merge contains its HEAD
+    inc = w.step(iid)
+    assert inc.state is S.RUNTIME_UPDATED and w.live_wt == MERGE_SHA and w.n("move") == 1
+    assert inc.prev_live_wt_sha == OLD_SHA and inc.live_wt_target == MERGE_SHA
+    assert f"live-wt moved from {OLD_SHA[:12]}" in w.store.events(iid)[-1][1]
+
+
+def test_a_lock_change_after_the_fix_is_not_blamed_on_the_repair(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Invariant 3 (I-237): uv.lock changed on main after the repair merged, not in the
+    repair. uv.lock is compared between the HEAD before the step and the effective target,
+    so the repair is not refused for a lock it did not change."""
+    w = world
+    locks = {OLD_SHA: "v1", MERGE_SHA: "v1", NEWER_SHA: "v2"}
+    compared: list[tuple[str, str]] = []
+
+    def lock_changed(_cfg: Any, old: str, new: str, **_: Any) -> bool:
+        compared.append((old, new))
+        return locks[old] != locks[new]
+
+    monkeypatch.setattr(runtime, "lock_changed", lock_changed)
+    iid = _awaiting_a_green_merge(w)
+    _owner_moves_live_wt_past_the_fix(w)
+    assert w.step(iid).state is S.RUNTIME_UPDATED
+    inc = w.step(iid)
+    assert inc.state is S.HEALTHY, inc.escalation
+    assert compared == [(NEWER_SHA, NEWER_SHA)] and w.n("rollback") == 0
+
+
+def test_a_failed_health_check_on_a_live_wt_that_was_not_moved_keeps_its_head(
+    world: World,
+) -> None:
+    """The rollback still runs, to the HEAD before the step, which is where live-wt is."""
+    w = world
+    iid = _awaiting_a_green_merge(w)
+    _owner_moves_live_wt_past_the_fix(w)
+    w.health = ["scio report --thread T exited 1"]
+    assert w.step(iid).state is S.RUNTIME_UPDATED
+    inc = w.step(iid)
+    assert inc.state is S.ESCALATED and "exited 1" in inc.escalation
+    assert f"back on {NEWER_SHA[:12]}" in inc.escalation
+    assert w.live_wt == NEWER_SHA and w.n("rollback") == 1 and w.n("replay") == 0
+
+
+def test_an_incident_from_before_i237_compares_the_lock_with_its_merge_sha(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record saved before ``live_wt_target`` existed loads with it empty, and its health
+    check compares uv.lock with the merge SHA, as it did."""
+    w = world
+    compared: list[tuple[str, str]] = []
+
+    def lock_changed(_cfg: Any, old: str, new: str, **_: Any) -> bool:
+        compared.append((old, new))
+        return False
+
+    monkeypatch.setattr(runtime, "lock_changed", lock_changed)
+    iid = _awaiting_a_green_merge(w)
+    assert w.step(iid).state is S.RUNTIME_UPDATED
+    data = w.get(iid).to_dict()
+    del data["live_wt_target"]
+    old = Incident.from_dict(data)
+    assert old.live_wt_target == ""
+    w.store.save_incident(old)
+    assert w.step(iid).state is S.HEALTHY
+    assert compared == [(OLD_SHA, MERGE_SHA)]
 
 
 def test_a_transient_failure_backs_off_replays_and_escalates_past_max_replays(

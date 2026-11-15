@@ -254,6 +254,11 @@ class Incident:
     pr_number: int | None = None
     merge_sha: str = ""
     prev_live_wt_sha: str = ""
+    live_wt_target: str = ""
+    """The commit live-wt runs the health check and the resume on: ``merge_sha`` when the
+    supervisor moved live-wt there, or live-wt's HEAD when that HEAD already contained the
+    fix and was kept (never moved backwards, I-237). Empty on an incident recorded before
+    I-237: read ``merge_sha`` then."""
     snapshot_dir: str = ""
     resume_run_id: str | None = None
     backoff_until: float | None = None

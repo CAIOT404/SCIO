@@ -167,6 +167,7 @@ live-wt moves only when no `python -m scio` process is running from it. The supe
     - CI on `main` is green for that SHA.
   - Then `git -C .scio/live-wt fetch origin` and `git -C .scio/live-wt checkout --detach <sha>`, probed by `rev-parse HEAD`. The previous SHA is recorded for rollback.
   - This also moves the hook that every session runs (guardrail 68), which is one more reason for the CI precondition.
+  - *Amended 2026-11-15 (I-237):* live-wt never moves backwards. If live-wt's HEAD already contains the merge commit, because someone moved it to a newer `main` while the incident waited or was held, it stays where it is. The note says so, and that HEAD is the effective target (`Incident.live_wt_target`) for the probe, the lock comparison and the health check.
 - **Health check.** Every step must pass, or live-wt goes back to the recorded SHA and the incident escalates:
   1. `sh scio.sh --help` exits 0 from the workspace (SCIO has no `--version`; I-184).
   2. `uv.lock` is the same at the old and new SHA. The launcher runs `--no-sync` on the main venv (owner, 12.5).
