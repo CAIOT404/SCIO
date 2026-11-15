@@ -9,6 +9,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ### Added
 - `docs/WORKFLOW_V2.md`, the standing checklist of every change from the 2026-11-14 workflow teardown (issue #122). `scripts/workflow_status.py` computes each item's status from the evidence it names (a test, a symbol, a file or a CLAUDE.md line), so nothing is ticked by hand. A `SessionStart` hook puts the count and the next open items into every session, and the docs check fails on a malformed checklist. CLAUDE.md gains the process rules W-01 to W-09 and W-34.
+- `scripts/dev/`: `read_stream.py` (a `claude -p` stream-json summary), `ledger_pairs.py` (per-call usage in a cost ledger) and `claude_probe.py`. The probe runs one `claude -p` with exactly the worker's flags, through `worker_argv` and `resume_argv`, which are now extracted from `ClaudeCodeWorker` without behaviour change. `scripts/brief.py` fills `.claude/templates/agent-brief.md` from an issue, and `.claude/templates/agent-report.md` is the agents' report schema (issue #122, W-30 to W-33).
 
 ### Changed
 - CI runs its tests in three shards that together cover every test file, and runs the evals only when a pull request touches code. `scripts/ci_changes.py` decides, by a job condition, never a workflow path filter. The required `checks` fails on any failed, cancelled or skipped shard. CI also runs on the merge queue (`merge_group`) (issue #122, W-35 to W-37).
