@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -127,6 +128,17 @@ def test_the_browser_tests_run_in_their_own_shard_on_few_workers() -> None:
     assert 1 <= int(live[0]["workers"]) <= 2, live[0]
     step = next(s for s in tests["steps"] if "pytest" in str(s.get("run", "")))
     assert "${{ matrix.workers }}" in step["run"] and '-n "$WORKERS"' in step["run"]
+    # Every test that drives a browser lives under tests/live, so no shard but this one runs
+    # Chromium: tests/unit/test_dashboard_recovery.py's two page tests moved there (I-224).
+    root = Path(__file__).resolve().parents[2] / "tests"
+    drives_a_browser = re.compile(r"^\s*from playwright\b", re.MULTILINE)
+    outside = sorted(
+        p.relative_to(root.parent).as_posix()
+        for p in root.rglob("test_*.py")
+        if "live" not in p.relative_to(root).parts[:1]
+        and drives_a_browser.search(p.read_text(encoding="utf-8", errors="replace"))
+    )
+    assert not outside, f"browser tests outside tests/live: {outside}"
 
 
 def _checks_verdict(
