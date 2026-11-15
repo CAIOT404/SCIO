@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Changed
+- The gate is quick by default (issue #122, W-11 to W-19):
+  - It runs lint, types, the tests of the paths changed since the last pass, the evals only when code changed, and the docs check. A Markdown-only change runs only the docs steps. `--full` runs what CI runs.
+  - A pass stamps its tree in `.scio/gate/last-pass.json`, and a tree that already passed is not gated again. A leftover `RUNNING` marker shows a gate that died. One gate runs at a time on the machine.
+  - The push gate refuses a head whose tree no pass stamped. Tags, deletions, gated merges, docs stamps, `SCIO_ACK_GATE`, the recovery repair worktree and other repositories pass, and an error in the check allows the push.
+  - Every refusal is logged outside the repository, to `hook-refusals.log`. A refused inline script is told which scratch file to write instead.
+
 ### Fixed
 - On T1 the explorer runs before the planner, and the planner reads its summary. Every planned path is then checked against the tree: a guessed path is replaced by its one localized match, kept as a probable new file when its folder exists, and dropped only when neither, each choice recorded. graphcalc's P26 planned a `graphcalc/evaluator.py` that did not exist (issue #121, I-213).
 
