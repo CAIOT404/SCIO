@@ -781,3 +781,52 @@ The owner asked for every change from the workflow teardown, tracked in a checkl
 - **Improvements:**
   1. Land every queued PR with `scripts/land.py N --next`, so the next gate runs during this PR's CI.
   2. Close I-223: the provider raises a used-up usage window as its own error. The supervisor then reads it from the error's type, not from its wording.
+
+## Streamline (2026-11-15, issue #141, PRs #143 to #154)
+
+The owner, after Workflow v2: freeze process work and judge it by the calculator; measure; put a threshold on incidents and retire rules; unblock merging; make questions to the owner an asynchronous channel. The aim, in the owner's words: "more streamline with out drifting or lost visiblity". Graphcalc was paused on the owner's word while this landed (incident #142 held).
+
+### What succeeded
+- **Merging is unblocked.**
+  - The repository moved to the organization `CAIOT404`. The inventory was identical before and after, and old links redirect.
+  - `main` requires a merge queue, and a branch no longer needs to be up to date.
+  - `land.py N --enqueue` is the merge act. It enqueues an approved PR, a revert, or a low-risk docs/tests-only PR, and watches main's CI after each merge.
+  - From #143 on, 12 PRs went through the queue, and main's CI passed after every merge.
+- **Questions are a channel** (ADR 0020).
+  - A design question parks its feature, goes to the feature's issue (`needs-answer`) and the dashboard, and the other features keep building.
+  - An `answer:` comment or the dashboard's answer box feeds the next attempt (#137's path).
+  - The milestone waits once, at `questions_wait`, only when nothing else can build.
+  - A skip no longer stops the gate a second time (#140).
+- **The audit is numbers.** `scripts/metrics.py` measures the SCIO PRs and the live product, and `session_state.py` shows them.
+- **Fewer rules to read.** The first guardrail review left 21 active rules of 100, and `check_docs.py --active` prints the list.
+- **A slip with no effect is counted** (`scripts/slip.py`), not ledgered. Two were counted this pass.
+
+### What failed
+- **I-233:** `gh pr merge` cannot enqueue on this repository; it tries auto-merge, which is not allowed. Fixed with `land.py --enqueue`.
+- **I-234:** agents' own test runs missed a cross-module pin and a codebase scan. The gate caught both, at the cost of two re-gates. Fixed with the `scan` marker in every brief.
+- **I-237:** the supervisor would have moved live-wt backwards when releasing the held incident after newer merges. Found by reading the code before the release; fixed.
+- **Two conflicts on shared lines.**
+  - #146 conflicted after #144 merged, and GitHub runs no CI on a conflicting PR. A stopgap script watched it for 5 minutes (a counted slip); `land.py` checks for conflicts.
+  - The guardrail and metrics PRs both edited adjacent CLAUDE.md protocol lines, and needed a merge by hand.
+- **I-232 (open):** the hooks do not see PowerShell tool calls.
+
+### Actions
+- PRs: #143 (#137), #144 (#142 repair), #145 (the org move), #146 (#140), #147 (ADR 0020 contract), #148 (`land.py`), #149 (metrics), #150 (dashboard answers), #151 (guardrail review), #152 (`scan` marker), #153 (parking), #154 (I-237).
+- Guardrails 101 to 110. I-228 to I-237; I-231, I-232 and I-238 stay open.
+
+### Bottleneck audit (`scripts/metrics.py --days 2`)
+- **SCIO:**
+  - 34 PRs merged, lead time median 0.2 h and p90 1.6 h, rework 1/34;
+  - CI median 6.2 min and p90 13.3 min;
+  - gate median 6.1 min (5 recorded since the history began).
+- **Friction:** 12 hook refusals, 10 of them backslashes (5 single, 5 double), and 2 slips.
+- **graphcalc:**
+  - 4 features passed (2.0/day) at $7.49 each;
+  - 1 of 9 attempts escalated to the owner;
+  - **4 of 9 (44%) failed without a human stop:** crashes, caps, errors;
+  - 2.5 h stalled on the owner.
+  - The pause for this pass (incident #142 held, from 03:54) was the owner's choice, not a stop, and is not counted.
+- **Serial work that could have been parallel:** one gate at a time on the machine, so the gates of #146 to #154 ran back to back. The merge queue and agents worked in parallel around them.
+- **Improvements (for the freeze, both graphcalc bottlenecks):**
+  1. The 44% of attempts that fail without a human stop. Break them down by `failed_by_reason` in `metrics.py --json` after graphcalc's next milestone, and fix the largest reason first.
+  2. The backslash refusals (10 in two days). I-232 extends the hooks to PowerShell; the repeated habit is writing inline scripts. Count the next pass's refusals before adding anything.
