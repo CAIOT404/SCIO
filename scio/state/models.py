@@ -160,6 +160,10 @@ class PlanStep(BaseModel):
     files_expected: list[str]
     """Used by plan-drift detection (signal 4)."""
     done: bool = False
+    files_new: list[str] = Field(default_factory=list)
+    """The files the step creates. ``plan`` grounds ``files_expected`` in the repository's
+    tree: a named file that does not exist and is not declared here is dropped or replaced
+    (issue #121). Defaulted, so plans and checkpoints from before it load."""
 
 
 class Plan(BaseModel):

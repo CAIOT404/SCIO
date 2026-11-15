@@ -55,7 +55,11 @@ CI checks docs: links, runnable examples, architecture diagram vs. the compiled 
   - a check piped into another command without `set -o pipefail` (guardrail 64, I-173). Start the line with `set -o pipefail`, or drop the pipe.
 
   On the owner's machine the user settings (`~/.claude/settings.json`) run the same hook in every session, any project: a session started outside the repository loads no project hooks (I-178, guardrail 68). That copy runs from `.scio/live-wt`, so a hook change reaches other sessions when the SCIO session moves live-wt after the merge.
-- CI runs `tests`, `evals` and `docker-live` side by side; the required status `checks` passes only when `tests` and `evals` both passed (issue #88). Every job has a Docker daemon, so the docker-live tests also run in `tests` on the plain Python image; a test that needs the built sandbox image skips there only when `SCIO_SANDBOX_DOCKER_IMAGE` is unset (I-105).
+- CI runs `changes`, three `tests` shards, `evals` and `docker-live` side by side (issues #88 and #122):
+  - The shards together cover every test file, `tests/live` included (`test_ci_shards_cover_every_test_directory`). Lint, mypy and the docs check run on shard 1. Each shard prints its 30 slowest tests, for rebalancing.
+  - `changes` (`scripts/ci_changes.py`) marks a pull request whose diff touches no code path. Only then are the evals skipped, by a job condition, never a workflow `paths:` filter.
+  - The required status `checks` always runs. It passes only when `changes` and every shard succeeded, and `evals` succeeded or was skipped for a no-code PR.
+  - `merge_group` runs everything. Every job has a Docker daemon, so the docker-live tests also run in `tests` on the plain Python image; a test that needs the built sandbox image skips there only when `SCIO_SANDBOX_DOCKER_IMAGE` is unset (I-105).
 
 ## Continuous improvement protocols
 These five protocols are mandatory for humans and agents. `CLAUDE.md` restates them for AI sessions.

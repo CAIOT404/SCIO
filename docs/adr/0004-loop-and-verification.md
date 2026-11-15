@@ -19,3 +19,26 @@ The first end-to-end tier needs a worker turn that uses tools, a verification st
 - One extra model call per worker turn (the summary). Measured on the Fake provider at real-model prices, a full T0 run of t001 is 13 calls.
 - `tests_added` is a T0 convenience; M4 moves test ownership to the plan (`PlanStep.feature_ids` → `FeatureItem.test_filter`).
 - The gate prompt sees docs-check results only through the PR body; a direct docs-check input to the gate is a small M4 follow-up.
+
+## Amendment (2026-11-14, issue #121): a plan is grounded in the repository before a step runs
+In graphcalc P26 (attempts 3 and 4) the T1 planner ran before its explorer, said so ("No exploration summaries were provided, so the file paths (graphcalc/evaluator.py, graphcalc/state.py) are guesses"), and named `graphcalc/evaluator.py`, which does not exist (the evaluator is `graphcalc/calc.py`). `localize` then appended the explorer's files to each step (I-151), and the guess stayed in `files_expected`, where it fed plan drift (I-166) and sent the coder looking for a module that is not there.
+
+- **The explorer before the planner on T1.** The T1 path is now `prepare_repo → localize → plan → post_plan → implement`; it was `plan → post_plan → localize → implement`. The planner reads the localize summary through the same `explorer_summaries` input T2's explorers feed. With no plan yet, the explorer is asked where the task (title and acceptance lines) is implemented and tested, for the existing files in `relevant_files` with `path:line` citations. `localize` still runs once per run: replans (the advisor's, and the gate's, I-043) return to `plan`, never to `localize`. A checkpoint from before this change that is paused between `post_plan` and `localize` resumes as before: `after_localize` sends a state that already has a plan to `implement`. T2 (`scope → explore → plan`) and T0 (no planner) are unchanged.
+- **Grounding** (`planning.ground_plan`), applied to every new plan on T1 and T2: the planner's, every replan, and the advisor's `revised_steps`. Each open step's `files_expected` is checked against the files git sees, tracked and untracked. A path stays when:
+  - it exists (a file, or a directory that holds one), or
+  - the step declares it in the new `PlanStep.files_new` (defaulted to `[]`, so older plans and checkpoints load), or
+  - it is a test path (the toolchain's `is_test_path`) in a step whose text says it writes something (add, create, write, new, test).
+
+  Any other path is a guess. It is replaced by the obvious file it meant, when there is exactly one (each match stands in for one guess only):
+  1. the one file in the tree whose path ends with it;
+  2. the one localized file with the same basename;
+  3. the one localized file in the same directory that the step does not list already.
+
+  With no such match, the path is kept as a probable new file when its directory exists (the repository root counts), and dropped only when its directory does not exist either. The reason: an expected file that is never touched causes no drift, but a dropped file that the coder then creates is drift, the S8 halt pattern. P26 attempt 4 created the guessed `graphcalc/state.py`. Each replacement, kept guess or drop is one ledger fact, for example `plan grounding (v1): S1 graphcalc/evaluator.py -> graphcalc/calc.py (localized)` or `plan grounding (v1): S1 kept graphcalc/state.py (probable new file: its directory exists)`. `files_new` entries join `files_expected`, because drift reads only that list.
+- **Then T1's localized files join the steps** (I-151), as before, but after the grounded plan. A step whose every named file was dropped still receives them. Otherwise its empty list would turn the drift check off. Drift therefore compares the diff with the grounded list (I-166).
+- **Test filters are flagged, not dropped** (`planning.unmatched_test_filters`). An open feature's `test_filter` is flagged in the ledger when it matches nothing:
+  - a path filter, when the path neither exists nor is named by its step;
+  - a term filter, when no term is in a test file's path or text (`git grep`) and its step creates no test file.
+
+  The coder may write the test. The note lets a later halt on "no tests collected" be read against the plan.
+- **The planner prompt** (`planner` v3) says to name only files the summaries show exist or files the step creates, to list created files in `files_new`, and to give each feature a test filter that selects real tests or tests its step writes.
