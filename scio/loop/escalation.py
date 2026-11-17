@@ -170,15 +170,23 @@ def decide(state: SCIOState, cfg: EscalationConfig, *, root: str | None = None) 
     if used >= cap:
         reason = f"advisor cap hit ({used}/{cap} for this run, step {step_id})"
         return TriageDecision(route="halt", triggers=triggers, reason=reason + drift)
+    reason = (
+        f"advisor already consulted on step {step_id} "
+        f"(one call per step; {used}/{cap} for this run)"
+    )
+    w = state.last_worker_output
+    if w is not None and w.needs_design_decision:
+        # A design question the step's consult did not settle goes to a person, as before:
+        # the halt keeps the worker's question in state, and the build parks the feature on
+        # it (ADR 0020). Sending it back to work would lose the question to the next turn.
+        return TriageDecision(route="halt", triggers=triggers, reason=reason + drift)
     # Issue #172: the step's one consult is used and the run's total is not. The step goes
     # back to work instead of halting at once: this is an ordinary fix attempt, so the
     # stall and iteration exits (checked before this function runs) still end a step that
     # makes no progress. The triggers stay on the decision for the ledger.
-    reason = (
-        f"advisor already consulted on step {step_id} "
-        f"(one call per step; {used}/{cap} for this run); the step continues"
+    return TriageDecision(
+        route="debug", triggers=triggers, reason=reason + "; the step continues" + drift
     )
-    return TriageDecision(route="debug", triggers=triggers, reason=reason + drift)
 
 
 def review_decision(state: SCIOState, cfg: EscalationConfig) -> TriageDecision | None:

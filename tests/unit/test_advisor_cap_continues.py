@@ -250,3 +250,21 @@ def test_a_state_without_drift_approvals_still_loads() -> None:
     assert loaded.drift_approved == {}
     d = decide(loaded, CFG, root=ROOT)
     assert d.route == "advise" and d.reason == f"plan_drift; plan_drift on {DRIFTED}"
+
+
+def test_an_unsettled_design_question_still_halts_for_a_person() -> None:
+    """A worker that still needs a design decision after the step's consult is not sent back
+    to work: the halt keeps its question in state, and the build parks the feature on it
+    (ADR 0020). Only a signal without an open question continues."""
+    consulted = _state(budgets=_budget(used=1, on_step={"S3": 1}))
+    asking = _worker(PLANNED, confidence="low").model_copy(
+        update={"needs_design_decision": True, "design_question": "Keep unicode letters?"}
+    )
+    after = _ruled(consulted).model_copy(update={"last_worker_output": asking})
+    assert not after.budgets.advisor_allowed("S4")
+
+    d = decide(after, CFG, root=ROOT)
+    assert d.route == "halt" and exit_for(d) is ExitReason.ADVISOR_CAP
+    assert d.reason == "advisor already consulted on step S4 (one call per step; 2/3 for this run)"
+    assert after.last_worker_output is not None
+    assert after.last_worker_output.design_question == "Keep unicode letters?"
