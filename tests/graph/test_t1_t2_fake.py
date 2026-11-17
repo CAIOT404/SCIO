@@ -344,16 +344,15 @@ def test_t1_replan_keeps_the_localized_files_and_an_unnamed_file_still_drifts(
     """The coder also writes ``pager/extra.py``, which nobody named: plan drift. The advisor
     replans; plan v2 is the planner's guess again, and localize does not run twice, so the
     explorer's file must be merged back from the stored summary. The second drift then
-    meets the one-call-per-step cap and halts."""
-    _ctx_unused, outcome = _run(
+    meets the one-call-per-step cap. Until issue #172 that halted on ``advisor_cap``; with
+    run headroom the step now goes back to work, still naming the drifting file, and a
+    ``replan`` verdict approved nothing."""
+    ctx, outcome = _run(
         tmp_path,
         "t002_fix_failing_test",
         "T1",
         GuessedFileResponder(unnamed=True, advisor_verdict="replan"),
     )
-    assert outcome.paused and outcome.interrupt is not None
-    assert outcome.interrupt["reason"] == "advisor_cap"
-    assert EscalationTrigger.PLAN_DRIFT in outcome.interrupt["triage"]["triggers"]
     s = outcome.state
     assert [(e.trigger, e.verdict) for e in s.escalations] == [
         (EscalationTrigger.PLAN_DRIFT, Verdict.REPLAN)
@@ -362,6 +361,62 @@ def test_t1_replan_keeps_the_localized_files_and_an_unnamed_file_still_drifts(
     assert s.plan.steps[0].files_expected == [REAL]  # from the stored summary (issue #121)
     texts = [e.text for e in s.task_ledger]
     assert f"plan grounding (v2): S1 {GUESSED} -> {REAL} (localized)" in texts
+    assert s.drift_approved == {}  # only ``continue`` approves
+    assert any(
+        "triage -> debug (advisor already consulted on step S1 (one call per step; "
+        "1/3 for this run); the step continues; plan_drift on pager/extra.py)" in t
+        for t in texts
+    ), texts
+    assert s.budgets.advisor_calls_used == 1
+    assert _finish(ctx, outcome).state.exit_reason is ExitReason.SUCCESS
+
+
+class NeverImprovesResponder(ScriptedResponder):
+    """Issue #172: a worker that reports low confidence on every turn and never fixes the
+    test, whatever the advisor said. The advisor answers ``continue``."""
+
+    def __init__(self, *, drift: bool = False) -> None:
+        super().__init__(coder_mode="drift" if drift else "wrong_first", advisor_verdict="continue")
+
+    def _edits_for(self, role: str, step: Step, text: str) -> list[Edit]:
+        # the advisor's guidance changes nothing: the guided coder repeats the wrong edit
+        return super()._edits_for(role, step, text.replace("[context from advisor]", ""))
+
+    def _worker_output(self, role: str, text: str) -> FakeReply:
+        reply = json.loads(super()._worker_output(role, text).text)
+        reply["confidence"] = "low"
+        return FakeReply(text=json.dumps(reply))
+
+
+@pytest.mark.parametrize("drift", [False, True])
+def test_a_step_that_never_improves_after_its_consult_ends_on_stall_or_max_iters(
+    tmp_path: Path, drift: bool
+) -> None:
+    """Issue #172, invariant 6. The step's one consult is used on the first failing verify
+    (verdict ``continue``), and every later verify fails with a signal again. With run
+    headroom each one sends the step back to work, as an ordinary fix attempt, so the stall
+    or the iteration exit ends the run. It never halts on ``advisor_cap`` and never loops.
+    With ``drift`` the consult is a ``plan_drift`` one: the README is approved once and
+    does not fire again."""
+    _ctx_unused, outcome = _run(
+        tmp_path, "t002_fix_failing_test", "T1", NeverImprovesResponder(drift=drift), max_iters=8
+    )
+    s = outcome.state
+    texts = [e.text for e in s.task_ledger]
+    assert s.exit_reason in (ExitReason.STALL, ExitReason.MAX_ITERS), (s.exit_reason, texts)
+    assert s.phase == "halted" and outcome.interrupt is None  # no question for the owner
+    assert s.budgets.advisor_calls_used == 1 and s.budgets.advisor_calls_on_step == {"S1": 1}
+    assert [e.verdict for e in s.escalations] == [Verdict.CONTINUE]
+    kept_working = [t for t in texts if "the step continues" in t]
+    assert kept_working, texts
+    assert all("triage -> debug (advisor already consulted on step S1" in t for t in kept_working)
+    assert s.progress.iterations <= 8
+    if drift:
+        assert any("triage -> advise" in t and "plan_drift on README.md" in t for t in texts)
+        assert s.drift_approved == {"v1:S1": ["README.md"]}
+        assert not any("plan_drift" in t for t in kept_working), kept_working
+    else:
+        assert s.drift_approved == {}
 
 
 def test_an_advisor_replan_with_revised_steps_keeps_the_localized_files(tmp_path: Path) -> None:
