@@ -91,9 +91,14 @@ class IncidentState(enum.StrEnum):
     CLOSED = "closed"
     ESCALATED = "escalated"
     HELD = "held"
+    DISMISSED = "dismissed"
+    """The owner ended it with ``python -m recovery dismiss``: it was not a SCIO fault
+    (issue #163). Terminal: nothing automatic happens to it again."""
 
 
-TERMINAL: frozenset[IncidentState] = frozenset({IncidentState.CLOSED, IncidentState.ESCALATED})
+TERMINAL: frozenset[IncidentState] = frozenset(
+    {IncidentState.CLOSED, IncidentState.ESCALATED, IncidentState.DISMISSED}
+)
 
 
 ThreadSource = Literal["progress", "outcome", "stdout", "ledger"]
@@ -278,6 +283,9 @@ class Incident:
     once the snapshot and the issue exist."""
     held_from: IncidentState | None = None
     """The state to return to when a ``HELD`` incident is released."""
+    dismissal: str = ""
+    """The owner's reason, set when the state becomes ``DISMISSED`` (issue #163). An
+    incident saved before the field existed reads as empty."""
 
     @property
     def open(self) -> bool:

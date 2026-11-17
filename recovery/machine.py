@@ -292,8 +292,13 @@ def _next_step(incident: Incident) -> str:
             f" The snapshot is kept at `{incident.snapshot_dir}`." if incident.snapshot_dir else ""
         )
         return f"read the escalation above and decide; the supervisor does nothing more.{where}"
+    if s is IncidentState.DISMISSED:
+        return "nothing: the owner dismissed it, and the supervisor does nothing more."
     if s is IncidentState.HELD:
-        return f"`python -m recovery release {iid}` hands it back to the supervisor."
+        return (
+            f"`python -m recovery release {iid}` hands it back to the supervisor; "
+            f'`python -m recovery dismiss {iid} --reason "..."` ends it with no repair.'
+        )
     if s is IncidentState.AWAITING_MERGE:
         return (
             f"review and merge PR #{incident.pr_number}. The supervisor then moves live-wt, "
@@ -335,6 +340,8 @@ def status_body(incident: Incident, note: str = "", *, sessions: Sequence[str] =
         lines.append(f"- Last step: {scrub.scrub(note)}")
     if incident.escalation:
         lines.append(f"- Escalation: {incident.escalation}")
+    if incident.dismissal:
+        lines.append(f"- Dismissed by the owner: {incident.dismissal}")
     lines += ["", f"**Next step for the owner:** {_next_step(incident)}"]
     return "\n".join(lines) + "\n"
 
@@ -1416,4 +1423,83 @@ def release(incident_id: str, deps: Deps) -> Incident:
     incident.held_from = None
     _record(incident, deps, f"held -> {back.value}: released by the owner")
     _post_status(incident, deps, "released by the owner")
+    return incident
+
+
+class DismissRefused(ValueError):
+    """``dismiss`` was asked for something it never does; the incident is unchanged."""
+
+
+def dismissed_marker(incident_id: str) -> str:
+    """The marker of the one comment that tells an issue its incident was dismissed."""
+    return f"<!-- scio-recovery-dismissed:{incident_id} -->"
+
+
+def _refuse_terminal(incident: Incident) -> None:
+    if not incident.open:
+        raise DismissRefused(
+            f"{incident.incident_id} is already {incident.state.value}; "
+            "only an open incident is dismissed"
+        )
+
+
+def dismiss(incident_id: str, reason: str, deps: Deps) -> Incident:
+    """``DISMISSED``, from any open state, ``HELD`` included (issue #163): the owner says
+    the incident was not a SCIO fault. Terminal. It starts no repair and no replay, and
+    never touches live-wt, the repair worktree or a PR.
+
+    Refused, with the incident unchanged (:class:`DismissRefused`):
+    - an empty reason;
+    - an incident that is already closed, escalated or dismissed;
+    - an incident another live process is driving now (the lease ``incident:<id>``, which
+      :func:`drive` holds for the whole of a repair session). ``hold`` lets a running
+      session finish and parks its result for the release; a dismissal has no state to
+      park it in, so the owner holds it, waits for the session to end, and dismisses then.
+
+    Then, best effort when the incident has an issue: the status comment, and one comment
+    that says it was dismissed and why. A GitHub failure is a timeline note, never an error.
+    """
+    why = scrub.scrub(" ".join(reason.split()))
+    if not why:
+        raise DismissRefused("a dismissal needs a reason (--reason)")
+    incident = _get(incident_id, deps)
+    _refuse_terminal(incident)
+    lease = f"incident:{incident_id}"
+    if not _acquire(deps, lease):
+        holder = deps.store.lease_holder(lease)
+        state = incident.held_from if incident.state is IncidentState.HELD else incident.state
+        what = (
+            "a repair session of it is still running"
+            if state is IncidentState.REPAIRING
+            else "a tick is working on it now"
+        )
+        raise DismissRefused(
+            f"{incident_id}: {what} (pid {holder.pid if holder else '?'}). Hold it "
+            f"(python -m recovery hold {incident_id}), wait for that to end "
+            f"(python -m recovery watch {incident_id}), then dismiss it"
+        )
+    try:
+        incident = _get(incident_id, deps)  # the lease is ours: read what the last step saved
+        _refuse_terminal(incident)
+        old = incident.state
+        incident.state = IncidentState.DISMISSED
+        incident.held_from = None
+        incident.backoff_until = None
+        incident.dismissal = why
+        note = f"dismissed by the owner: {why}"
+        _record(incident, deps, f"{old.value} -> dismissed: {note}")
+    finally:
+        _release(deps, lease)
+    _post_status(incident, deps, note)
+    if incident.issue_number is not None:
+        body = (
+            f"**SCIO recovery:** incident `{incident_id}` was dismissed by the owner: {why}\n\n"
+            "The supervisor starts no repair and no replay for it, and leaves live-wt as it is."
+        )
+        try:
+            _github(incident, deps).upsert_comment(
+                incident.issue_number, dismissed_marker(incident_id), body
+            )
+        except Exception as exc:
+            deps.store.add_event(incident_id, f"dismissal comment not posted: {exc}")
     return incident

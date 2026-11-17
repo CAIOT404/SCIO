@@ -5,8 +5,13 @@ starts. The store is the real one under the test's SCIO_RECOVERY_HOME (conftest)
 
 from __future__ import annotations
 
+import importlib.util
+import json
+import sqlite3
+import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -109,7 +114,7 @@ def test_help_lists_the_commands(capsys: pytest.CaptureFixture[str]) -> None:
     assert stop.value.code == 0
     out = capsys.readouterr().out
     assert "usage:" in out
-    for command in ("run", "tick", "status", "incidents", "hold", "release"):
+    for command in ("run", "tick", "status", "incidents", "hold", "release", "dismiss"):
         assert command in out
 
 
@@ -276,6 +281,186 @@ def test_hold_and_release_print_one_line_and_an_unknown_incident_returns_2(
     assert cli.main(["hold", "inc-missing"]) == 2
     err = capsys.readouterr().err.strip().splitlines()
     assert len(err) == 1 and "no incident inc-missing" in err[0]
+
+
+# dismiss (issue #163)
+
+
+def _status_out(capsys: pytest.CaptureFixture[str]) -> str:
+    capsys.readouterr()
+    assert cli.main(["status"]) == 0
+    return capsys.readouterr().out
+
+
+def _script(name: str) -> ModuleType:
+    """A session tool from ``scripts/``, loaded by path: it reads this command's text."""
+    path = Path(__file__).resolve().parents[2] / "scripts" / f"{name}.py"
+    key = f"_recovery_test_{name}"
+    spec = importlib.util.spec_from_file_location(key, path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[key] = mod  # @dataclass looks its module up there (I-174)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class StatusRunner:
+    """Answers ``python -m recovery status`` with the text the real command printed."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def run(self, argv: Any, cwd: Path | None = None, **_: Any) -> Any:
+        assert list(argv)[1:] == ["-m", "recovery", "status"], argv
+        return subprocess.CompletedProcess(list(argv), 0, self.text, "")
+
+
+def test_dismiss_prints_one_line_and_a_refusal_exits_1(
+    recovery_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = Store.at_home(recovery_home)
+    store.save_incident(
+        _incident("inc-h", state=IncidentState.HELD, held_from=IncidentState.ISSUE_OPEN)
+    )
+    store.save_incident(_incident("inc-c", state=IncidentState.CLOSED))
+    store.save_incident(_incident("inc-e", state=IncidentState.ESCALATED, escalation="why"))
+    store.close()
+    assert cli.main(["dismiss", "inc-h", "--reason", "the machine slept (#158)"]) == 0
+    assert capsys.readouterr().out.strip() == "inc-h: dismissed (the machine slept (#158))"
+    for iid, state in (("inc-c", "closed"), ("inc-e", "escalated"), ("inc-h", "dismissed")):
+        assert cli.main(["dismiss", iid, "--reason", "again"]) == 1
+        captured = capsys.readouterr()
+        err = captured.err.strip().splitlines()
+        assert captured.out == "" and len(err) == 1
+        assert err[0].startswith(f"recovery dismiss: {iid} is already {state}")
+    assert cli.main(["dismiss", "inc-c", "--reason", "  "]) == 1
+    assert "needs a reason" in capsys.readouterr().err
+    assert cli.main(["dismiss", "inc-missing", "--reason", "why"]) == 2
+    assert "no incident inc-missing" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as no_reason:
+        cli.main(["dismiss", "inc-c"])
+    assert no_reason.value.code == 2
+    store = Store.at_home(recovery_home)
+    states = {i.incident_id: i.state.value for i in store.incidents()}
+    timeline = [text for _, text in store.events("inc-h")]
+    store.close()
+    assert states == {"inc-h": "dismissed", "inc-c": "closed", "inc-e": "escalated"}
+    assert timeline == ["held -> dismissed: dismissed by the owner: the machine slept (#158)"]
+
+
+def test_a_dismissed_incident_is_not_open_for_move_live_wt(
+    recovery_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = Store.at_home(recovery_home)
+    store.save_run(_record("run-1", incident_id="inc-h"))
+    store.save_incident(
+        _incident(
+            "inc-h",
+            state=IncidentState.HELD,
+            held_from=IncidentState.ISSUE_OPEN,
+            failure_class=FailureClass.HANG,
+        )
+    )
+    store.save_incident(_incident("inc-old", state=IncidentState.HELD, created_at=1.0))
+    store.close()
+    mv, ss = _script("move_live_wt"), _script("session_state")
+    main = tmp_path / "SCIO"
+    (main / ".scio" / "recovery-wt").mkdir(parents=True)
+
+    held = _status_out(capsys)
+    assert mv.busy_reasons(main, StatusRunner(held), ss) == [
+        "open incident: inc-h  held  hang  issue -  PR -",
+        "open incident: inc-old  held  harness_suspect  issue -  PR -",
+    ]
+
+    assert cli.main(["dismiss", "inc-old", "--reason", "an older false alarm"]) == 0
+    assert cli.main(["dismiss", "inc-h", "--reason", "the machine slept"]) == 0
+    after = _status_out(capsys)
+    assert "open incidents: none" in after
+    listed = after[after.index("dismissed by the owner, not open (newest first):") :]
+    assert listed.index("inc-h  dismissed  hang") < listed.index("inc-old  dismissed")
+    assert "    dismissed: the machine slept" in listed
+    activity = ss.parse_recovery_status(after)
+    assert activity.read and activity.incidents == [] and activity.running == []
+    assert mv.busy_reasons(main, StatusRunner(after), ss) == []
+    assert "open incidents: none" in "\n".join(ss._recovery_lines(activity))
+
+
+def test_status_lists_only_the_newest_dismissed_incidents(
+    recovery_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = Store.at_home(recovery_home)
+    for n in range(cli.STATUS_DISMISSED + 2):
+        store.save_incident(
+            _incident(
+                f"inc-{n}", state=IncidentState.DISMISSED, dismissal="why", created_at=float(n)
+            )
+        )
+    store.close()
+    out = _status_out(capsys)
+    assert "inc-6  dismissed" in out and "inc-2  dismissed" in out and "inc-1  " not in out
+    assert "  ... 2 older dismissed incidents" in out
+
+
+OLD_STATES = [
+    "detected",
+    "snapshotted",
+    "classified",
+    "waiting_backoff",
+    "issue_open",
+    "repairing",
+    "pr_verified",
+    "awaiting_merge",
+    "runtime_updated",
+    "healthy",
+    "resuming",
+    "verified",
+    "closed",
+    "escalated",
+    "held",
+]
+"""Every incident state a store written before ``dismissed`` existed can hold."""
+
+
+def test_a_store_without_the_dismissed_state_still_loads(
+    recovery_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = Store.at_home(recovery_home)
+    store.close()
+    db = sqlite3.connect(str(recovery_home / "state.sqlite"))
+    for n, state in enumerate(OLD_STATES):
+        data = _incident(f"inc-{state}", state=IncidentState(state), created_at=float(n)).to_dict()
+        del data["dismissal"]  # the record as the old code wrote it
+        if state == "held":
+            data["held_from"] = "issue_open"
+        db.execute(
+            "INSERT INTO incidents(incident_id, signature, workspace, state, created_at,"
+            " updated_at, data) VALUES(?,?,?,?,?,?,?)",
+            (data["incident_id"], "abc123", "W", state, float(n), float(n), json.dumps(data)),
+        )
+    db.commit()
+    db.close()
+
+    store = Store.at_home(recovery_home)
+    loaded = {i.incident_id: i for i in store.incidents()}
+    opened = [i.incident_id for i in store.open_incidents()]
+    store.close()
+    assert sorted(loaded) == sorted(f"inc-{s}" for s in OLD_STATES)
+    assert all(i.dismissal == "" for i in loaded.values())
+    assert sorted(opened) == sorted(
+        f"inc-{s}" for s in OLD_STATES if s not in ("closed", "escalated")
+    )
+    out = _status_out(capsys)
+    assert "inc-held  held  harness_suspect" in out and "dismissed by the owner" not in out
+
+    assert cli.main(["dismiss", "inc-held", "--reason", "written by the old code"]) == 0
+    out = _status_out(capsys)
+    assert "inc-held  dismissed  harness_suspect" in out
+    assert "    dismissed: written by the old code" in out
+    store = Store.at_home(recovery_home)
+    still_open = [i.incident_id for i in store.open_incidents()]
+    store.close()
+    assert "inc-held" not in still_open and len(still_open) == len(opened) - 1
 
 
 def test_tick_prints_its_lines(

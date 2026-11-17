@@ -1,4 +1,4 @@
-"""``python -m recovery``: run, tick, status, incidents, hold, release. OWNER: wave-1 agent H.
+"""``python -m recovery``: run, tick, status, incidents, hold, release, dismiss.
 
 ``run`` exits with the child's own exit code, so a session that called ``sh scio.sh
 build ...`` before sees the same status and output under the supervisor. Every other
@@ -26,6 +26,8 @@ PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 STATUS_RUNS = 20
 """How many runs ``status`` lists."""
 STATUS_ESCALATED = 10
+STATUS_DISMISSED = 5
+"""How many dismissed incidents ``status`` lists."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -64,6 +66,18 @@ def build_parser() -> argparse.ArgumentParser:
     hold.add_argument("incident")
     rel = sub.add_parser("release", help="resume a held incident")
     rel.add_argument("incident")
+    dis = sub.add_parser(
+        "dismiss",
+        help="end an incident that was not a SCIO fault: no repair, no replay",
+        description=(
+            "Ends an open incident (a held one too) as dismissed, with the reason on its "
+            "timeline and on its issue. It starts no repair and no replay and leaves live-wt "
+            "as it is. Exits 1, changing nothing, for an incident that is already closed, "
+            "escalated or dismissed, and while a repair session of it is still running."
+        ),
+    )
+    dis.add_argument("incident")
+    dis.add_argument("--reason", required=True, help="why it was not a SCIO fault")
 
     watch_cmd = sub.add_parser(
         "watch",
@@ -207,6 +221,17 @@ def _release(args: argparse.Namespace) -> int:
     return 0
 
 
+def _dismiss(args: argparse.Namespace) -> int:
+    deps = machine.default_deps(_home(), PACKAGE_ROOT)
+    try:
+        incident = machine.dismiss(args.incident, args.reason, deps)
+    except machine.DismissRefused as exc:
+        _err(f"recovery dismiss: {exc}")
+        return 1
+    print(f"{incident.incident_id}: dismissed ({incident.dismissal})")
+    return 0
+
+
 # status, incidents
 
 
@@ -240,6 +265,8 @@ def _incident_line(incident: Incident) -> list[str]:
     ]
     if incident.escalation:
         lines.append(f"    escalation: {incident.escalation}")
+    if incident.dismissal:
+        lines.append(f"    dismissed: {incident.dismissal}")
     return lines
 
 
@@ -278,6 +305,20 @@ def _print_status(store: Store, workspace_filter: str | None) -> None:
         for incident in escalated[:STATUS_ESCALATED]:
             for line in _incident_line(incident):
                 print(line)
+    # Its own section, after the open ones: a reader of this text (scripts/session_state.py)
+    # counts only the entries under "open incidents".
+    dismissed = [
+        i
+        for i in reversed(store.incidents(states=[IncidentState.DISMISSED]))
+        if wanted(i.workspace)
+    ]
+    if dismissed:
+        print("dismissed by the owner, not open (newest first):")
+        for incident in dismissed[:STATUS_DISMISSED]:
+            for line in _incident_line(incident):
+                print(line)
+        if len(dismissed) > STATUS_DISMISSED:
+            print(f"  ... {len(dismissed) - STATUS_DISMISSED} older dismissed incidents")
 
 
 def _incidents(args: argparse.Namespace) -> int:
@@ -336,6 +377,7 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "incidents": _incidents,
     "hold": _hold,
     "release": _release,
+    "dismiss": _dismiss,
     "watch": _watch,
 }
 

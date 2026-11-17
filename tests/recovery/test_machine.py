@@ -1010,6 +1010,138 @@ def test_a_hold_during_a_long_repair_survives_its_result(
     assert machine.release(iid, w.deps).state is S.PR_VERIFIED
 
 
+# dismiss (issue #163)
+
+
+def _dismissal_comment(w: World, incident: Incident) -> str:
+    assert incident.issue_number is not None
+    return w.gh.comments[(incident.issue_number, machine.dismissed_marker(incident.incident_id))]
+
+
+def test_a_held_incident_can_be_dismissed_with_a_reason(world: World) -> None:
+    w = world
+    iid = w.open("run-1", Classification(FC.HANG, "sig-hang", "no progress for 1800 s"))
+    w.drive_to(iid, S.ISSUE_OPEN)
+    machine.hold(iid, w.deps)
+    gone = machine.dismiss(iid, "  the machine slept;\n fixed in #160 ", w.deps)
+    assert gone.state is S.DISMISSED and not gone.open and gone.held_from is None
+    assert gone.dismissal == "the machine slept; fixed in #160"
+    stored = w.get(iid)
+    assert stored.state is S.DISMISSED and stored.dismissal == gone.dismissal
+    timeline = [text for _, text in w.store.events(iid)]
+    assert timeline[-1] == (
+        "held -> dismissed: dismissed by the owner: the machine slept; fixed in #160"
+    )
+    assert w.jsonl[-1] == timeline[-1]
+    assert w.store.open_incidents() == []
+    assert w.store.lease_holder(f"incident:{iid}") is None
+    status = w.comment(stored)
+    assert "`dismissed`" in status and "the machine slept; fixed in #160" in status
+    assert "the supervisor does nothing more" in status
+    assert "dismissed by the owner: the machine slept; fixed in #160" in _dismissal_comment(
+        w, stored
+    )
+
+
+def test_an_open_incident_is_dismissed_from_any_state_without_a_hold(world: World) -> None:
+    w = world
+    for n, state in enumerate((S.DETECTED, S.ISSUE_OPEN, S.REPAIRING)):
+        iid = w.open(f"run-{n}", dataclasses.replace(HARNESS, signature=f"sig-{n}"))
+        w.drive_to(iid, state)
+        assert machine.dismiss(iid, "not SCIO", w.deps).state is S.DISMISSED
+        assert w.store.events(iid)[-1][1].startswith(f"{state.value} -> dismissed: ")
+
+
+def test_dismiss_starts_no_repair_and_no_replay_and_leaves_live_wt(world: World) -> None:
+    w = world
+    iid = w.open("run-1", HARNESS)
+    w.drive_to(iid, S.ISSUE_OPEN)
+    machine.hold(iid, w.deps)
+    machine.dismiss(iid, "a false alarm", w.deps)
+    before = (len(w.store.events(iid)), dict(w.gh.comments), list(w.jsonl))
+    assert machine.tick(w.deps) == []
+    assert machine.drive(iid, w.deps).state is S.DISMISSED
+    assert w.step(iid).state is S.DISMISSED
+    assert w.n("repair") == 0 and w.n("replay") == 0 and w.replays == []
+    assert w.n("move") == 0 and w.n("rollback") == 0 and w.live_wt == OLD_SHA
+    assert (len(w.store.events(iid)), dict(w.gh.comments), list(w.jsonl)) == before
+    with pytest.raises(ValueError, match="not held"):
+        machine.release(iid, w.deps)
+    with pytest.raises(ValueError, match="only an open one"):
+        machine.hold(iid, w.deps)
+    # The same failure later is a new incident, never the dismissed one reopened.
+    again = w.open("run-2", HARNESS)
+    assert again != iid and w.get(iid).state is S.DISMISSED and w.get(iid).run_ids == ["run-1"]
+
+
+def test_dismissing_a_terminal_incident_is_refused(world: World) -> None:
+    w = world
+    closed = w.finish("run-t", TASK)
+    assert closed is not None and closed.state is S.CLOSED
+    escalated = w.open("run-a", Classification(FC.EXTERNAL_AUTH, "sig-auth", "sign in"))
+    w.drive_to(escalated, S.ESCALATED)
+    dismissed = w.open("run-h", HARNESS)
+    machine.dismiss(dismissed, "the first reason", w.deps)
+    for iid, state in (
+        (closed.incident_id, "closed"),
+        (escalated, "escalated"),
+        (dismissed, "dismissed"),
+    ):
+        events = w.store.events(iid)
+        with pytest.raises(machine.DismissRefused, match=f"is already {state}"):
+            machine.dismiss(iid, "a second reason", w.deps)
+        assert w.get(iid).state.value == state and w.store.events(iid) == events
+    assert w.get(dismissed).dismissal == "the first reason"
+    with pytest.raises(LookupError, match="no incident inc-missing"):
+        machine.dismiss("inc-missing", "why", w.deps)
+
+
+def test_dismiss_needs_a_reason(world: World) -> None:
+    w = world
+    iid = w.open("run-1", HARNESS)
+    for empty in ("", "  \n "):
+        with pytest.raises(machine.DismissRefused, match="needs a reason"):
+            machine.dismiss(iid, empty, w.deps)
+    assert w.get(iid).state is S.DETECTED
+
+
+def test_dismiss_is_refused_while_a_repair_session_of_the_incident_runs(world: World) -> None:
+    w = world
+    iid = w.open("run-1", HARNESS)
+    w.drive_to(iid, S.REPAIRING)
+    ticking = ProcessKey(77, 7.0)  # another process: the tick whose drive runs the session
+    w.living.add(ticking)
+    assert w.store.acquire_lease(f"incident:{iid}", ticking, lambda k: k in w.living)
+    events = w.store.events(iid)
+    with pytest.raises(machine.DismissRefused) as refused:
+        machine.dismiss(iid, "a false alarm", w.deps)
+    text = str(refused.value)
+    assert "a repair session of it is still running (pid 77)" in text
+    assert f"recovery hold {iid}" in text and "then dismiss it" in text
+    assert w.get(iid).state is S.REPAIRING and w.store.events(iid) == events
+    assert w.store.lease_holder(f"incident:{iid}") == ticking, "the tick keeps its lease"
+    # Held meanwhile, as the message says: still refused until the session's tick ends.
+    machine.hold(iid, w.deps)
+    with pytest.raises(machine.DismissRefused, match="a repair session of it is still running"):
+        machine.dismiss(iid, "a false alarm", w.deps)
+    w.living.discard(ticking)  # the session ended and its tick exited
+    assert machine.dismiss(iid, "a false alarm", w.deps).state is S.DISMISSED
+    assert w.n("repair") == 0
+
+
+def test_a_github_failure_at_dismiss_is_a_timeline_note(world: World) -> None:
+    w = world
+    iid = w.open("run-1", HARNESS)
+    w.drive_to(iid, S.ISSUE_OPEN)
+    w.gh.down = True
+    gone = machine.dismiss(iid, "a false alarm", w.deps)
+    assert gone.state is S.DISMISSED and w.get(iid).state is S.DISMISSED
+    notes = [text for _, text in w.store.events(iid)]
+    assert any(n.startswith("status comment not posted: ") for n in notes)
+    assert notes[-1].startswith("dismissal comment not posted: ")
+    assert (gone.issue_number, machine.dismissed_marker(iid)) not in w.gh.comments
+
+
 def test_tick_handles_orphans_and_drives_every_open_incident(world: World) -> None:
     w = world
     w.orphans = [w.run("run-1", ORPHAN, status=RunStatus.RUNNING, exit_code=None)]
