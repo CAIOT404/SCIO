@@ -238,6 +238,20 @@ def _feature(current: tuple[str, str, list[str]]) -> ProductFeature:
 # ---------- milestone normaliser ----------
 
 
+def planned_paths(files: list[str] | None) -> set[str]:
+    """A feature's planned files as comparable paths: forward slashes, no leading ``./``, no
+    surrounding slashes, lower case (two spellings of one file are one path)."""
+    out: set[str] = set()
+    for name in files or []:
+        path = name.strip().replace("\\", "/").lower()
+        while path.startswith("./"):
+            path = path[2:]
+        path = path.strip("/")
+        if path:
+            out.add(path)
+    return out
+
+
 def normalise_milestone(
     out: MilestonePlanOutput,
     open_features: list[ProductFeature],
@@ -254,11 +268,18 @@ def normalise_milestone(
     open feature the milestone is that feature alone (I-116).
 
     ``parallel`` (the build has ``SCIO_PARALLEL_FEATURES`` above 1): a feature the planner
-    gave no ``depends_on`` gets ``[]``, so a plan that says nothing no longer turns a parallel
-    build serial, and one note names the features (issue #157). Only a plan the planner just
-    returned comes here: a plan read back from its file keeps its None, the serial order."""
+    gave no ``depends_on`` is decided from the files the plan names (issue #157), so a plan
+    that says nothing no longer turns a parallel build serial, and is not guessed independent
+    either. No planned files: it stays None, the serial order. Files that overlap an earlier
+    feature's (:func:`planned_paths`): it depends on each such feature, and on each earlier
+    feature that names no files, which cannot be checked. Neither: ``[]``. One note per kind
+    names the features and, for an overlap, the shared paths. Only a plan the planner just
+    returned comes here: a plan read back from its file keeps what it stored."""
     notes: list[str] = []
-    unset: list[str] = []
+    planned: dict[str, set[str]] = {}
+    independent: list[str] = []
+    after: list[str] = []
+    serial: list[str] = []
     if not open_features:
         raise ValueError("no open features to plan")
     proposed = {f.id: f for f in out.features}
@@ -283,17 +304,42 @@ def normalise_milestone(
                 )
             deps = kept
         elif parallel:
-            deps = []
-            unset.append(feat.id)
+            mine = planned_paths(p.files)
+            if not mine:
+                serial.append(feat.id)
+            else:
+                why = {
+                    c.id: ", ".join(sorted(mine & planned[c.id])) or "names no files"
+                    for c in chosen
+                    if not planned[c.id] or mine & planned[c.id]
+                }
+                deps = list(why)
+                if deps:
+                    after += [f"{feat.id} after {j} ({shared})" for j, shared in why.items()]
+                else:
+                    independent.append(feat.id)
+        planned[feat.id] = planned_paths(p.files)
         chosen.append(
-            MilestoneFeatureOutput(id=feat.id, tier=p.tier, notes=p.notes, depends_on=deps)
+            MilestoneFeatureOutput(
+                id=feat.id, tier=p.tier, notes=p.notes, depends_on=deps, files=p.files
+            )
         )
         if len(chosen) >= MAX_FEATURES_PER_MILESTONE:
             break
-    if unset:
+    if independent:
         notes.append(
-            f"{', '.join(unset)}: the planner gave no depends_on; read as no dependency, so "
-            "each may build beside the others (SCIO_PARALLEL_FEATURES is above 1, issue #157)"
+            f"{', '.join(independent)}: the planner gave no depends_on; the planned files "
+            "overlap no earlier feature's, so each may build beside the others (issue #157)"
+        )
+    if after:
+        notes.append(
+            f"the planner gave no depends_on; from the planned files: {'; '.join(after)} "
+            "(issue #157)"
+        )
+    if serial:
+        notes.append(
+            f"{', '.join(serial)}: the planner gave no depends_on and no planned files; each "
+            "builds after the feature before it (issue #157)"
         )
     skipped = [f.id for f in open_features[len(chosen) :] if f.id in proposed]
     if skipped and len(chosen) < MAX_FEATURES_PER_MILESTONE:

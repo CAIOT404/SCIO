@@ -315,6 +315,9 @@ def test_a_textual_conflict_is_undone_and_the_feature_runs_again_from_the_new_he
         and "The merge is undone, and attempt 2 runs alone from the new head" in t
         for t in texts
     ), texts
+    # issue #157: the ledger says what the failure does to the rest of the milestone
+    assert texts.count("a batch merge failed for P2: the rest of M1 builds serially") == 1
+    assert s.batch_merge_failed() == ["P2"]
     # attempt 2 is the serial loop: a thread of its own, in the product tree, from P1's head
     assert any(f"P2: starting thread {_thread('P2', 2)}" in t for t in texts), texts
     assert not any("features at once" in t and "-p2-a2" in t for t in texts), texts
@@ -769,14 +772,92 @@ def _plan_on_branch(repo: Path) -> MilestonePlan:
     return MilestonePlan.model_validate_json(text)
 
 
+class _Planner:
+    """The scripted planner with fields of its milestone plan replaced per feature id
+    (``depends_on``, ``files``): the scripted one names no files."""
+
+    def __init__(self, inner: Responder, features: dict[str, dict[str, Any]]) -> None:
+        self.inner = inner
+        self.features = features
+
+    def __call__(self, req: CompletionRequest) -> FakeReply:
+        reply: FakeReply = self.inner(req)
+        if req.role != "milestone_planner":
+            return reply
+        plan = json.loads(reply.text)
+        for f in plan["features"]:
+            f.update(self.features.get(f["id"], {}))
+        return replace(reply, text=json.dumps(plan))
+
+
+P1_FILES = ["tests/test_entry.py"]
+P2_FILES = ["todo_cli/store.py", "todo_cli/cli.py", "tests/test_add_list.py"]
+
+
+def _unset_build(tmp_path: Path, features: dict[str, dict[str, Any]]) -> tuple[Any, list[str]]:
+    """Build M1 with two features at once allowed, from a plan whose ``depends_on`` the
+    scripted planner left unset unless ``features`` says otherwise. The state at the merge
+    stop and its ledger texts."""
+    responder = _Planner(PerThreadResponder(independent=False), features)
+    ctx = _parallel_product(tmp_path, responder)
+    try:
+        out = run_build(ctx)
+        s = out.state
+        assert out.paused and s.phase == "merge_wait", s.ledger[-4:]
+    finally:
+        ctx.close()
+    assert s.milestone is not None and _plan_on_branch(tmp_path / "product") == s.milestone
+    assert [(r.feature_id, r.attempt, r.status) for r in s.feature_runs] == [
+        ("P1", 1, "passed"),
+        ("P2", 1, "passed"),
+    ]
+    return s, [e.text for e in s.ledger]
+
+
+def test_an_unset_depends_on_with_overlapping_files_depends_on_the_earlier_feature(
+    tmp_path: Path,
+) -> None:
+    """Issue #157: the planner left ``depends_on`` unset, and both features plan to change
+    ``todo_cli/cli.py`` (spelled two ways). P2 gets P1 as its dependency and builds after it;
+    the note names the shared path."""
+    s, texts = _unset_build(
+        tmp_path,
+        {
+            "P1": {"files": ["todo_cli/cli.py", *P1_FILES]},
+            "P2": {"files": [".\\Todo_CLI\\cli.py", "todo_cli/store.py"]},
+        },
+    )
+    assert [(f.id, f.depends_on) for f in s.milestone.features] == [("P1", []), ("P2", ["P1"])]
+    assert any(UNSET_NOTE in t and "P2 after P1 (todo_cli/cli.py)" in t for t in texts), texts
+    assert not any("features at once" in t for t in texts), texts
+    assert _git(tmp_path / "product", "log", "--merges", "--format=%s", "milestone/1") == ""
+
+
+def test_an_unset_depends_on_without_planned_files_stays_serial(tmp_path: Path) -> None:
+    """Issue #157: with nothing to check, an unset ``depends_on`` is not guessed independent.
+    It stays unset, the features build one after the other, and one note says why."""
+    s, texts = _unset_build(tmp_path, {})
+    assert [(f.id, f.depends_on) for f in s.milestone.features] == [("P1", None), ("P2", None)]
+    noted = [t for t in texts if UNSET_NOTE in t]
+    assert len(noted) == 1 and noted[0].startswith("P1, P2: "), texts
+    assert "no planned files" in noted[0]
+    assert not any("features at once" in t for t in texts), texts
+    assert _git(tmp_path / "product", "log", "--merges", "--format=%s", "milestone/1") == ""
+
+
 def test_an_unset_depends_on_builds_beside_the_others_when_parallel_is_on(
     tmp_path: Path,
 ) -> None:
     """graphcalc M6 (issue #157): the planner left ``depends_on`` unset on every feature, and
     with ``SCIO_PARALLEL_FEATURES=2`` the milestone still built one feature at a time. A plan
-    the planner just returned now reads an unset one as no dependency: the features build at
-    once, the stored plan says ``[]``, and one ledger note names the features changed."""
-    ctx = _parallel_product(tmp_path, PerThreadResponder(independent=False))
+    the planner just returned is now decided from its planned files: P1 and P2 name disjoint
+    files, so they build at once, the stored plan says ``[]``, and one ledger note names the
+    features changed."""
+    responder = _Planner(
+        PerThreadResponder(independent=False),
+        {"P1": {"files": P1_FILES}, "P2": {"files": P2_FILES}},
+    )
+    ctx = _parallel_product(tmp_path, responder)
     repo = tmp_path / "product"
     try:
         out = run_build(ctx)
@@ -868,42 +949,16 @@ def test_serial_builds_are_unchanged_when_parallel_is_off(tmp_path: Path) -> Non
     assert not worktrees_root(ctx).exists()
 
 
-class _SecondNeedsFirst:
-    """The scripted planner, but P2 names P1 in ``depends_on`` and P1 says nothing."""
-
-    def __init__(self, inner: Responder) -> None:
-        self.inner = inner
-
-    def __call__(self, req: CompletionRequest) -> FakeReply:
-        reply: FakeReply = self.inner(req)
-        if req.role != "milestone_planner":
-            return reply
-        plan = json.loads(reply.text)
-        for f in plan["features"]:
-            f["depends_on"] = ["P1"] if f["id"] == "P2" else None
-        return replace(reply, text=json.dumps(plan))
-
-
 def test_an_explicit_dependency_still_orders_the_batch(tmp_path: Path) -> None:
-    """With parallel features on, only an unset ``depends_on`` is filled: P2 says it needs P1,
-    so it keeps that and builds after P1, never beside it. The note names P1 alone."""
-    responder = _SecondNeedsFirst(PerThreadResponder(independent=False))
-    ctx = _parallel_product(tmp_path, responder)
-    repo = tmp_path / "product"
-    try:
-        out = run_build(ctx)
-        s = out.state
-        assert out.paused and s.phase == "merge_wait", s.ledger[-4:]
-    finally:
-        ctx.close()
-    texts = [e.text for e in s.ledger]
-    assert s.milestone is not None
+    """With parallel features on, only an unset ``depends_on`` is decided: P2 says it needs
+    P1, so it keeps that and builds after P1, never beside it, though their planned files are
+    disjoint. The note names P1 alone."""
+    s, texts = _unset_build(
+        tmp_path,
+        {"P1": {"files": P1_FILES}, "P2": {"files": P2_FILES, "depends_on": ["P1"]}},
+    )
     assert [(f.id, f.depends_on) for f in s.milestone.features] == [("P1", []), ("P2", ["P1"])]
     noted = [t for t in texts if UNSET_NOTE in t]
     assert len(noted) == 1 and noted[0].startswith("P1: "), texts
     assert not any("features at once" in t for t in texts), texts
-    assert _git(repo, "log", "--merges", "--format=%s", "milestone/1") == ""
-    assert [(r.feature_id, r.attempt, r.status) for r in s.feature_runs] == [
-        ("P1", 1, "passed"),
-        ("P2", 1, "passed"),
-    ]
+    assert _git(tmp_path / "product", "log", "--merges", "--format=%s", "milestone/1") == ""

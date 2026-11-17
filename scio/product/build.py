@@ -2026,6 +2026,14 @@ def _run_batch(
                     f"alone from the new head"
                 )
             )
+    unmerged = [r.feature_id for r in done if r.exit_reason == "merge"]
+    if unmerged:  # `ready_batch` reads the runs: no batch after this one (issue #157)
+        entries.append(
+            fact(
+                f"a batch merge failed for {', '.join(unmerged)}: the rest of {plan.id} builds "
+                "serially"
+            )
+        )
     # Before a decision's interrupt, which ends this node run: the node re-run that its answer
     # starts parks these again, and every ask checks the world first, so none is asked twice.
     # Offline, after the merges: the question commits move the milestone head.

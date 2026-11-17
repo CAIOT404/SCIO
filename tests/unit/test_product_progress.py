@@ -107,14 +107,99 @@ def test_the_normaliser_keeps_dependencies_on_earlier_features_only() -> None:
     ]
     assert any("P3 depends_on P4, P9" in n for n in notes), notes
     assert not any("gave no depends_on" in n for n in notes), notes
-    # issue #157: with parallel features on, only the unset one becomes [], and it is said
+    # issue #157: with parallel features on, an unset one with no planned files stays unset
+    plan, notes = normalise_milestone(out, spec.features, 1, parallel=True)
+    assert [(x.id, x.depends_on) for x in plan.features] == [
+        ("P1", None),
+        ("P2", []),
+        ("P3", ["P1"]),
+    ]
+    assert [n for n in notes if n.startswith("P1: ") and "no planned files" in n], notes
+
+
+def test_the_normaliser_decides_an_unset_depends_on_from_the_planned_files() -> None:
+    """Issue #157, with parallel features on: disjoint files are independent; a shared path
+    (compared with forward slashes, lower case, no ``./``) is a dependency on each feature
+    that shares it; no files stays unset, the serial order; and a feature after one that
+    names no files depends on it, since it cannot be checked. The files are kept in the plan.
+    With parallel off, nothing is decided."""
+    f = MilestoneFeatureOutput
+    out = MilestonePlanOutput(
+        milestone_title="m",
+        features=[
+            f(id="P1", files=["app/cli.py", "tests/test_cli.py"]),
+            f(id="P2", files=["app/store.py"]),
+            f(id="P3", files=[".\\App\\CLI.py", "./app/store.py", "app/tags.py"]),
+            f(id="P4"),
+        ],
+        rationale="r",
+    )
+    spec = _spec(4)
     plan, notes = normalise_milestone(out, spec.features, 1, parallel=True)
     assert [(x.id, x.depends_on) for x in plan.features] == [
         ("P1", []),
         ("P2", []),
-        ("P3", ["P1"]),
+        ("P3", ["P1", "P2"]),
+        ("P4", None),
     ]
-    assert [n for n in notes if "gave no depends_on" in n and n.startswith("P1: ")], notes
+    assert plan.features[2].files == [".\\App\\CLI.py", "./app/store.py", "app/tags.py"]
+    assert [n for n in notes if n.startswith("P1, P2: ") and "overlap no earlier" in n], notes
+    assert [n for n in notes if "P3 after P1 (app/cli.py); P3 after P2 (app/store.py)" in n], notes
+    assert [n for n in notes if n.startswith("P4: ") and "no planned files" in n], notes
+    assert len(notes) == 3, notes
+
+    unchecked = MilestonePlanOutput(
+        milestone_title="m", features=[f(id="P1"), f(id="P2", files=["b.py"])], rationale="r"
+    )
+    plan, notes = normalise_milestone(unchecked, spec.features, 1, parallel=True)
+    assert [(x.id, x.depends_on) for x in plan.features] == [("P1", None), ("P2", ["P1"])]
+    assert any("P2 after P1 (names no files)" in n for n in notes), notes
+
+    plan, notes = normalise_milestone(out, spec.features, 1)
+    assert [x.depends_on for x in plan.features] == [None, None, None, None]
+    assert notes == []
+
+
+def _unmerged(fid: str, milestone: str = "M2") -> FeatureRun:
+    """A feature that passed in its worktree and whose merge out of the batch was undone."""
+    return _run(fid, "failed", milestone=milestone).model_copy(update={"exit_reason": "merge"})
+
+
+def test_a_failed_batch_merge_makes_the_rest_of_the_milestone_serial() -> None:
+    """Issue #157: P5 and P6 built at once and P6's merge was undone. One wrong
+    ``depends_on`` is reason to doubt the others, so every later pass of the milestone is one
+    feature, even after P6's retry passed and P7 and P8 are planned independent. A feature
+    that merely failed (not a merge) does not do this."""
+    f = MilestoneFeatureOutput
+    plan = [f(id=x, depends_on=[]) for x in ("P5", "P6", "P7", "P8")]
+    first = [_run("P5", "passed"), _unmerged("P6")]
+    state = _batch_state(plan, first)
+    assert state.batch_merge_failed() == ["P6"]
+    assert [x.id for x in state.ready_batch(4)] == ["P6"]
+    retried = _batch_state(plan, [*first, _run("P6", "passed", attempt=2)])
+    assert [x.id for x in retried.ready_batch(4)] == ["P7"]
+    last = _batch_state(plan, [*first, _run("P6", "passed", 2), _run("P7", "passed")])
+    assert [x.id for x in last.ready_batch(4)] == ["P8"]
+    # the same runs without a merge failure: P7 and P8 build at once
+    plain = [_run("P5", "passed"), _run("P6", "failed"), _run("P6", "passed", attempt=2)]
+    ok = _batch_state(plan, plain)
+    assert ok.batch_merge_failed() == []
+    assert [x.id for x in ok.ready_batch(4)] == ["P7", "P8"]
+
+
+def test_the_next_milestone_batches_again() -> None:
+    """Issue #157: the serial rest is the milestone's, read from its own runs. M1's undone
+    merge (the same build thread carries its runs into M2) does not make M2 serial."""
+    f = MilestoneFeatureOutput
+    plan = [f(id="P5", depends_on=[]), f(id="P6", depends_on=[]), f(id="P7", depends_on=[])]
+    earlier = [
+        _run("P1", "passed", milestone="M1"),
+        _unmerged("P2", milestone="M1"),
+        _run("P2", "passed", attempt=2, milestone="M1"),
+    ]
+    state = _batch_state(plan, earlier)  # the current milestone is M2
+    assert state.batch_merge_failed() == []
+    assert [x.id for x in state.ready_batch(4)] == ["P5", "P6", "P7"]
 
 
 def _spec(n: int = 4) -> ProductSpec:

@@ -509,9 +509,14 @@ class MilestoneFeatureOutput(BaseModel):
     """The earlier features of this milestone this one needs built first (ADR 0018). ``[]``:
     none, so with ``SCIO_PARALLEL_FEATURES`` above 1 it may build beside the features before
     it. None in a stored plan: the feature right before it, the serial order. The planner
-    (prompt v3) states it for every feature; where it does not, ``normalise_milestone`` turns
-    None into ``[]`` for a newly planned milestone when parallel features are on, and leaves
-    it when they are off (issue #157)."""
+    (prompt v3) states it for every feature; where it does not, and parallel features are on,
+    ``normalise_milestone`` decides a newly planned feature from ``files``: ``[]`` when they
+    overlap no earlier feature's, the features they overlap otherwise, and None still when it
+    names no files (issue #157)."""
+    files: list[str] | None = None
+    """The files this feature expects to create or change, as the milestone planner names
+    them (prompt v3, issue #157): a guess made before any exploration, used only to decide an
+    unset ``depends_on``. None in a plan from before the field."""
 
 
 class MilestonePlanOutput(BaseModel):
@@ -744,15 +749,16 @@ class ProductBuildState(BaseModel):
         """Up to ``n`` features to build at once (ADR 0018): the next unfinished feature, then
         each later one that has not run in this milestone yet and whose dependencies have all
         finished. ``depends_on`` None means the feature right before it, so a stored plan
-        that says nothing runs serially (a plan made with parallel features on has no None
-        left, issue #157). A feature that already ran in this milestone (a merge that was
-        undone, a retry) runs alone, from the new head, so it cannot collide again."""
+        that says nothing runs serially. A feature that already ran in this milestone (a merge
+        that was undone, a retry) runs alone, from the new head, so it cannot collide again.
+        After a batch merge failed in this milestone (:meth:`batch_merge_failed`), every pass
+        is one feature: one wrong ``depends_on`` is reason to doubt the others (issue #157)."""
         first = self.next_feature()
         if first is None or self.milestone is None:
             return []
         mid, feats = self.milestone.id, self.milestone.features
         own = self.latest_run(first.id)
-        if own is not None and own.milestone in (None, mid):
+        if (own is not None and own.milestone in (None, mid)) or self.batch_merge_failed():
             return [first]
         ids = [f.id for f in feats]
         batch = [first]
@@ -766,6 +772,20 @@ class ProductBuildState(BaseModel):
             if all(self.finished(d) for d in deps):
                 batch.append(f)
         return batch
+
+    def batch_merge_failed(self) -> list[str]:
+        """The features of the current milestone whose merge out of a batch was undone (a
+        conflict, or a suite the merge turned red): their runs end ``failed`` with exit reason
+        ``merge``, which only a batch records. Read from the runs, so it holds across a
+        resume, and a new milestone starts with none."""
+        mid = self.milestone.id if self.milestone else None
+        return list(
+            dict.fromkeys(
+                r.feature_id
+                for r in self.feature_runs
+                if r.milestone == mid and r.status == "failed" and r.exit_reason == "merge"
+            )
+        )
 
     def milestone_runs(self) -> list[FeatureRun]:
         """Every run of the current milestone, oldest first: its cost, attempts and record
