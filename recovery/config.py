@@ -88,7 +88,8 @@ class Limits:
 
     poll_s: float = 15.0
     hang_after_s: float = 2700.0
-    """No progress for this long kills the run: above the Claude Code worker's 1800 s turn."""
+    """No progress for this long kills the run: above the Claude Code worker's 1800 s turn.
+    Counted in the supervisor's awake time, so a machine sleep never counts (I-239)."""
     repair_timeout_s: float = 5400.0
     repair_max_turns: int = 400
     repair_max_budget_usd: float = 40.0

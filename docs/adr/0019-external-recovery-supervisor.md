@@ -101,7 +101,7 @@ live-wt moves only when no `python -m scio` process is running from it. The supe
 | exit 1 with a traceback whose innermost frames are under `scio/` (or LangGraph called from `scio/`) | `harness_suspect` | Incident, then repair. |
 | `feature_failed` whose last ledger line names a `HarnessError` that is not one of the external kinds above | `harness_suspect` | Incident, then repair. |
 | `scio <command> stopped on a harness error: <Type>: ...` (exit reason `harness`: a `HarnessError` no node caught, which was a traceback before I-182), naming a type that is not one of the external kinds above | `harness_suspect` (`BudgetExceeded` and `RefusalError`: `task_fault`) | Incident, then repair. |
-| no progress for `hang_after` (default 45 min, above the worker's 30-minute turn cap) | `hang`, then `harness_suspect` | Kill the process tree (`taskkill /PID <pid> /T /F`), then open an incident. |
+| no progress for `hang_after` (default 45 min, above the worker's 30-minute turn cap), counted in the supervisor's awake time: a machine sleep never counts (amended 2026-11-17, I-239) | `hang`, then `harness_suspect` | Kill the process tree (`taskkill /PID <pid> /T /F`), then open an incident. |
 | PID gone with no exit recorded (the supervisor died, or the machine restarted) | `orphan`, then `environment` | Replay with no repair, unless stderr ends in a traceback; then classify that. |
 | anything else | `unknown` | Escalate. |
 

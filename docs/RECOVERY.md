@@ -29,7 +29,8 @@ The supervisor never merges. It never answers a human stop (merge, gate, release
    # claude_bin = "claude"                   (default)
 
    [limits]                               # optional; defaults in recovery/config.py
-   hang_after_s = 2700                    # no progress for 45 minutes kills the build
+   hang_after_s = 2700                    # 45 awake minutes with no progress kill the build;
+                                          # a machine sleep never counts (I-239)
    ```
 3. **Register the scheduled tick.** The tick advances incidents and picks up builds orphaned by a reboot or by a dead supervisor. It runs at logon and every 10 minutes. Use PowerShell, not `schtasks` (I-045):
    ```powershell

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from recovery import procs
@@ -44,6 +45,39 @@ PRODUCT_FLAGS: tuple[str, ...] = ("--product", "--dir")
 
 KILL_WAIT_S = 60.0
 """How long to wait for a killed child before killing it directly."""
+
+SUSPEND_GAP_S = 60.0
+"""A gap between two polls this much longer than ``poll_s`` means the supervisor did not
+run in it: the machine slept, or the process was stopped (I-239). An absolute margin, not a
+multiple of ``poll_s``, so a slow poll on a loaded machine is never mistaken for one."""
+
+
+@dataclass
+class Silence:
+    """The supervisor's own awake time since the child last made progress (I-239).
+
+    ``hang_after_s`` limits the time SCIO had to make progress. Wall-clock time also counts
+    the hours a laptop slept, and the child cannot run while the machine sleeps, so the
+    first poll after a long sleep killed a healthy run as hung (issue #158). Each poll adds
+    the time since the one before; a gap more than :data:`SUSPEND_GAP_S` over ``poll_s``
+    adds ``poll_s`` only, and the rest goes to ``slept_s``. Progress sets it back to zero.
+    Only the gaps between polls count, so any clock works, whether or not it runs on
+    through a sleep."""
+
+    poll_s: float
+    last_poll: float
+    quiet_s: float = 0.0
+    slept_s: float = 0.0
+
+    def poll(self, now: float, *, progressed: bool) -> float:
+        """Record a poll at ``now``; return the quiet seconds, the hang limit's measure."""
+        gap = max(0.0, now - self.last_poll)
+        self.last_poll = now
+        if gap > self.poll_s + SUSPEND_GAP_S:
+            self.slept_s += gap - self.poll_s
+            gap = self.poll_s
+        self.quiet_s = 0.0 if progressed else self.quiet_s + gap
+        return self.quiet_s
 
 
 def new_run_id(clock: Callable[[], float] = time.time) -> str:
@@ -238,7 +272,8 @@ def supervise(
     - **While running.** Every ``cfg.limits.poll_s`` seconds it echoes new output to its
       own stdout and stderr (when ``echo``), updates ``last_progress_at`` from
       :func:`progress_time`, and kills the tree (status ``KILLED_HANG``) after
-      ``cfg.limits.hang_after_s`` with no progress.
+      ``cfg.limits.hang_after_s`` with no progress, counted in the supervisor's own awake
+      time: a machine sleep does not count (:class:`Silence`, I-239).
     - **At exit.** Records the exit code, ``ended_at`` and status ``EXITED``, then releases
       the lease.
 
@@ -343,6 +378,7 @@ def _supervise_child(
         run.pid = popen.pid
         run.pid_created = key.created if key is not None else 0.0
         store.save_run(run)
+        silence = Silence(limits.poll_s, last_poll=clock())
         while True:
             code = popen.poll()
             if echo:
@@ -350,10 +386,21 @@ def _supervise_child(
             if code is not None:
                 break
             progress = progress_time(cfg.workspace, run)
-            if progress > run.last_progress_at:
+            progressed = progress > run.last_progress_at
+            if progressed:
                 run.last_progress_at = progress
                 store.save_run(run)
-            if clock() - max(run.last_progress_at, run.started_at) > limits.hang_after_s:
+            slept = silence.slept_s
+            # awake time only: a machine sleep never counts toward the hang limit (I-239)
+            quiet = silence.poll(clock(), progressed=progressed)
+            if echo and silence.slept_s > slept:
+                print(
+                    f"recovery: the machine slept {silence.slept_s - slept:.0f} s; "
+                    "that time does not count toward the hang limit",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            if quiet > limits.hang_after_s:
                 kill(popen.pid)
                 code = _wait(popen)
                 run.status = RunStatus.KILLED_HANG

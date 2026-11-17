@@ -21,6 +21,8 @@ from recovery.config import Limits, WorkspaceConfig, recorded_env
 from recovery.model import ProcessKey, RunRecord, RunStatus
 from recovery.runner import (
     OUTCOME_SUBCOMMANDS,
+    SUSPEND_GAP_S,
+    Silence,
     find_orphans,
     new_run_id,
     progress_time,
@@ -58,6 +60,8 @@ elif mode == "nap":
     progress.write_text(json.dumps({"build_thread": "build-prod-m3"}), encoding="utf-8")
 elif mode == "sleep":
     time.sleep(120)
+elif mode == "linger":
+    time.sleep(float(os.environ["STUB_ACTIVE_S"]))
 elif mode == "sleep-tree":
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
     print(f"GRANDCHILD {child.pid}", flush=True)
@@ -370,6 +374,124 @@ def test_a_child_making_progress_is_killed_only_after_hang_after_s_of_silence(
     assert run.ended_at - run.started_at >= active_s - 0.2 + hang_s
     assert run.last_progress_at - run.started_at >= active_s - 0.5
     assert not procs.alive(run.process)
+
+
+SLEPT_S = 103_926.0
+"""Incident inc-20261117054801-f1e361 (issue #158, I-239): a replay made progress at
+2026-11-16 00:55:55 UTC, the laptop slept, and the first poll after it woke, at
+2026-11-17 05:48:01 UTC, killed the run as hung. 28 h 52 min 6 s of wall clock, about a
+minute of it awake."""
+
+
+class Lid:
+    """A wall clock that jumps ``SLEPT_S`` at one of the supervisor's sleeps, as a laptop
+    shut and opened again does: ``time.time()`` plus an offset, with the real sleep. It
+    shuts once the child has printed its first line, so the child is running when it does."""
+
+    def __init__(self, store: Store) -> None:
+        self.store = store
+        self.offset = 0.0
+        self.woke_at: float | None = None
+
+    def clock(self) -> float:
+        return time.time() + self.offset
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+        if self.woke_at is not None:
+            return
+        runs = self.store.runs()
+        if runs and "ARGV" in Path(runs[0].stdout_path).read_text(encoding="utf-8"):
+            self.offset += SLEPT_S
+            self.woke_at = self.clock()
+
+
+def test_a_machine_sleep_never_counts_toward_the_hang_limit(tmp_path: Path, stub: Path) -> None:
+    """I-239: the supervisor measured silence as wall-clock time, so a laptop asleep for
+    longer than ``hang_after_s`` came back to a run killed as hung on the first poll. Only
+    the supervisor's own awake time counts: this child is silent for about a second of it."""
+    cfg = _cfg(tmp_path, stub, hang_after_s=Limits().hang_after_s)
+    store, home = Store(tmp_path / "s.sqlite"), tmp_path / "home"
+    lid = Lid(store)
+    env = _env("linger", STUB_ACTIVE_S="1.5")
+    run = _run(
+        cfg,
+        store,
+        home,
+        ["build", "--product", "P"],
+        "linger",
+        env=env,
+        clock=lid.clock,
+        sleep=lid.sleep,
+    )
+    assert lid.woke_at is not None, "the child exited before the lid shut"
+    assert (run.status, run.exit_code) == (RunStatus.EXITED, 0)
+    assert run.ended_at is not None and run.ended_at - run.started_at > SLEPT_S
+
+
+def test_a_child_silent_after_a_machine_sleep_is_still_killed_after_hang_after_s_awake(
+    tmp_path: Path, stub: Path
+) -> None:
+    """I-239's other half: a sleep is not a free pass. A child that stays silent once the
+    machine is awake again is killed after ``hang_after_s`` of awake time, not at once on
+    wake (the old wall-clock check) and not never."""
+    hang_s = 1.5
+    cfg = _cfg(tmp_path, stub, hang_after_s=hang_s)
+    store, home = Store(tmp_path / "s.sqlite"), tmp_path / "home"
+    lid = Lid(store)
+    run = _run(
+        cfg, store, home, ["build", "--product", "P"], "sleep", clock=lid.clock, sleep=lid.sleep
+    )
+    assert run.status is RunStatus.KILLED_HANG
+    assert lid.woke_at is not None and run.ended_at is not None
+    # the wake's own poll counts as one poll, never as the hours the machine slept
+    assert run.ended_at - lid.woke_at >= hang_s - cfg.limits.poll_s
+    assert not procs.alive(run.process)
+
+
+def test_a_machine_sleep_is_reported_on_the_supervisors_stderr_never_in_the_runs_logs(
+    tmp_path: Path, stub: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The note goes to the supervisor's own stderr: a line in the run's stdout.log or
+    stderr.log would change their mtime, which :func:`progress_time` reads as progress."""
+    cfg = _cfg(tmp_path, stub, hang_after_s=Limits().hang_after_s)
+    store, home = Store(tmp_path / "s.sqlite"), tmp_path / "home"
+    lid = Lid(store)
+    env = _env("linger", STUB_ACTIVE_S="1.5")
+    run = _run(
+        cfg,
+        store,
+        home,
+        ["build", "--product", "P"],
+        "linger",
+        env=env,
+        clock=lid.clock,
+        sleep=lid.sleep,
+        echo=True,
+    )
+    assert run.status is RunStatus.EXITED
+    note = "that time does not count toward the hang limit"
+    assert note in capsys.readouterr().err
+    assert note not in _stdout(run) + Path(run.stderr_path).read_text(encoding="utf-8")
+
+
+def test_silence_counts_each_poll_gap_and_a_sleep_as_one_poll() -> None:
+    poll_s = 15.0
+    s = Silence(poll_s, last_poll=1000.0)
+    assert s.poll(1015.0, progressed=False) == 15.0
+    assert s.poll(1031.0, progressed=False) == 31.0
+    # a slow poll inside the margin counts in full: only the margin tells a sleep apart
+    slow = poll_s + SUSPEND_GAP_S
+    assert s.poll(1031.0 + slow, progressed=False) == 31.0 + slow
+    assert s.slept_s == 0.0
+    # the incident's sleep counts as one poll; the rest is recorded as slept
+    woke = s.last_poll + SLEPT_S
+    assert s.poll(woke, progressed=False) == 31.0 + slow + poll_s
+    assert s.slept_s == SLEPT_S - poll_s
+    # progress starts the count again, and a clock stepped backwards adds nothing
+    assert s.poll(woke + poll_s, progressed=True) == 0.0
+    assert s.poll(woke, progressed=False) == 0.0
+    assert s.poll(woke + poll_s, progressed=False) == poll_s
 
 
 # Ctrl+C
