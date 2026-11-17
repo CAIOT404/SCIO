@@ -50,6 +50,37 @@ class QualityCheck:
 
 
 @dataclass(frozen=True)
+class Skip:
+    """Skipped tests as the runner's own output names them (issue #169): pytest folds the
+    skips of one location and reason into one line with a count."""
+
+    count: int
+    path: str
+    """Where the skip was raised, repository-relative with forward slashes; empty when the
+    runner's line names no file (Node's TAP reporter)."""
+    reason: str
+
+
+def under_dir(path: str, directory: str) -> bool:
+    """True when ``path`` lies in ``directory`` (both repository-relative)."""
+    d = directory.strip("/")
+    return bool(d) and f"/{d}/" in f"/{path.lstrip('/')}"
+
+
+def unverified_skips(skips: Sequence[Skip], acceptance_dir: str) -> list[Skip]:
+    """The skips a passing run leaves unverified (issue #169): each one whose file is known
+    and outside ``acceptance_dir``. The acceptance tests skip in a whole-suite run and run
+    for real against the started app, so their skips are expected; a skip the runner names
+    no file for cannot be placed and is not reported."""
+    return [s for s in skips if s.path and not under_dir(s.path, acceptance_dir)]
+
+
+def skips_text(skips: Sequence[Skip]) -> str:
+    """``path: reason; path: reason``, with a folded line's count in brackets when above 1."""
+    return "; ".join(f"{s.path}{f' [{s.count}]' if s.count > 1 else ''}: {s.reason}" for s in skips)
+
+
+@dataclass(frozen=True)
 class Runtime:
     """How a product environment is created, filled and started (M9, generalised in M10).
 
@@ -187,7 +218,19 @@ class Toolchain(Protocol):
         ...
 
     # --- commands ---
-    def test_argv(self, *, filter: str | None, path: str | None) -> list[str]: ...
+    def test_argv(
+        self, *, filter: str | None, path: str | None, report_skips: bool = False
+    ) -> list[str]:
+        """The test command. ``report_skips`` adds the profile's arguments that make the
+        runner name each skipped test (issue #169); without it the command is the one the
+        product's CI, its README and the worker's permission rule spell out."""
+        ...
+
+    def skips(self, stdout: str) -> list[Skip]:
+        """The skipped tests a run made with ``report_skips`` names; empty when the profile
+        cannot read them or the output has none, never an error."""
+        ...
+
     def test_outcome(self, exit_code: int, stdout: str) -> TestOutcome: ...
     def skipped_only(self, stdout: str) -> bool:
         """A passing run in which every selected test was skipped: proves nothing (I-097)."""

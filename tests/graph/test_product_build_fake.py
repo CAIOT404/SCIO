@@ -1918,6 +1918,84 @@ def test_the_merge_stop_lists_each_integration_check_verdict(
         ctx.close()
 
 
+SKIPPING_TEST = (
+    "import pytest\n\n"
+    'pytest.importorskip("no_such_browser_module")\n\n\n'
+    "def test_the_page_draws():\n    assert True\n"
+)
+
+
+def test_integration_reports_skips_outside_acceptance_without_failing(tmp_path: Path) -> None:
+    """Issue #169 (I-242): a module that skips where Playwright is absent left the suite
+    ``passed`` and nothing said a test had verified nothing. Integration names each skip
+    outside the acceptance directory on its own check line, read as ``skipped`` by the merge
+    stop and the PR body; the milestone's verdict is what it was."""
+    harness = _bootstrap(tmp_path)
+    repo = tmp_path / "product"
+    ctx = _ctx(tmp_path, harness, "build-skips")
+    try:
+        text, ok = integration_checks(ctx)
+        assert ok and "[test skips]" not in text  # nothing skipped: no line
+        (repo / "tests" / "test_page.py").write_text(SKIPPING_TEST, encoding="utf-8", newline="\n")
+        text, ok = integration_checks(ctx)
+        assert ok, text
+        lines = text.splitlines()
+        assert "[tests] passed" in lines
+        skips = [ln for ln in lines if ln.startswith("[test skips] ")]
+        assert len(skips) == 1 and len(skips[0]) <= 600
+        assert skips[0].startswith(
+            "[test skips] 1 outside tests/acceptance: tests/test_page.py: could not import "
+        ), skips[0]
+        assert "no_such_browser_module" in skips[0]
+        assert lines.index(skips[0]) > lines.index("[tests] passed")
+        checks = {c["name"]: c for c in integration_verdicts(text)}
+        assert checks["tests"]["verdict"] == "passed"
+        assert " passed, 1 skipped in " in checks["tests"]["detail"]
+        assert checks["test skips"]["verdict"] == "skipped"
+        assert checks["test skips"]["detail"].startswith(
+            "1 outside tests/acceptance: tests/test_page.py: could not import "
+        )
+        assert any(
+            ln.startswith("[test skips] skipped: 1 outside ")
+            for ln in check_lines(list(checks.values()))
+        )
+        # many skips: the line is capped, and the report still parses
+        for i in range(40):
+            (repo / "tests" / f"test_page_{i}.py").write_text(
+                SKIPPING_TEST.replace("no_such", f"no_such_{i}"), encoding="utf-8", newline="\n"
+            )
+        text, ok = integration_checks(ctx)
+        long = next(ln for ln in text.splitlines() if ln.startswith("[test skips] "))
+        assert ok and len(long) == 600 and long.startswith("[test skips] 41 outside ")
+    finally:
+        ctx.close()
+
+
+def test_an_acceptance_skip_is_not_reported(tmp_path: Path) -> None:
+    """The acceptance tests skip in the whole-suite run (no ``APP_URL``) and run for real in
+    the acceptance run: their skips are expected, and naming them at every merge stop would
+    teach the owner to ignore the line (issue #169)."""
+    harness = _bootstrap(tmp_path)
+    repo = tmp_path / "product"
+    ctx = _ctx(tmp_path, harness, "build-acc-skips")
+    try:
+        (repo / "tests" / "acceptance" / "test_needs_the_app.py").write_text(
+            "import os\n\nimport pytest\n\n\n"
+            "def test_health_black_box():\n"
+            '    if not os.environ.get("APP_URL"):\n'
+            '        pytest.skip("APP_URL not set: scio build starts the app for these tests")\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        text, ok = integration_checks(ctx)
+        assert ok and "[tests] passed" in text
+        assert "SKIPPED [1] tests" in text and "APP_URL not set" in text  # it did skip
+        assert "[test skips]" not in text
+        assert "test skips" not in {c["name"] for c in integration_verdicts(text)}
+    finally:
+        ctx.close()
+
+
 def test_a_skipped_check_reads_skipped_and_a_failed_one_FAILED() -> None:
     """Every line shape ``integration_checks`` writes, read by the one function: a tool that
     is absent is ``skipped``, anything that fails the milestone is ``FAILED``, and a line of

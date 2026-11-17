@@ -103,6 +103,7 @@ from scio.state.models import (
     TaskSpec,
 )
 from scio.toolchain import get_toolchain
+from scio.toolchain.base import skips_text, unverified_skips
 
 Node = Callable[[ProductBuildState], dict[str, Any]]
 MILESTONE_GATE_HEADER = "# Milestone gate"
@@ -116,6 +117,18 @@ stop) and read the PR's CI again (I-141)."""
 DESIGN_QUESTION = "design decision needed:"
 """How the coder's ledger line names its design question (``scio/graph/nodes/worker.py``):
 the question a feature stop carries into the retried attempt's task (issue #137)."""
+RENDERED_CHECK_NOTE = (
+    "Rendered check (required): this feature changes what a page shows, and its acceptance "
+    "criteria only check that elements, ids or strings exist, which a page that draws the "
+    "wrong thing also passes. Write at least one test that drives the real page in a browser "
+    "with `playwright.sync_api` (start the app, open the page, use the feature) and asserts "
+    "what the page shows for this feature's criteria: drawn pixels, visible text or layout. "
+    "Import Playwright plainly at the top of the test module, never through `importorskip` "
+    "or a skip marker: a skipped test verifies nothing."
+)
+"""Added to the task of a feature whose plan has ``rendered_check`` (issue #169; graphcalc
+P14 passed two string checks while ``1/x`` drew a line across its asymptote). Fixed text, so
+it does not count against the 400 characters of the planner's ``notes``."""
 ANSWERS_HEADING = "## The owner's answers to earlier attempts' questions"
 """The section of a feature task that holds the owner's ``retry: <answer>`` replies (#137)."""
 PARK_REPLY = "parked (ADR 0020): question {qid} went to the feature's issue; no reply here"
@@ -454,6 +467,8 @@ def feature_task(
     ]
     if feat.notes:
         desc += ["", f"Planner notes: {feat.notes}"]
+    if feat.rendered_check and spec.stack == "python":  # the note names Python's Playwright
+        desc += ["", RENDERED_CHECK_NOTE]
     desc += [
         "",
         "Product memory: PRODUCT.md and .scio/product/progress.json in the repository root "
@@ -2241,11 +2256,18 @@ def integration_checks(ctx: RunContext, spec: ProductSpec | None = None) -> tupl
     """The quality bar on the current checkout: lint, the full suite, the profile's quality
     checks (coverage, build, audit, ...), the secret scan and the release files (M11), then
     the black-box acceptance run. A profile check whose tool is absent is reported as skipped
-    and does not fail the milestone; a failing check does (M9)."""
+    and does not fail the milestone; a failing check does (M9).
+
+    The suite runs with the profile's skip report, and a ``[test skips]`` line names each
+    skipped test outside the acceptance directory (issue #169): a test that verified nothing
+    while the suite read ``passed``. The line never changes ``ok``. The acceptance tests skip
+    in this run and run for real in the acceptance run below, so they are not named."""
     sb, tc = ctx.sandbox, ctx.toolchain
     lint = sb.exec(tc.lint_argv("."), timeout_s=120)
     findings = tc.lint_findings(lint.exit_code, lint.stdout, lint.stderr)
-    tests = sb.exec(tc.test_argv(filter=None, path=None), timeout_s=sb.limits.timeout_s)
+    tests = sb.exec(
+        tc.test_argv(filter=None, path=None, report_skips=True), timeout_s=sb.limits.timeout_s
+    )
     outcome = tc.test_outcome(tests.exit_code, tests.stdout)
     ok = not findings and outcome == "passed"
     lines = [
@@ -2253,6 +2275,13 @@ def integration_checks(ctx: RunContext, spec: ProductSpec | None = None) -> tupl
         f"[tests] {outcome}",
         tests.output[-2500:],
     ]
+    skips = unverified_skips(tc.skips(tests.stdout), tc.acceptance_dir)
+    if skips:
+        line = (
+            f"[{TEST_SKIPS_CHECK}] {sum(s.count for s in skips)} outside {tc.acceptance_dir}: "
+            f"{skips_text(skips)}"
+        )
+        lines.append(line[:TEST_SKIPS_LINE_MAX])
     values = quality_values(ctx)
     for check in tc.quality_checks():
         r = sb.exec(check.command(values), timeout_s=check.timeout_s)
@@ -2280,6 +2309,10 @@ _CHECK_LINE = re.compile(r"^\[([^\[\]]+)\] (.*)$")
 _CHECK_PASSED = ("passed", "clean", "present")
 _CHECK_FAILED = ("FAILED", "failed", "no_tests", "broken")
 _CHECK_DETAIL_MAX = 200
+TEST_SKIPS_CHECK = "test skips"
+"""The check name of the line that names the suite's skipped tests outside the acceptance
+directory (issue #169). Its verdict is always ``skipped``: reported, never a failure."""
+TEST_SKIPS_LINE_MAX = 600
 
 
 def _check_verdict(name: str, rest: str) -> tuple[str, str] | None:
@@ -2289,6 +2322,8 @@ def _check_verdict(name: str, rest: str) -> tuple[str, str] | None:
     word = rest.split(":", 1)[0].split(" ", 1)[0]
     if name == "lint":  # `[lint] clean`, or the findings themselves
         return ("passed", "clean") if rest == "clean" else ("FAILED", rest)
+    if name == TEST_SKIPS_CHECK:  # `[test skips] 1 outside tests/acceptance: path: reason`
+        return "skipped", rest
     if rest.startswith("skipped only"):  # every acceptance test skipped proves nothing (I-097)
         return "FAILED", rest
     if word == "skipped":

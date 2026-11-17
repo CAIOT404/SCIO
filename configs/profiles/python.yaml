@@ -29,6 +29,11 @@ test:
   exit_codes: { passed: [0], no_tests: [5], broken: [2, 3, 4] }
   # exit 0 with every selected test skipped proves nothing (I-097): "2 skipped in 0.01s"
   skipped_only: { all: ['(?m)^\d+ skipped'], none: ['\d+ passed', '\d+ failed', '\d+ errors?'] }
+  # Issue #169: asked for by test_argv(report_skips=True), never in the default argv above (the
+  # product's CI line). pytest keeps only the last -r, so this repeats fE: a bare -rs would drop
+  # the FAILED lines. The line it adds: "SKIPPED [1] tests/test_x.py:3: the reason".
+  skip_report_args: ["-rfEs"]
+  skip_line: '(?m)^SKIPPED \[(?P<count>\d+)\] (?P<path>.+?):\d+: (?P<reason>.*)$'
   selector_help: "pytest node ids like tests/test_x.py::test_name, or -k keywords"
   filter_help: "pytest -k filter"
 lint:

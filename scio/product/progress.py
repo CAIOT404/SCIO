@@ -321,7 +321,12 @@ def normalise_milestone(
         planned[feat.id] = planned_paths(p.files)
         chosen.append(
             MilestoneFeatureOutput(
-                id=feat.id, tier=p.tier, notes=p.notes, depends_on=deps, files=p.files
+                id=feat.id,
+                tier=p.tier,
+                notes=p.notes,
+                depends_on=deps,
+                files=p.files,
+                rendered_check=p.rendered_check,
             )
         )
         if len(chosen) >= MAX_FEATURES_PER_MILESTONE:

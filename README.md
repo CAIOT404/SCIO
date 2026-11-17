@@ -126,7 +126,8 @@ current scaffold for its own `PRODUCT.md`: the Dockerfile and `.dockerignore`, t
 the coverage source for a python product, and the CI's README run step. Files the product made its own
 are kept and reported; the change is one commit, a clean tree is required, and a second run does nothing.
 It also replaces the old scaffold's python install line, which never installed the project, with
-`pip install -e . ruff pytest` (I-140). With `--gh`, every merge stop reads the PR's CI and calls it
+`pip install -e . ruff pytest` (I-140). A python product that serves pages also gets Playwright and
+Chromium in its CI, so its browser tests run there and never skip (I-242). With `--gh`, every merge stop reads the PR's CI and calls it
 ready only when it is green. When a red CI comes from an old scaffold file, run `scio upgrade` at the stop,
 then answer `recheck`, which pushes the commit and reads the CI again.
 At a merge stop you may add features to `PRODUCT.md` (there is no feature cap); the next milestone plans

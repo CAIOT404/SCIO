@@ -71,3 +71,34 @@ def test_the_node_runner_reports_a_skipped_only_selection(tmp_path: Path) -> Non
     )
     out = run_tests(LocalSandbox(tmp_path), RunTestsInput(), toolchain=node_ts_toolchain())
     assert out.startswith(SKIPPED_ONLY), out
+
+
+def test_run_tests_names_a_skipped_feature_test(tmp_path: Path) -> None:
+    """Issue #169: graphcalc's browser module skipped wherever Playwright was absent, and the
+    run read ``all tests passed``. The first line stays what verify reads; a second names
+    each skip outside the acceptance directory. An acceptance skip is expected and unnamed."""
+    sb = _python_repo(tmp_path)
+    tc = python_toolchain()
+    plain = run_tests(sb, RunTestsInput(), toolchain=tc)
+    assert plain.startswith("all tests passed: 1 passed, 1 skipped in ")
+    assert len(plain.splitlines()) == 1, plain  # the acceptance skip is not reported
+    (tmp_path / "tests" / "test_page.py").write_text(
+        "import pytest\n\n"
+        'pytest.importorskip("no_such_browser_module")\n\n\n'
+        "def test_the_page_draws():\n    assert True\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    out = run_tests(sb, RunTestsInput(), toolchain=tc)
+    first, second = out.splitlines()
+    assert first.startswith("all tests passed: 1 passed, 2 skipped in "), out
+    assert second.startswith("skipped (not verified): tests/test_page.py: could not import")
+    assert "no_such_browser_module" in second and "acceptance" not in second
+    ctx = cast(RunContext, SimpleNamespace(sandbox=sb, toolchain=tc))
+    assert _run(ctx, None)[1]  # part A: reported, and still a pass
+    # a failing run keeps its FAILED line: the skip report repeats -rfE's letters
+    (tmp_path / "tests" / "test_red.py").write_text(
+        "def test_red():\n    assert 1 == 2\n", encoding="utf-8", newline="\n"
+    )
+    red = run_tests(sb, RunTestsInput(), toolchain=tc)
+    assert "FAILED tests/test_red.py::test_red" in red and not red.startswith("all tests")
