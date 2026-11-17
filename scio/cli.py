@@ -306,7 +306,7 @@ def _print_build(outcome: Any) -> None:
             f"  {r.feature_id} a{r.attempt} {r.tier.value} {r.status} exit={r.exit_reason} "
             f"${r.usd:.4f} escalations={r.escalations_resolved}/{r.escalations}"
         )
-    from scio.product.build import total_usd
+    from scio.product.build import check_lines, total_usd
 
     print(f"usd {total_usd(s):.4f} (orchestrator {s.budgets.usd_used:.4f})")
     if s.exit_reason is not None and s.ledger:
@@ -319,6 +319,11 @@ def _print_build(outcome: Any) -> None:
             print(s.release.report[-2000:])
     if outcome.interrupt:
         print("PAUSED for a human:")
+        # each integration check's verdict, ahead of the JSON (#156); a stop recorded before
+        # the field existed has no `checks` and prints none
+        checks = outcome.interrupt.get("checks") if isinstance(outcome.interrupt, dict) else None
+        for line in check_lines(checks or []):
+            print(line)
         print(json.dumps(outcome.interrupt, indent=2, default=str))
         print(f"resume with: {_build_resume(s.product_dir, s.thread_id)}")
 

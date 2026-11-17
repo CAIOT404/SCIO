@@ -1131,6 +1131,10 @@ def render_milestone_pr_body(state: ProductBuildState, spec: ProductSpec) -> str
             *rows,
             "",
             "## Test evidence",
+            # the verdict of every check, from the one reader the merge stop uses (#156):
+            # the raw report below is cut at 3000 characters and can lose the last checks
+            *(f"- {line}" for line in check_lines(integration_verdicts(state.integration))),
+            "",
             "```",
             integration[:3000],
             "```",
@@ -2260,6 +2264,85 @@ def integration_checks(ctx: RunContext, spec: ProductSpec | None = None) -> tupl
     return "\n".join(lines), ok
 
 
+_CHECK_LINE = re.compile(r"^\[([^\[\]]+)\] (.*)$")
+_CHECK_PASSED = ("passed", "clean", "present")
+_CHECK_FAILED = ("FAILED", "failed", "no_tests", "broken")
+_CHECK_DETAIL_MAX = 200
+
+
+def _check_verdict(name: str, rest: str) -> tuple[str, str] | None:
+    """The verdict and detail of one ``[name] rest`` line of the integration report, or None
+    when the line is not a check's own line (a ``[notice]`` in a tool's output, say)."""
+    rest = rest.strip()
+    word = rest.split(":", 1)[0].split(" ", 1)[0]
+    if name == "lint":  # `[lint] clean`, or the findings themselves
+        return ("passed", "clean") if rest == "clean" else ("FAILED", rest)
+    if rest.startswith("skipped only"):  # every acceptance test skipped proves nothing (I-097)
+        return "FAILED", rest
+    if word == "skipped":
+        return "skipped", rest[len(word) :].lstrip(": ")
+    if word in ("passed", "FAILED", "failed"):
+        return ("passed" if word == "passed" else "FAILED"), rest[len(word) :].lstrip(": ")
+    if word in _CHECK_PASSED:
+        return "passed", rest
+    if word in _CHECK_FAILED:
+        return "FAILED", rest
+    return None
+
+
+def integration_verdicts(text: str | None) -> list[dict[str, str]]:
+    """Each integration check of ``integration_checks``' report as ``{"name", "verdict",
+    "detail"}``, in the report's order: ``verdict`` is ``passed``, ``FAILED`` or ``skipped``,
+    ``detail`` the check's one summary line (for ``[tests]``, the last line of the suite's
+    output, never its dots). The one reader of those lines: the milestone PR's body, the
+    merge stop's ``checks`` and the stop's printed lines all come from it, so they cannot
+    disagree (#156). Empty for a report that is absent or holds no check line."""
+    checks: list[dict[str, str]] = []
+    seen: set[str] = set()
+    tests: dict[str, str] | None = None  # the [tests] check while its output is being read
+    for line in (text or "").splitlines():
+        m = _CHECK_LINE.match(line)
+        parsed = _check_verdict(m[1], m[2]) if m and m[1] not in seen else None
+        if parsed is None or m is None:
+            if tests is not None and line.strip():
+                tests["summary"] = line.strip().strip("=").strip()
+            continue
+        if tests is not None:
+            _close_tests(tests)
+            tests = None
+        seen.add(m[1])
+        check = {"name": m[1], "verdict": parsed[0], "detail": parsed[1][:_CHECK_DETAIL_MAX]}
+        checks.append(check)
+        if m[1] == "tests":
+            tests = check
+    if tests is not None:
+        _close_tests(tests)
+    return checks
+
+
+def _close_tests(check: dict[str, str]) -> None:
+    """``[tests] passed`` carries the suite's output on the lines after it: its last line is
+    the summary. An outcome that is not plain passed or failed (``no_tests``, ``broken``)
+    stays in front of it."""
+    summary = check.pop("summary", "")
+    detail = check["detail"]
+    check["detail"] = ": ".join(p for p in (detail, summary) if p)[:_CHECK_DETAIL_MAX]
+
+
+def check_lines(checks: Sequence[dict[str, Any]]) -> list[str]:
+    """One line per check, as the merge stop prints it: ``[tests] passed: 231 passed``."""
+    return [
+        f"[{c.get('name')}] {c.get('verdict')}" + (f": {d}" if (d := c.get("detail")) else "")
+        for c in checks
+    ]
+
+
+def _stop_checks(report: str | None) -> dict[str, Any]:
+    """The ``checks`` field of a human stop's payload (#156). A stop recorded before the field
+    existed has none, and nothing reads it on resume: the node builds its payload again."""
+    return {"checks": integration_verdicts(report)}
+
+
 def integrate(ctx: RunContext) -> Node:
     def node(state: ProductBuildState) -> dict[str, Any]:
         plan = state.milestone
@@ -2634,6 +2717,7 @@ def merge_wait(ctx: RunContext) -> Node:
                         f"{mf.id}: {(r.status if (r := state.latest_run(mf.id)) else 'not run')}"
                         for mf in plan.features
                     ],
+                    **_stop_checks(state.integration),
                     "cost_usd": total_usd(state),
                     "resume": _resume(ctx, "<merged|recheck|stop>")
                     if github
@@ -2955,6 +3039,7 @@ def release_decision(ctx: RunContext) -> Node:
                     "version": rel.version,
                     "tag": rel.tag,
                     "report": rel.report[-3000:],
+                    **_stop_checks(rel.report),
                     "cost_usd": total_usd(state),
                     "resume": _resume(ctx, "<release|stop>"),
                 }

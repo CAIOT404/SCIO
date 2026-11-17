@@ -31,8 +31,10 @@ from scio.product.build import (
     MILESTONES_DIR,
     after_release_check,
     build_thread_id,
+    check_lines,
     integrate,
     integration_checks,
+    integration_verdicts,
     milestone_gate,
     release_check,
     render_milestone_pr_body,
@@ -1875,3 +1877,153 @@ def test_report_reads_a_build_that_stopped_before_its_first_feature(
     assert main(["report", "--thread", thread, "--out", str(tmp_path / "reports")]) == 0
     out = capsys.readouterr().out
     assert f"# Product build {thread}" in out and "| none |" in out
+
+
+# ---------- #156: the merge stop lists each integration check's verdict ----------
+
+_CHECK_NAMES = ["lint", "tests", "coverage", "build", "audit", "secrets", "release files", "readme"]
+
+
+def test_the_merge_stop_lists_each_integration_check_verdict(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """At a merge stop the verdict lines existed only in the milestone PR's body (#156): the
+    stop's payload now carries them as ``checks`` and ``scio build`` prints one line per
+    check before the stop's JSON."""
+    from scio.cli import _print_build
+
+    harness = _bootstrap(tmp_path)
+    ctx = _ctx(tmp_path, harness, build_thread_id(PRODUCT))
+    try:
+        out = run_build(ctx)
+        assert out.paused and out.interrupt and out.state.phase == "merge_wait"
+        checks = out.interrupt["checks"]
+        assert [c["name"] for c in checks][: len(_CHECK_NAMES)] == _CHECK_NAMES
+        assert all(set(c) == {"name", "verdict", "detail"} for c in checks)
+        assert {c["verdict"] for c in checks} <= {"passed", "skipped"}  # the stop is green
+        by_name = {c["name"]: c for c in checks}
+        assert by_name["lint"] == {"name": "lint", "verdict": "passed", "detail": "clean"}
+        tests = by_name["tests"]
+        assert tests["verdict"] == "passed" and " passed" in tests["detail"]
+        assert "\n" not in tests["detail"] and "...." not in tests["detail"]  # no pytest dots
+        capsys.readouterr()
+        _print_build(out)
+        printed = capsys.readouterr().out
+        lines = printed.splitlines()
+        marker, brace = lines.index("PAUSED for a human:"), lines.index("{")
+        assert lines[marker + 1 : brace] == check_lines(checks)  # one line each, before the JSON
+        assert lines[marker + 1] == "[lint] passed: clean"
+        assert lines[marker + 2].startswith("[tests] passed: ")
+    finally:
+        ctx.close()
+
+
+def test_a_skipped_check_reads_skipped_and_a_failed_one_FAILED() -> None:
+    """Every line shape ``integration_checks`` writes, read by the one function: a tool that
+    is absent is ``skipped``, anything that fails the milestone is ``FAILED``, and a line of
+    a tool's own output that only looks like a check is not one."""
+    report = "\n".join(
+        [
+            "[lint] src/app.py:3:1: F401 `os` imported but unused",
+            "Found 1 error.",
+            "[tests] failed",
+            "....F.... [100%]",
+            "[notice] A new release of pip is available",
+            "===== 1 failed, 230 passed, 1 skipped in 3.21s =====",
+            "[coverage] passed: TOTAL 120 4 97%",
+            "[build] skipped: tool absent (python -m build)",
+            "[audit] FAILED (exit 1)",
+            "[coverage] passed: a line of the audit's own output",
+            "found 2 vulnerabilities",
+            "[secrets] clean",
+            "[release files] FAILED: missing LICENSE",
+            "[readme] passed: 2 run command(s)",
+            "[acceptance] skipped only (cli): 3 skipped in 0.1s",
+        ]
+    )
+    checks = integration_verdicts(report)
+    assert [(c["name"], c["verdict"]) for c in checks] == [
+        ("lint", "FAILED"),
+        ("tests", "FAILED"),
+        ("coverage", "passed"),
+        ("build", "skipped"),
+        ("audit", "FAILED"),
+        ("secrets", "passed"),
+        ("release files", "FAILED"),
+        ("readme", "passed"),
+        ("acceptance", "FAILED"),
+    ]
+    detail = {c["name"]: c["detail"] for c in checks}
+    assert detail["tests"] == "1 failed, 230 passed, 1 skipped in 3.21s"
+    assert detail["coverage"] == "TOTAL 120 4 97%"
+    assert detail["build"] == "tool absent (python -m build)"
+    assert detail["audit"] == "(exit 1)" and detail["release files"] == "missing LICENSE"
+    assert check_lines(checks)[3] == "[build] skipped: tool absent (python -m build)"
+    assert check_lines(checks)[4] == "[audit] FAILED: (exit 1)"
+    green = integration_verdicts(
+        "[lint] clean\n[tests] passed\n..... [100%]\n231 passed, 1 skipped\n"
+        "[acceptance] skipped: no tests/acceptance\n"
+    )
+    assert check_lines(green) == [
+        "[lint] passed: clean",
+        "[tests] passed: 231 passed, 1 skipped",
+        "[acceptance] skipped: no tests/acceptance",
+    ]
+    assert integration_verdicts("[tests] no_tests\nno tests ran in 0.01s")[0] == {
+        "name": "tests",
+        "verdict": "FAILED",
+        "detail": "no_tests: no tests ran in 0.01s",
+    }
+    assert integration_verdicts(None) == [] and integration_verdicts("") == []
+
+
+def test_the_pr_body_and_the_stop_show_the_same_verdicts(tmp_path: Path) -> None:
+    """One source, two readers: the milestone PR's "Test evidence" verdict lines are the
+    stop's ``checks``, line for line, and they sit above the raw report (which is cut at
+    3000 characters and can lose the last checks)."""
+    harness = _bootstrap(tmp_path)
+    repo = tmp_path / "product"
+    ctx = _ctx(tmp_path, harness, build_thread_id(PRODUCT))
+    try:
+        out = run_build(ctx)
+        assert out.paused and out.interrupt and out.state.pr and out.state.pr.body_path
+        body = (repo / out.state.pr.body_path).read_text(encoding="utf-8")
+        evidence = body.split("## Test evidence\n", 1)[1].split("```", 1)[0]
+        in_body = [ln[2:] for ln in evidence.splitlines() if ln.startswith("- [")]
+        assert in_body and in_body == check_lines(out.interrupt["checks"])
+        # a report longer than the body's cut still shows every verdict
+        long_report = "[lint] clean\n[tests] passed\n" + "x" * 4000 + "\n[secrets] FAILED: 1\n"
+        state = out.state.model_copy(update={"integration": long_report})
+        assert out.state.spec is not None
+        long_body = render_milestone_pr_body(state, out.state.spec)
+        assert "- [secrets] FAILED: 1" in long_body
+    finally:
+        ctx.close()
+
+
+def test_a_merge_stop_recorded_before_the_checks_field_still_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A build paused at a merge stop by an older SCIO has no ``checks`` in its recorded
+    payload: it prints as before and its merge answer is taken, since the node builds its
+    payload again on resume and never reads the recorded one."""
+    from scio.cli import _print_build
+    from scio.product import build as build_module
+
+    harness = _bootstrap(tmp_path)
+    ctx = _ctx(tmp_path, harness, build_thread_id(PRODUCT))
+    try:
+        with monkeypatch.context() as old:
+            old.setattr(build_module, "_stop_checks", lambda report: {})  # the old payload
+            out = run_build(ctx)
+        assert out.paused and out.interrupt and out.state.phase == "merge_wait"
+        assert "checks" not in out.interrupt
+        capsys.readouterr()
+        _print_build(out)
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[lines.index("PAUSED for a human:") + 1] == "{"  # no check line, no error
+        out = resume_build(ctx, "merge")
+        assert out.state.milestones_done == ["M1"], out.state.ledger[-3:]
+        assert out.paused and out.interrupt and "checks" in out.interrupt  # M2's own stop
+    finally:
+        ctx.close()

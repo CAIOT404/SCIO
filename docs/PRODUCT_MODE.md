@@ -78,6 +78,8 @@ Creating a GitHub repository publishes it, so a human always confirms that step.
    - CHANGELOG, LICENSE and a Dockerfile or release artifact are present
 
    Any failing check overrides the model's verdict, as it does today.
+
+   At a milestone's merge stop and at the release stop, `scio build` prints one line per check before the stop's JSON (`[tests] passed: 231 passed, 1 skipped`), and the JSON carries the same list as `checks`: each check's `name`, its `verdict` (`passed`, `FAILED` or `skipped`) and a one-line `detail`. The milestone PR's "Test evidence" section opens with the same lines, read by the same function (`integration_verdicts`), so the stop and the PR cannot disagree (issue #156).
 6. **Budget.** By default the product has no dollar cap (`product.max_usd: null`, configurable). The per-feature tier caps, stall caps and iteration caps stay in place as runaway guards. Spend is reported in every milestone PR and at every human approval stop.
 
 ## Milestones
