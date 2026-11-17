@@ -106,6 +106,15 @@ def test_the_normaliser_keeps_dependencies_on_earlier_features_only() -> None:
         ("P3", ["P1"]),
     ]
     assert any("P3 depends_on P4, P9" in n for n in notes), notes
+    assert not any("gave no depends_on" in n for n in notes), notes
+    # issue #157: with parallel features on, only the unset one becomes [], and it is said
+    plan, notes = normalise_milestone(out, spec.features, 1, parallel=True)
+    assert [(x.id, x.depends_on) for x in plan.features] == [
+        ("P1", []),
+        ("P2", []),
+        ("P3", ["P1"]),
+    ]
+    assert [n for n in notes if "gave no depends_on" in n and n.startswith("P1: ")], notes
 
 
 def _spec(n: int = 4) -> ProductSpec:

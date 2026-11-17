@@ -506,9 +506,12 @@ class MilestoneFeatureOutput(BaseModel):
     notes: str = Field(default="", max_length=400)
     """Guidance for the task run (which modules to touch, what to avoid)."""
     depends_on: list[str] | None = None
-    """The earlier features of this milestone this one needs built first (ADR 0018). None:
-    the feature right before it, the serial order. ``[]``: none, so with
-    ``SCIO_PARALLEL_FEATURES`` above 1 it may build beside the features before it."""
+    """The earlier features of this milestone this one needs built first (ADR 0018). ``[]``:
+    none, so with ``SCIO_PARALLEL_FEATURES`` above 1 it may build beside the features before
+    it. None in a stored plan: the feature right before it, the serial order. The planner
+    (prompt v3) states it for every feature; where it does not, ``normalise_milestone`` turns
+    None into ``[]`` for a newly planned milestone when parallel features are on, and leaves
+    it when they are off (issue #157)."""
 
 
 class MilestonePlanOutput(BaseModel):
@@ -740,8 +743,9 @@ class ProductBuildState(BaseModel):
     def ready_batch(self, n: int) -> list[MilestoneFeatureOutput]:
         """Up to ``n`` features to build at once (ADR 0018): the next unfinished feature, then
         each later one that has not run in this milestone yet and whose dependencies have all
-        finished. ``depends_on`` None means the feature right before it, so a plan that says
-        nothing runs serially. A feature that already ran in this milestone (a merge that was
+        finished. ``depends_on`` None means the feature right before it, so a stored plan
+        that says nothing runs serially (a plan made with parallel features on has no None
+        left, issue #157). A feature that already ran in this milestone (a merge that was
         undone, a retry) runs alone, from the new head, so it cannot collide again."""
         first = self.next_feature()
         if first is None or self.milestone is None:

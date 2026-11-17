@@ -21,8 +21,8 @@ Measured before the design (pre-flight 8, a scratch probe on the Fake):
 1. **Opt-in.** `SCIO_PARALLEL_FEATURES=N` (1 to 4) sets how many features may build at once. The default of 1 is today's serial loop, unchanged. A live run turns it on at a merge stop, never mid-milestone. Parallel builds run only on a local sandbox (the Docker backend has one container per product) and only when the product's environment is an interpreter a worktree can share (`sandbox.python`); otherwise the build runs serially and says nothing new.
 2. **The plan says which features are independent.**
    - `MilestoneFeatureOutput.depends_on` lists the earlier features of the milestone that a feature needs built first.
-   - None, the default and what an older plan holds, means the feature right before it, so a plan that says nothing is serial.
-   - `[]` means independent. The milestone planner (prompt v2) gives it only for a feature that needs nothing from the others and works in different modules and files.
+   - None in a stored plan (`Mn-plan.json`) means the feature right before it, so an older plan, and a plan made with `SCIO_PARALLEL_FEATURES=1`, stay serial. Amended by issue #157: when parallel features are on, `normalise_milestone` turns a None the planner left into `[]` for a newly planned milestone, with one ledger note naming the features. A plan reused from its file is never rewritten. Before the amendment, a plan that said nothing built serially with parallel on (graphcalc M6).
+   - `[]` means independent. The milestone planner (prompt v3) must state `depends_on` for every feature: `[]` when the feature's code and tests would not need an earlier feature's code to exist first, else the ids it needs. Prompt v2 gave `[]` only when sure and left the rest unset.
    - The normaliser keeps only earlier features of the same milestone.
    - `ProductBuildState.ready_batch(n)` takes the next unfinished feature, then each later one that has not run in this milestone and whose dependencies have finished, up to `n`. A retried feature leads a batch or runs alone.
 3. **One writer per working tree, one integrator per milestone branch.**

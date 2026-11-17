@@ -1312,7 +1312,11 @@ def plan_milestone(ctx: RunContext) -> Node:
             out: MilestonePlanOutput = ctx.harness.structured(req, MilestonePlanOutput).value
         except BudgetExceeded as exc:
             return _halt(ctx, "budget", f"budget exhausted at milestone planning: {exc}")
-        plan, notes = normalise_milestone(out, open_features, number)
+        # only here, on a plan the planner just returned: a reused plan (above) keeps what it
+        # stored, so its unset depends_on is still the serial order (issue #157)
+        plan, notes = normalise_milestone(
+            out, open_features, number, parallel=ctx.settings.parallel_features > 1
+        )
         entries = [fact(n) for n in reread] + [
             fact(
                 f"{plan.id} {plan.title}: "

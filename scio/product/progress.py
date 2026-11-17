@@ -239,7 +239,11 @@ def _feature(current: tuple[str, str, list[str]]) -> ProductFeature:
 
 
 def normalise_milestone(
-    out: MilestonePlanOutput, open_features: list[ProductFeature], number: int
+    out: MilestonePlanOutput,
+    open_features: list[ProductFeature],
+    number: int,
+    *,
+    parallel: bool = False,
 ) -> tuple[MilestonePlan, list[str]]:
     """The planner proposes, the orchestrator decides (I-046): the milestone is the longest
     prefix of the open features (PRODUCT.md order) the planner named, capped at
@@ -247,8 +251,14 @@ def normalise_milestone(
     open feature alone. Tiers default to T1. Notes explain every change. A feature skipped in
     an earlier milestone is open and keeps its place in PRODUCT.md order, so a planner cannot
     route around it: leaving it out stops the milestone before it, and when it is the first
-    open feature the milestone is that feature alone (I-116)."""
+    open feature the milestone is that feature alone (I-116).
+
+    ``parallel`` (the build has ``SCIO_PARALLEL_FEATURES`` above 1): a feature the planner
+    gave no ``depends_on`` gets ``[]``, so a plan that says nothing no longer turns a parallel
+    build serial, and one note names the features (issue #157). Only a plan the planner just
+    returned comes here: a plan read back from its file keeps its None, the serial order."""
     notes: list[str] = []
+    unset: list[str] = []
     if not open_features:
         raise ValueError("no open features to plan")
     proposed = {f.id: f for f in out.features}
@@ -272,11 +282,19 @@ def normalise_milestone(
                     "an earlier feature of this milestone; dropped"
                 )
             deps = kept
+        elif parallel:
+            deps = []
+            unset.append(feat.id)
         chosen.append(
             MilestoneFeatureOutput(id=feat.id, tier=p.tier, notes=p.notes, depends_on=deps)
         )
         if len(chosen) >= MAX_FEATURES_PER_MILESTONE:
             break
+    if unset:
+        notes.append(
+            f"{', '.join(unset)}: the planner gave no depends_on; read as no dependency, so "
+            "each may build beside the others (SCIO_PARALLEL_FEATURES is above 1, issue #157)"
+        )
     skipped = [f.id for f in open_features[len(chosen) :] if f.id in proposed]
     if skipped and len(chosen) < MAX_FEATURES_PER_MILESTONE:
         notes.append(

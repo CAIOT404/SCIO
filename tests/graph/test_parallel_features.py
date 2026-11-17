@@ -4,10 +4,11 @@ each in its own git worktree, and the orchestrator alone merges them onto the mi
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from scio.graph.run_context import RunContext
 from scio.harness.core import Harness
 from scio.harness.providers.fake import FakeReply
 from scio.harness.types import CompletionRequest
+from scio.product import build as build_module
 from scio.product import resume_product, run_product
 from scio.product.build import (
     MILESTONES_DIR,
@@ -96,13 +98,13 @@ def _bootstrap(tmp_path: Path, responder: Responder) -> Harness:
 
 
 def _build_ctx(
-    tmp_path: Path, harness: Harness, n: int, work_dir: Path | None = None
+    tmp_path: Path, harness: Harness, n: int, work_dir: Path | None = None, thread: str = THREAD
 ) -> RunContext:
     """The build context with ``parallel_features=n``; a second call is a fresh process.
     ``work_dir`` defaults to ``tmp_path/.scio``, absolute; ``scio build`` passes none, so
     its work directory is the relative ``.scio`` of the workspace it runs in (I-229)."""
     return RunContext.create(
-        thread_id=THREAD,
+        thread_id=thread,
         sandbox_root=tmp_path / "product",
         tier="T1",
         tier_pin="T1",
@@ -754,3 +756,154 @@ def test_a_worktree_under_the_work_dir_inside_the_product_tree_is_kept(
         ctx.close()
     assert (tree / ".git").is_file()
     assert len(_worktrees(repo)) == 2
+
+
+# ---------- an unset depends_on (issue #157) ----------
+
+UNSET_NOTE = "the planner gave no depends_on"
+
+
+def _plan_on_branch(repo: Path) -> MilestonePlan:
+    """M1's plan as committed on its branch (I-149): what a later build thread reuses."""
+    text = _git(repo, "show", f"milestone/1:{MILESTONES_DIR}/M1-plan.json")
+    return MilestonePlan.model_validate_json(text)
+
+
+def test_an_unset_depends_on_builds_beside_the_others_when_parallel_is_on(
+    tmp_path: Path,
+) -> None:
+    """graphcalc M6 (issue #157): the planner left ``depends_on`` unset on every feature, and
+    with ``SCIO_PARALLEL_FEATURES=2`` the milestone still built one feature at a time. A plan
+    the planner just returned now reads an unset one as no dependency: the features build at
+    once, the stored plan says ``[]``, and one ledger note names the features changed."""
+    ctx = _parallel_product(tmp_path, PerThreadResponder(independent=False))
+    repo = tmp_path / "product"
+    try:
+        out = run_build(ctx)
+        s = out.state
+        assert out.paused and s.phase == "merge_wait", s.ledger[-4:]
+    finally:
+        ctx.close()
+    texts = [e.text for e in s.ledger]
+    assert any("2 features at once from milestone/1" in t for t in texts), texts
+    noted = [t for t in texts if UNSET_NOTE in t]
+    assert len(noted) == 1 and noted[0].startswith("P1, P2: "), texts
+    assert s.milestone is not None
+    assert [(f.id, f.depends_on) for f in s.milestone.features] == [("P1", []), ("P2", [])]
+    assert _plan_on_branch(repo) == s.milestone
+    assert [(r.feature_id, r.attempt, r.status) for r in s.feature_runs] == [
+        ("P1", 1, "passed"),
+        ("P2", 1, "passed"),
+    ]
+
+
+def test_a_reused_plan_keeps_its_serial_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plan made with parallel features off is stored with ``depends_on`` unset. The build
+    dies before its first feature; the next thread runs with ``SCIO_PARALLEL_FEATURES=2`` and
+    reuses the plan from ``M1-plan.json`` (I-149). The plan is not rewritten and its unset
+    ``depends_on`` still means the feature before it: no batch, no note, no second planner
+    call."""
+    requests = _Requests(PerThreadResponder(independent=False))
+    harness = _bootstrap(tmp_path, requests)
+    repo = tmp_path / "product"
+    real = build_module.feature_context
+
+    def die(*_a: object, **_k: object) -> Any:
+        raise Crash("killed before the first feature")
+
+    monkeypatch.setattr("scio.product.build.feature_context", die)
+    ctx = _build_ctx(tmp_path, harness, 1)
+    try:
+        with pytest.raises(Crash):
+            run_build(ctx)
+    finally:
+        ctx.close()
+    monkeypatch.setattr("scio.product.build.feature_context", real)
+    stored = _plan_on_branch(repo)
+    assert [(f.id, f.depends_on) for f in stored.features] == [("P1", None), ("P2", None)]
+    plan_commit = _git(repo, "log", "-1", "--format=%H", "milestone/1", "--", MILESTONES_DIR)
+
+    again = _build_ctx(tmp_path, harness, 2, thread=f"{THREAD}-r2")  # the next `scio build`
+    try:
+        out = run_build(again)
+        s = out.state
+        assert out.paused and s.phase == "merge_wait", s.ledger[-4:]
+    finally:
+        again.close()
+    texts = [e.text for e in s.ledger]
+    assert any("M1 was planned before" in t and "(I-149)" in t for t in texts), texts
+    assert s.milestone == stored and _plan_on_branch(repo) == stored
+    assert plan_commit == _git(
+        repo, "log", "-1", "--format=%H", "milestone/1", "--", f"{MILESTONES_DIR}/M1-plan.json"
+    )
+    assert not any("features at once" in t for t in texts), texts
+    assert not any(UNSET_NOTE in t for t in texts), texts
+    assert _git(repo, "log", "--merges", "--format=%s", "milestone/1") == ""
+    assert [(r.feature_id, r.attempt, r.status) for r in s.feature_runs] == [
+        ("P1", 1, "passed"),
+        ("P2", 1, "passed"),
+    ]
+
+
+def test_serial_builds_are_unchanged_when_parallel_is_off(tmp_path: Path) -> None:
+    """``SCIO_PARALLEL_FEATURES=1`` (the default): an unset ``depends_on`` is stored as it
+    came, nothing is noted, and the features build one after the other."""
+    ctx = _parallel_product(tmp_path, PerThreadResponder(independent=False), n=1)
+    repo = tmp_path / "product"
+    try:
+        out = run_build(ctx)
+        s = out.state
+        assert out.paused and s.phase == "merge_wait", s.ledger[-4:]
+    finally:
+        ctx.close()
+    texts = [e.text for e in s.ledger]
+    assert s.milestone is not None
+    assert [(f.id, f.depends_on) for f in s.milestone.features] == [("P1", None), ("P2", None)]
+    assert _plan_on_branch(repo) == s.milestone
+    assert not any(UNSET_NOTE in t for t in texts), texts
+    assert not any("features at once" in t for t in texts), texts
+    assert _git(repo, "log", "--merges", "--format=%s", "milestone/1") == ""
+    assert not worktrees_root(ctx).exists()
+
+
+class _SecondNeedsFirst:
+    """The scripted planner, but P2 names P1 in ``depends_on`` and P1 says nothing."""
+
+    def __init__(self, inner: Responder) -> None:
+        self.inner = inner
+
+    def __call__(self, req: CompletionRequest) -> FakeReply:
+        reply: FakeReply = self.inner(req)
+        if req.role != "milestone_planner":
+            return reply
+        plan = json.loads(reply.text)
+        for f in plan["features"]:
+            f["depends_on"] = ["P1"] if f["id"] == "P2" else None
+        return replace(reply, text=json.dumps(plan))
+
+
+def test_an_explicit_dependency_still_orders_the_batch(tmp_path: Path) -> None:
+    """With parallel features on, only an unset ``depends_on`` is filled: P2 says it needs P1,
+    so it keeps that and builds after P1, never beside it. The note names P1 alone."""
+    responder = _SecondNeedsFirst(PerThreadResponder(independent=False))
+    ctx = _parallel_product(tmp_path, responder)
+    repo = tmp_path / "product"
+    try:
+        out = run_build(ctx)
+        s = out.state
+        assert out.paused and s.phase == "merge_wait", s.ledger[-4:]
+    finally:
+        ctx.close()
+    texts = [e.text for e in s.ledger]
+    assert s.milestone is not None
+    assert [(f.id, f.depends_on) for f in s.milestone.features] == [("P1", []), ("P2", ["P1"])]
+    noted = [t for t in texts if UNSET_NOTE in t]
+    assert len(noted) == 1 and noted[0].startswith("P1: "), texts
+    assert not any("features at once" in t for t in texts), texts
+    assert _git(repo, "log", "--merges", "--format=%s", "milestone/1") == ""
+    assert [(r.feature_id, r.attempt, r.status) for r in s.feature_runs] == [
+        ("P1", 1, "passed"),
+        ("P2", 1, "passed"),
+    ]
