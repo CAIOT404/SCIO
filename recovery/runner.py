@@ -85,16 +85,17 @@ def set_execution_state(flags: int) -> None:
     the child makes it. It keeps the system from sleeping on its idle timer. It does not
     stop a sleep the user asks for (the lid, the power button, the Start menu): the poll
     loop's downtime gap covers that one."""
-    if sys.platform != "win32":
-        return
-    import ctypes
+    # A platform block, as in procs.py: mypy on Linux skips it. An early return made mypy
+    # there call the rest unreachable, which only CI saw (the gate runs on Windows).
+    if sys.platform == "win32":
+        import ctypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    call = kernel32.SetThreadExecutionState
-    call.argtypes = (ctypes.c_uint,)
-    call.restype = ctypes.c_uint
-    if not call(flags):
-        raise OSError(f"SetThreadExecutionState({flags:#010x}) failed")
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        call = kernel32.SetThreadExecutionState
+        call.argtypes = (ctypes.c_uint,)
+        call.restype = ctypes.c_uint
+        if not call(flags):
+            raise OSError(f"SetThreadExecutionState({flags:#010x}) failed")
 
 
 @contextlib.contextmanager
