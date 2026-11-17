@@ -5,7 +5,9 @@
 
 ``--full`` is for a release cut, after a red CI, and for a change to the gate or the push-gate
 hook. It runs the same checks and thresholds as CI's ``checks`` and ``evals`` jobs:
-1. ``ruff check``, ``ruff format --check``, ``mypy``, in order, stopping at the first failure;
+1. ``ruff check``, ``ruff format --check``, ``mypy``, then ``mypy`` for the other platform
+   (``--platform linux`` on Windows, ``--platform win32`` elsewhere; I-241), in order, stopping
+   at the first failure;
 2. ``pytest -n 16`` (the owner's decision, 2026-11-08) and the regression evals (5 trials,
    pass^5 = 1.00, trials run concurrently) at the same time: the tests wait on git and pytest
    subprocesses, the evals on the Fake, and the machine has cores to spare for both;
@@ -65,10 +67,22 @@ EVAL_PARALLEL = 5
 """Trials of a task run at once (``evals.runner --parallel``); the 5 trials and the pass^5
 threshold are unchanged."""
 
+OTHER_PLATFORM = "linux" if sys.platform == "win32" else "win32"
+"""The platform this machine is not, of the two SCIO is checked on: CI's Linux and the owner's
+Windows. mypy evaluates ``sys.platform`` for one platform per run, so code after
+``if sys.platform != "win32": return`` is unreachable only in Linux's run (I-241)."""
+OTHER_PLATFORM_CACHE = ".mypy_cache/other-platform"
+"""The second run's own incremental cache. In one cache each platform's run invalidated the
+other's: 11 s for every run of either, against 1 s each with two caches (measured, I-241)."""
+
 FIRST: list[tuple[str, list[str]]] = [
     ("ruff check", [PY, "-m", "ruff", "check", "."]),
     ("ruff format", [PY, "-m", "ruff", "format", "--check", "."]),
     ("mypy", [PY, "-m", "mypy"]),
+    (
+        f"mypy-{OTHER_PLATFORM}",
+        [PY, "-m", "mypy", "--platform", OTHER_PLATFORM, "--cache-dir", OTHER_PLATFORM_CACHE],
+    ),
 ]
 TOGETHER: list[tuple[str, list[str]]] = [
     ("pytest", [PY, "-m", "pytest", "-n", str(TEST_WORKERS)]),

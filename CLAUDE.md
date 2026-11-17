@@ -41,7 +41,7 @@ For the next one or two graphcalc milestones, add no new workflow item unless it
 
 - Workflow and commits follow `CONTRIBUTING.md`: issue first, branch `feat/<issue#>-<slug>`, Conventional Commits, draft PR from the template with `Closes #N`, docs in the same PR, human merge.
 - Run the gate before every push: `uv run python scripts/gate.py`.
-  - By default it is quick: `ruff check`, `ruff format --check` and `mypy`, then the tests of the paths changed since the last pass. A shared fixture, a config, or a file no test names makes it run the whole suite.
+  - By default it is quick: `ruff check`, `ruff format --check` and `mypy`, then the tests of the paths changed since the last pass. A shared fixture, a config, or a file no test names makes it run the whole suite. `mypy` runs twice: for this platform, then for the other one (`--platform linux` on Windows, `win32` elsewhere), because CI type-checks on Linux (I-241).
   - The regression evals run only when `scio/`, `evals/`, `configs/` or `prompts/` changed. Then the docs check runs.
   - A change that is only Markdown docs runs only the docs steps.
   - `uv run python scripts/gate.py --full` runs what CI runs: `pytest -n 16` beside the regression evals (5 trials, `--min-pass-pow-k 1.0`). Use it for a release cut, after a red CI, and for a change to the gate or the push-gate hook.
