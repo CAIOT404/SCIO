@@ -79,8 +79,10 @@ class Settings(BaseSettings):
     parallel_features: int = Field(default=1, ge=1, le=4)
     """ADR 0018: how many features of a milestone ``scio build`` may build at once, each in its
     own git worktree, merged onto the milestone branch by the orchestrator alone. 1 (the
-    default) is the serial loop; only features the milestone planner marks independent
-    (``depends_on``) run together, and only on a local sandbox."""
+    default) is the serial loop. Above 1, features run together when the plan says they are
+    independent (``depends_on: []``), or, where the planner left ``depends_on`` unset, when
+    their planned files overlap no earlier feature's (issue #157); only on a local sandbox,
+    and only until a batch merge fails in the milestone, which makes the rest of it serial."""
 
     # --- ADR 0012: the Claude Code backend (a Claude subscription instead of API billing) ---
     worker_backend: Literal["aci", "claude_code"] = "aci"

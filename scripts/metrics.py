@@ -24,7 +24,8 @@ Over the last ``--days`` (7), it reads:
   features passed per day and the cost per passed feature, from the build threads' feature
   runs (``scio.dashboard.data``); the share of attempts that ended at a human stop
   (``escalate_human``, ``advisor_cap``, or a question pending now), with the attempts that
-  failed with no human stop (a crash, ``max_iters``, ``budget``) counted apart; and the time
+  failed with no human stop (a crash, ``max_iters``, ``budget``) counted apart; the share of
+  the features passed that built in a batch and the batch merges undone (#157); and the time
   stalled waiting on the owner, from the recovery supervisor's run records
   (``%LOCALAPPDATA%/SCIO/recovery/state.sqlite``, opened ``mode=ro``).
 
@@ -47,6 +48,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 import sqlite3
 import statistics
 import sys
@@ -111,6 +113,15 @@ GRAPHCALC_SOURCES = {
         "or parked on a question now), over the attempts that ended in the window; the other "
         "attempts that did not pass (crashes, max_iters, budget, errors) are failed (no human "
         "stop)"
+    ),
+    "batched_share": (
+        "features whose passing attempt, dated in the window, ran in a batch (its thread is "
+        "named in a build ledger's 'features at once' line; the feature runs do not record "
+        "it), over the features passed in the window"
+    ),
+    "batch_merge_failures": (
+        "the build threads' feature runs dated in the window that are failed with exit "
+        "reason merge: a merge out of a batch that was undone (only a batch records it)"
     ),
     "stall_hours": (
         "the recovery supervisor's store (state.sqlite, mode=ro): a run of this workspace that "
@@ -390,6 +401,25 @@ class Attempt:
     usd: float
     ended_at: datetime | None
     """Its thread's latest checkpoint; None when the thread is not in the DB."""
+    batched: bool = False
+    """It built beside another feature (ADR 0018): a build's ledger names its thread in a
+    "features at once" line (:func:`batched_threads`)."""
+
+
+BATCH_MARK = " features at once from "
+BATCH_THREAD_RE = re.compile(r"\((\S+)\)")
+"""A thread id in a batch line: ``P1 (build-x-m1-p1-a1)``. ``(ADR 0018)`` has a space."""
+
+
+def batched_threads(texts: Iterable[str]) -> set[str]:
+    """The attempt threads a build's ledger says ran in a batch: ``scio build`` writes one
+    line per batch, "2 features at once from milestone/1 at <sha>: P1 (<thread>), P2
+    (<thread>) (ADR 0018)". The feature runs themselves do not say how they ran."""
+    out: set[str] = set()
+    for text in texts:
+        if BATCH_MARK in text:
+            out.update(BATCH_THREAD_RE.findall(text.split(BATCH_MARK, 1)[1]))
+    return out
 
 
 def escalated(a: Attempt) -> bool:
@@ -402,9 +432,13 @@ def attempt_numbers(attempts: list[Attempt], window: Window) -> dict[str, Any]:
     """Features passed (distinct features with a passed attempt dated in the window) per day,
     every dated attempt's USD over them, the share of the attempts that ended which escalated
     (:func:`escalated`), and the others that did not pass, failed with no human stop (a
-    crash, ``max_iters``, ``budget``, an error), each with their reasons."""
+    crash, ``max_iters``, ``budget``, an error), each with their reasons. Also the share of
+    the features passed whose passing attempt ran in a batch, and the attempts whose merge
+    out of a batch was undone (``failed`` with exit reason ``merge``, issue #157)."""
     dated = [a for a in attempts if window.holds(a.ended_at)]
     passed = {a.feature_id for a in dated if a.status == "passed"}
+    batched = {a.feature_id for a in dated if a.status == "passed" and a.batched}
+    unmerged = [a for a in dated if a.status == "failed" and a.exit_reason == "merge"]
     usd = sum(a.usd for a in dated)
     ended = [a for a in dated if a.status not in NOT_ENDED]
     up = [a for a in ended if escalated(a)]
@@ -423,6 +457,9 @@ def attempt_numbers(attempts: list[Attempt], window: Window) -> dict[str, Any]:
         ),
         "failed_no_human_stop": len(failed),
         "failed_by_reason": dict(sorted(failed_by.items())),
+        "batched_features": len(batched),
+        "batched_share": share(len(batched), len(passed)),
+        "batch_merge_failures": len(unmerged),
         "undated_attempts": sum(1 for a in attempts if a.ended_at is None),
     }
 
@@ -439,8 +476,11 @@ def read_attempts(product_root: Path) -> list[Attempt] | str:
     summaries = src.list_threads(root.name)
     by_id = {s.thread_id: s for s in summaries}
     found: dict[str, Attempt] = {}
-    for build in (s for s in summaries if s.kind == "build"):
-        detail = src.thread(root.name, build.thread_id)
+    details = [src.thread(root.name, s.thread_id) for s in summaries if s.kind == "build"]
+    # every build's ledger first: a later thread lists the runs it took over from the thread
+    # whose ledger has their batch line (I-165)
+    batched = batched_threads(item.text for d in details for item in d.timeline)
+    for detail in details:
         for row in detail.build.features if detail.build else []:
             if row.thread_id in found:
                 continue
@@ -453,6 +493,7 @@ def read_attempts(product_root: Path) -> list[Attempt] | str:
                 row.exit_reason,
                 row.usd,
                 t.updated_at if t else None,
+                row.thread_id in batched,
             )
         for link in detail.feature_threads:  # the attempts with no run recorded yet
             if link.thread_id in found:
@@ -466,6 +507,7 @@ def read_attempts(product_root: Path) -> list[Attempt] | str:
                 t.exit_reason if t else None,
                 t.usd if t else 0.0,
                 t.updated_at if t else None,
+                link.thread_id in batched,
             )
     return list(found.values())
 
@@ -644,6 +686,11 @@ def summary_rows(data: dict[str, Any]) -> list[tuple[str, str]]:
             if "failed_no_human_stop" in gc:
                 failed = _pct(gc["failed_no_human_stop"], attempts)
                 parts.append(f"failed (no human stop) {failed}")
+            if "batched_features" in gc:
+                batched = _pct(gc["batched_features"], gc["features_passed"])
+                parts.append(
+                    f"batched {batched}; batch merge failures {gc.get('batch_merge_failures', 0)}"
+                )
         if "stall_hours" in gc:
             stall = f"stalled {gc['stall_hours']:.1f} h"
             parts.append(stall + (", stalled now" if gc.get("stalled_now") else ""))

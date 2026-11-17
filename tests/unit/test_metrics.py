@@ -365,6 +365,52 @@ def test_graphcalc_features_cost_and_escalations_come_from_the_attempts() -> Non
     assert out["failed_by_reason"] == {"crashed": 1, "max_iters": 1}
 
 
+def test_metrics_counts_batched_features_and_batch_merge_failures() -> None:
+    """Issue #157: a batched attempt is one whose thread a build's ledger names in a
+    "features at once" line (the feature runs do not say how they ran). ``batched_share`` is
+    the features whose passing attempt ran in a batch over the features passed;
+    ``batch_merge_failures`` counts the attempts whose merge out of a batch was undone
+    (failed, exit reason ``merge``). Both read only the window."""
+    metrics = load("metrics")
+    ledger = [
+        "M1 Milestone 1: P1@T0, P2@T1",
+        "2 features at once from milestone/1 at 0123456789ab: P1 (b-p1-a1), P2 (b-p2-a1) "
+        "(ADR 0018)",
+        "P2 passed in its worktree; its merge onto milestone/1: conflict in README.md (x)",
+        "2 features at once from milestone/0 at ba9876543210: P0 (b-p0-a1), P9 (b-p9-a1) "
+        "(ADR 0018)",
+    ]
+    batched = metrics.batched_threads(ledger)
+    assert batched == {"b-p1-a1", "b-p2-a1", "b-p0-a1", "b-p9-a1"}
+    window = metrics.Window(NOW - 7 * D, NOW)
+
+    def a(fid: str, n: int, status: str, reason: str | None, at: datetime) -> Any:
+        thread = f"b-{fid.lower()}-a{n}"
+        return metrics.Attempt(fid, n, thread, status, reason, 1.0, at, thread in batched)
+
+    attempts = [
+        a("P1", 1, "passed", "success", NOW - 6 * D),  # batched, merged
+        a("P2", 1, "failed", "merge", NOW - 6 * D),  # batched, its merge undone
+        a("P2", 2, "passed", "success", NOW - 5 * D),  # the retry, alone: not batched
+        a("P3", 1, "passed", "success", NOW - 4 * D),  # serial
+        a("P4", 1, "failed", "max_iters", NOW - 3 * D),
+        a("P0", 1, "passed", "success", NOW - 9 * D),  # batched, before the window
+        a("P9", 1, "failed", "merge", NOW - 9 * D),  # before the window
+    ]
+    out = metrics.attempt_numbers(attempts, window)
+    assert out["features_passed"] == 3
+    assert out["batched_features"] == 1
+    assert out["batched_share"] == pytest.approx(1 / 3)
+    assert out["batch_merge_failures"] == 1
+    assert out["failed_by_reason"] == {"max_iters": 1, "merge": 1}
+    assert set(metrics.GRAPHCALC_SOURCES) >= {"batched_share", "batch_merge_failures"}
+    [row] = [
+        text for label, text in metrics.summary_rows({"graphcalc": out}) if label == "graphcalc"
+    ]
+    assert "batched 1/3" in row and "batch merge failures 1" in row
+    assert metrics.attempt_numbers([], window)["batched_share"] is None
+
+
 def test_a_slip_is_counted_in_the_machine_log_not_the_repo(
     tmp_path: Path,
     machine_dir: Path,

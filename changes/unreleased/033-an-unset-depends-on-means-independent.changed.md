@@ -1,0 +1,6 @@
+A milestone feature the planner gave no `depends_on` no longer turns a parallel build serial by default (issue #157, ADR 0018 amended).
+- The milestone planner prompt (v3) requires `depends_on` for every feature (`[]` when the feature's code and tests would not need an earlier feature's code to exist first, else the ids it needs) and asks for `files`, the files each feature expects to create or change.
+- With `SCIO_PARALLEL_FEATURES` above 1, `normalise_milestone` decides an unset `depends_on` of a newly planned feature from those files. No planned files: it stays unset, the serial order. Files that overlap an earlier feature's (or an earlier feature that names none): it depends on those features. Neither: `[]`, so it may build beside the others. One ledger note per kind names the features and the shared paths.
+- After a batch merge fails in a milestone, the rest of that milestone builds one feature at a time, and the ledger says so. The next milestone batches again.
+- A plan reused from `Mn-plan.json` is not rewritten: its unset `depends_on` still means the feature before it. With `SCIO_PARALLEL_FEATURES=1` nothing changes.
+- `scripts/metrics.py --product-root` reports `batched_share` (features whose passing attempt ran in a batch, over the features passed) and `batch_merge_failures`.
