@@ -298,9 +298,15 @@ def supervise(
     kill: Callable[[int], None] = kill_tree,
     git: Runner = run_command,
     awake: Callable[[int], object] = set_execution_state,
+    run_id: str | None = None,
 ) -> RunRecord:
     """Run ``cfg.launcher + argv`` in ``cfg.workspace`` as this process's child and return
     its finished record.
+
+    - **Run id.** :func:`new_run_id` makes it, unless ``run_id`` names the one the caller
+      already made: ``run --detach`` makes it in the process that prints it and hands it
+      to the detached supervisor (issue #175). An id the store already holds raises
+      ``ValueError``, before the lease and before any record is written.
 
     - **Lease.** Takes the workspace lease (``cfg.lease_name``). If a live process holds
       it, the record is saved as ``REFUSED`` and returned without starting anything.
@@ -330,7 +336,10 @@ def supervise(
     """
     args = list(argv)
     me = procs.self_key()
-    run_id = new_run_id(clock)
+    if run_id is None:
+        run_id = new_run_id(clock)
+    elif store.get_run(run_id) is not None:
+        raise ValueError(f"run {run_id} is already recorded")
     run_dir = home / "runs" / run_id
     product = product_dir(cfg.workspace, args)
     run = RunRecord(
@@ -538,4 +547,60 @@ def start_replay(
         cwd=package_root,
         env=env,
         log_path=home / "replays" / f"{incident_id}.log",
+    )
+
+
+def detached_argv(
+    workspace: Path,
+    argv: Sequence[str],
+    *,
+    run_id: str,
+    incident_id: str | None = None,
+    resumed_from: str | None = None,
+    python: str = sys.executable,
+) -> list[str]:
+    """The argv ``run --detach`` starts: the ordinary supervised run, given its run id.
+
+    ``[python, "-m", "recovery", "run", "--workspace", workspace, "--run-id", run_id,
+    "--", *argv]``, with ``--incident`` and ``--resumed-from`` before the ``--`` when set.
+    """
+    command = [python, "-m", "recovery", "run", "--workspace", str(workspace)]
+    command += ["--run-id", run_id]
+    if incident_id:
+        command += ["--incident", incident_id]
+    if resumed_from:
+        command += ["--resumed-from", resumed_from]
+    return [*command, "--", *argv]
+
+
+def start_detached(
+    workspace: Path,
+    argv: Sequence[str],
+    *,
+    run_id: str,
+    env: Mapping[str, str],
+    home: Path,
+    package_root: Path,
+    incident_id: str | None = None,
+    resumed_from: str | None = None,
+    spawn_detached: Callable[..., int] = procs.spawn_detached,
+) -> int:
+    """Start :func:`detached_argv` detached, the way :func:`start_replay` starts a replay:
+    ``cwd=package_root`` and ``SCIO_RECOVERY_HOME=home``. The environment is the caller's
+    ``env`` whole, as an attached run gives it to its build. What the detached supervisor
+    prints (the build's echoed output, its own messages) is appended to
+    ``home/runs/<run_id>/supervisor.log``. Returns the PID.
+
+    The process started here is the supervisor: it takes the lease, asks the system to
+    stay awake and watches for a hang. The caller holds nothing and may end at once.
+    """
+    child_env = dict(env)
+    child_env[HOME_ENV] = str(home)
+    return spawn_detached(
+        detached_argv(
+            workspace, argv, run_id=run_id, incident_id=incident_id, resumed_from=resumed_from
+        ),
+        cwd=package_root,
+        env=child_env,
+        log_path=home / "runs" / run_id / "supervisor.log",
     )

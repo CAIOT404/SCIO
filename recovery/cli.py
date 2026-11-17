@@ -1,14 +1,21 @@
-"""``python -m recovery``: run, tick, status, incidents, hold, release, dismiss.
+"""``python -m recovery``: run, wait, tick, status, incidents, hold, release, dismiss, watch.
 
 ``run`` exits with the child's own exit code, so a session that called ``sh scio.sh
 build ...`` before sees the same status and output under the supervisor. Every other
 error prints one line and returns 2, never a traceback.
+
+``run --detach`` starts that same supervised run as a detached process and returns at
+once, and ``wait`` blocks until the workspace's run ends and exits with its code (issue
+#175). A build started attached dies with the session that started it; a detached one
+belongs to no session, and ``wait`` only reads, so it is safe to kill.
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import os
+import re
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -17,11 +24,22 @@ from pathlib import Path
 
 from recovery import config, history, machine, procs, runner, watch
 from recovery.config import WorkspaceConfig
-from recovery.model import Incident, IncidentState, RunRecord, RunStatus
+from recovery.model import Incident, IncidentState, ProcessKey, RunRecord, RunStatus
 from recovery.store import Store
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 """The directory that holds ``recovery/``: a background tick starts from here."""
+
+RUN_ID = re.compile(r"^run-\d{14}-[0-9a-f]{6}$")
+"""``runner.new_run_id``'s shape. ``--run-id`` names a directory, so nothing else passes."""
+
+DETACH_WAIT_S = 10.0
+"""How long ``run --detach`` waits for the detached supervisor's run record."""
+DETACH_POLL_S = 0.1
+
+WAIT_SETTLE_S = 60.0
+"""How long ``wait`` gives the supervisor of an ended run to record its incident."""
+WAIT_SETTLE_POLL_S = 1.0
 
 STATUS_RUNS = 20
 """How many runs ``status`` lists."""
@@ -49,7 +67,32 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--workspace", required=True, help="directory holding recovery.toml")
     run.add_argument("--incident", help="the incident this run resumes (set by a replay)")
     run.add_argument("--resumed-from", help="the run id this run replays (set by a replay)")
+    run.add_argument(
+        "--detach",
+        action="store_true",
+        help=(
+            "start the same supervised run as a detached process that no session owns, "
+            "print its run id and stdout path, and return at once (then: wait)"
+        ),
+    )
+    run.add_argument("--run-id", help=argparse.SUPPRESS)  # set by run --detach
     run.add_argument("args", nargs=argparse.REMAINDER, help="-- then the SCIO arguments")
+
+    wait = sub.add_parser(
+        "wait",
+        help="block until the workspace's supervised run ends; exit with its code",
+        description=(
+            "Waits for the workspace's newest supervised run (or the one --run names) to "
+            "end, prints the tail of its stdout and exits with its exit code: 2 for a run "
+            "that was refused, 1 for one with no exit code (killed, orphaned). When the run "
+            "has already ended it reports it at once. It takes no lease and writes nothing, "
+            "so killing it never affects the run."
+        ),
+    )
+    wait.add_argument("--workspace", required=True, help="directory holding recovery.toml")
+    wait.add_argument("--run", help="the run id to wait for (default: the newest run)")
+    wait.add_argument("--tail", type=int, default=60, help="stdout lines to print at the end")
+    wait.add_argument("--interval", type=float, default=5.0, help="seconds between polls")
 
     tick = sub.add_parser("tick", help="reconcile orphans and advance every open incident")
     tick.add_argument("--incident", help="advance only this incident")
@@ -146,10 +189,19 @@ def _run(args: argparse.Namespace) -> int:
     except ValueError as exc:  # tomllib.TOMLDecodeError is a ValueError
         _err(f"recovery run: {workspace.resolve() / 'recovery.toml'}: {exc}")
         return 2
+    if args.run_id and not RUN_ID.match(args.run_id):
+        _err(f"recovery run: {args.run_id!r} is not a run id")
+        return 2
     home = _home()
+    if args.detach:
+        return _run_detached(args, cfg, scio_args, home)
+    # Only a detached start names the run; an attached run's call is as it was.
+    supervise = runner.supervise
+    if args.run_id:
+        supervise = functools.partial(runner.supervise, run_id=args.run_id)
     store = Store.at_home(home)
     try:
-        record = runner.supervise(
+        record = supervise(
             cfg,
             store,
             scio_args,
@@ -162,8 +214,7 @@ def _run(args: argparse.Namespace) -> int:
     finally:
         store.close()
     if record.status is RunStatus.REFUSED:
-        who = f"pid {holder.pid}" if holder is not None else "another process"
-        _err(f"recovery run: {cfg.workspace} is busy: {who} holds its lease; nothing started")
+        _err(_busy_line(cfg, holder))
         return 2
     code = 1 if record.exit_code is None else record.exit_code
     # From here on, a supervisor problem never changes the child's exit code.
@@ -182,11 +233,183 @@ def _run(args: argparse.Namespace) -> int:
                 f"start ({exc!r}); run python -m recovery tick"
             )
         else:
-            _err(
-                f"recovery: incident {incident.incident_id} ({incident.failure_class.value}) "
-                "opened; recovery continues in the background. python -m recovery status"
-            )
+            _err(_incident_opened_line(incident))
     return code
+
+
+def _busy_line(cfg: WorkspaceConfig, holder: ProcessKey | None) -> str:
+    who = f"pid {holder.pid}" if holder is not None else "another process"
+    return f"recovery run: {cfg.workspace} is busy: {who} holds its lease; nothing started"
+
+
+def _incident_opened_line(incident: Incident) -> str:
+    return (
+        f"recovery: incident {incident.incident_id} ({incident.failure_class.value}) "
+        "opened; recovery continues in the background. python -m recovery status"
+    )
+
+
+def _run_detached(
+    args: argparse.Namespace, cfg: WorkspaceConfig, scio_args: list[str], home: Path
+) -> int:
+    """``run --detach``: refuse a busy workspace as an attached run does, then start the
+    ordinary supervised run detached and name it (issue #175).
+
+    This process takes no lease and saves no record: the detached supervisor does both.
+    It makes the run id, so it can print it, and waits at most :data:`DETACH_WAIT_S` for
+    the supervisor's record, so that a ``wait`` started next finds this run and not the
+    one before it."""
+    store = Store.at_home(home)
+    try:
+        holder = store.lease_holder(cfg.lease_name)
+        if holder is not None and procs.alive(holder):
+            _err(_busy_line(cfg, holder))
+            return 2
+        run_id = args.run_id or runner.new_run_id()
+        run_dir = home / "runs" / run_id
+        try:
+            pid = runner.start_detached(
+                cfg.workspace,
+                scio_args,
+                run_id=run_id,
+                env=os.environ,
+                home=home,
+                package_root=PACKAGE_ROOT,
+                incident_id=args.incident,
+                resumed_from=args.resumed_from,
+                spawn_detached=procs.spawn_detached,
+            )
+        except OSError as exc:
+            _err(f"recovery run: the detached run did not start: {exc}")
+            return 1
+        deadline = time.monotonic() + DETACH_WAIT_S
+        record = store.get_run(run_id)
+        while record is None and time.monotonic() < deadline:
+            time.sleep(DETACH_POLL_S)
+            record = store.get_run(run_id)
+        holder = store.lease_holder(cfg.lease_name)
+    finally:
+        store.close()
+    if record is None:
+        _err(
+            f"recovery run: detached run {run_id} (pid {pid}) recorded nothing in "
+            f"{DETACH_WAIT_S:g} s; its log directory is {run_dir}"
+        )
+        return 1
+    if record.status is RunStatus.REFUSED:  # another run took the lease in between
+        _err(_busy_line(cfg, holder))
+        return 2
+    print(
+        f"recovery run: detached run {run_id} (pid {record.supervisor_pid or pid}); "
+        f"stdout: {record.stdout_path}",
+        flush=True,
+    )
+    return 0
+
+
+# wait
+
+
+def _pick_run(store: Store, workspace: str, run_id: str | None) -> RunRecord | str:
+    """The run ``wait`` reports, or the one line that says why there is none.
+
+    Without ``--run`` it is the workspace's newest run that was started. A refused attempt
+    (a second ``run`` on a busy workspace) is never picked over the run that refused it;
+    it is reported only when the workspace has nothing else."""
+    if run_id is not None:
+        run = store.get_run(run_id)
+        if run is None:
+            return f"no run {run_id} (python -m recovery status)"
+        if not _same_dir(run.workspace, workspace):
+            return f"run {run_id} is a run of {run.workspace}, not of {Path(workspace).resolve()}"
+        return run
+    runs = [r for r in store.runs() if _same_dir(r.workspace, workspace)]
+    if not runs:
+        return f"no supervised run of {Path(workspace).resolve()} is recorded"
+    started = [r for r in runs if r.status is not RunStatus.REFUSED]
+    return (started or runs)[-1]
+
+
+def _await_end(store: Store, run_id: str, interval_s: float) -> tuple[RunRecord, bool]:
+    """Poll the store until the run has ended. Returns its record, and whether it is an
+    orphan nobody recorded yet: still ``running`` in the store, with its supervisor and
+    its build both gone (what the next tick marks ``orphaned``).
+
+    A supervisor saves the run's end, and then records the incident. So an ended run is
+    reported once its supervisor is gone too, or :data:`WAIT_SETTLE_S` later."""
+    settle_until: float | None = None
+    while True:
+        run = store.get_run(run_id)
+        if run is None:
+            raise LookupError(f"run {run_id} is no longer in the store")
+        supervisor = ProcessKey(run.supervisor_pid, run.supervisor_created)
+        if run.status is not RunStatus.RUNNING:
+            if settle_until is None:
+                settle_until = time.monotonic() + WAIT_SETTLE_S
+            if not procs.alive(supervisor) or time.monotonic() >= settle_until:
+                return run, False
+            time.sleep(min(interval_s, WAIT_SETTLE_POLL_S))
+            continue
+        if not procs.alive(supervisor) and not procs.alive(run.process):
+            return run, True
+        time.sleep(interval_s)
+
+
+def _tail_offset(data: bytes, lines: int) -> int:
+    """Where the last ``lines`` lines of ``data`` start."""
+    if lines <= 0:
+        return len(data)
+    pos = len(data.rstrip(b"\r\n"))
+    for _ in range(lines):
+        pos = data.rfind(b"\n", 0, pos)
+        if pos < 0:
+            return 0
+    return pos + 1
+
+
+def _print_tail(path: str, lines: int) -> None:
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return
+    procs.follow([(Path(path), sys.stdout)], [_tail_offset(data, lines)])
+
+
+def _wait(args: argparse.Namespace) -> int:
+    home = _home()
+    if not (home / "state.sqlite").is_file():  # never create a store to wait on it
+        _err(f"recovery wait: no supervisor store in {home}")
+        return 2
+    store = Store.at_home(home)
+    try:
+        picked = _pick_run(store, args.workspace, args.run)
+        if isinstance(picked, str):
+            _err(f"recovery wait: {picked}")
+            return 2
+        try:
+            run, orphan = _await_end(store, picked.run_id, args.interval)
+        except KeyboardInterrupt:
+            _err(f"recovery wait: stopped waiting; run {picked.run_id} is not affected")
+            return 130
+        incident = store.get_incident(run.incident_id) if run.incident_id else None
+    finally:
+        store.close()
+    if run.stdout_path:
+        _print_tail(run.stdout_path, args.tail)
+    sys.stdout.flush()
+    if orphan:
+        _err(
+            f"recovery wait: run {run.run_id} has no exit: its supervisor and its build "
+            "are gone. python -m recovery tick records the orphan"
+        )
+        return 1
+    code = "-" if run.exit_code is None else str(run.exit_code)
+    _err(f"recovery wait: run {run.run_id} {run.status.value}, exit {code}")
+    if incident is not None and incident.open:
+        _err(_incident_opened_line(incident))
+    if run.status is RunStatus.REFUSED:
+        return 2
+    return 1 if run.exit_code is None else run.exit_code
 
 
 # tick, hold, release
@@ -372,6 +595,7 @@ def _watch(args: argparse.Namespace) -> int:
 
 _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "run": _run,
+    "wait": _wait,
     "tick": _tick,
     "status": _status,
     "incidents": _incidents,
