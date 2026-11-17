@@ -26,7 +26,14 @@ from typing import Any, Literal
 from scio.aci.sandbox.base import Sandbox
 from scio.aci.toolbox import ToolBox
 from scio.context.projections import advisor_brief, debug_message, review_message, step_message
-from scio.graph.nodes.common import decision, diff_stat, fact, git_out, untracked_files
+from scio.graph.nodes.common import (
+    changed_since_head,
+    decision,
+    diff_stat,
+    fact,
+    git_out,
+    untracked_files,
+)
 from scio.graph.nodes.planning import keep_localized_files, normalize_steps, summaries_text
 from scio.graph.run_context import RunContext
 from scio.harness.failures import BudgetExceeded
@@ -39,6 +46,7 @@ from scio.loop.backends import (
     Worker,
     make_worker,
 )
+from scio.loop.escalation import approve_drift
 from scio.loop.impact import assess
 from scio.state.models import (
     AdvisorOutput,
@@ -523,6 +531,18 @@ def advise(ctx: RunContext) -> Node:
             patch["phase"] = "checkpoint"
         else:
             patch["phase"] = "implement"
+        if out.verdict is Verdict.CONTINUE and EscalationTrigger.PLAN_DRIFT in triggers:
+            # Issue #172: the advisor ruled on this drift and said continue, so the same
+            # files do not fire again on this step. Git names them, as in verify (I-166);
+            # no other verdict approves anything. Written with the verdict, in one update.
+            patch["drift_approved"] = approve_drift(
+                state,
+                ctx.escalation,
+                verdict=out.verdict,
+                triggers=triggers,
+                touched=changed_since_head(ctx.sandbox),
+                root=ctx.sandbox.root,
+            )
         patch.update(ctx.budget_update())
         patch["budgets"] = patch["budgets"].model_copy(
             update={

@@ -847,6 +847,10 @@ class SCIOState(BaseModel):
     """Latest advisor guidance, shown to the next worker turn and then cleared."""
     high_impact_flags: list[str] = Field(default_factory=list)
     high_impact_reviewed: bool = False
+    drift_approved: dict[str, list[str]] = Field(default_factory=dict)
+    """The drifted files an advisor ``continue`` ruled on, per plan step, keyed
+    ``v<plan version>:<step id>`` so a replan's steps, which reuse ids, start with none
+    (issue #172). ``plan_drift`` does not fire again for them on that step."""
     sample_disagreement: bool = False
     triage: TriageDecision | None = None
 

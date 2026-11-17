@@ -244,6 +244,8 @@ def test_a_missed_product_quality_check_never_escalates_even_with_signals() -> N
 
 
 def test_cap_per_step_and_per_run_route_to_halt_with_advisor_cap_exit() -> None:
+    """The per-run cap halts. The per-step cap alone no longer does (issue #172): with run
+    headroom the step goes back to work, and the stall and iteration exits end it."""
     trig = ProgressLedger(current_step_id="S1", stall_count=3, last_failure_kind="tests")
     per_step = _state(
         progress=trig,
@@ -256,15 +258,18 @@ def test_cap_per_step_and_per_run_route_to_halt_with_advisor_cap_exit() -> None:
         ),
     )
     d = decide(per_step, CFG)
-    assert d.route == "halt" and exit_for(d) is ExitReason.ADVISOR_CAP
+    assert d.route == "debug" and exit_for(d) is None
+    assert d.triggers == [EscalationTrigger.STALL]
     assert d.reason == (
-        "advisor already consulted on step S1 (one call per step; 1/3 for this run)"
+        "advisor already consulted on step S1 (one call per step; 1/3 for this run); "
+        "the step continues"
     )
     per_run = _state(
         progress=trig,
         budgets=Budget(tokens_max=1, usd_max=1, advisor_calls_max=1, advisor_calls_used=1),
     )
-    assert decide(per_run, CFG).route == "halt"
+    d_run = decide(per_run, CFG)
+    assert d_run.route == "halt" and exit_for(d_run) is ExitReason.ADVISOR_CAP
     other_step = _state(
         progress=trig.model_copy(update={"current_step_id": "S2"}),
         budgets=Budget(
@@ -303,7 +308,8 @@ def test_halt_reason_names_the_run_total_when_it_is_spent() -> None:
 
 def test_halt_reason_names_the_per_step_cap_when_the_total_has_headroom() -> None:
     """I-115, the graphcalc live run: 2/3 used, but the step already had its one call. The
-    old text, ``advisor cap hit (2/3, step S1)``, read as headroom left."""
+    old text, ``advisor cap hit (2/3, step S1)``, read as headroom left. Since issue #172
+    this case is no halt: the reason keeps I-115's wording and says the step continues."""
     s = _state(
         progress=ProgressLedger(current_step_id="S1", stall_count=3, last_failure_kind="tests"),
         budgets=Budget(
@@ -315,9 +321,10 @@ def test_halt_reason_names_the_per_step_cap_when_the_total_has_headroom() -> Non
         ),
     )
     d = decide(s, CFG)
-    assert d.route == "halt" and exit_for(d) is ExitReason.ADVISOR_CAP
+    assert d.route == "debug" and exit_for(d) is None
     assert d.reason == (
-        "advisor already consulted on step S1 (one call per step; 2/3 for this run)"
+        "advisor already consulted on step S1 (one call per step; 2/3 for this run); "
+        "the step continues"
     )
 
 
