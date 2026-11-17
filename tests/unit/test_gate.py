@@ -264,7 +264,8 @@ def test_a_pass_writes_the_stamp_and_a_dead_gate_leaves_its_running_marker(
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", str(stamp["at"]))
     counts = stamp["counts"]
     assert isinstance(counts, dict)
-    assert set(counts) == {"ruff check", "ruff format", "mypy", "pytest", "evals", "docs"}
+    other = f"mypy-{gate.OTHER_PLATFORM}"
+    assert set(counts) == {"ruff check", "ruff format", "mypy", other, "pytest", "evals", "docs"}
     assert counts["pytest"] == "1 passed in 0.01s"
     gate_dir = repo / ".scio" / "gate"
     assert not (gate_dir / "RUNNING").exists() and not list(gate_dir.glob("*.tmp"))
@@ -567,3 +568,64 @@ def test_a_second_gate_waits_for_the_machine_lock(
     ran.unlink()
     assert gate.main(["--no-lock"]) == 0 and ran.exists()
     assert json.loads(lock.read_text(encoding="utf-8")) == holder
+
+
+# --- The other platform's type check (I-241) --------------------------------------------------
+
+
+def test_the_gate_type_checks_the_other_platform_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """I-241: mypy evaluates `sys.platform` for one platform per run, so the gate runs it twice:
+    for this machine, then for the other of Windows and Linux, right after, with a cache of its
+    own. The second run is in every mode that runs mypy (full and quick), not in a docs gate."""
+    gate = _load()
+    other = "linux" if sys.platform == "win32" else "win32"
+    names = [name for name, _ in gate.steps()]
+    assert names[names.index("mypy") + 1] == f"mypy-{other}", names
+    native, argv = dict(gate.steps())["mypy"], dict(gate.steps())[f"mypy-{other}"]
+    assert native == [sys.executable, "-m", "mypy"]  # this platform, the default cache
+    assert argv[:3] == native and argv[argv.index("--platform") + 1] == other, argv
+    cache = argv[argv.index("--cache-dir") + 1]
+    assert cache.startswith(".mypy_cache/") and "\\" not in cache, cache  # git-ignored space
+
+    repo = _repo(tmp_path)
+    monkeypatch.setattr(gate, "ROOT", repo)
+    ran = _fake_steps(gate, monkeypatch)
+    assert gate.main(["--full"]) == 0
+    assert [n for n, _ in ran][2:4] == ["mypy", f"mypy-{other}"], ran
+    assert f"ok   mypy-{other}" in capsys.readouterr().out  # its verdict line, as mypy's
+    _scenario(gate, repo, ran, capsys, {"scio/x/y.py": "Y = 2\n"})  # quick
+    assert [n for n, _ in ran][2:4] == ["mypy", f"mypy-{other}"], ran
+    assert _stamp(repo)["mode"] == "quick" and f"mypy-{other}" in str(_stamp(repo)["counts"])
+    _scenario(gate, repo, ran, capsys, {"docs/guide.md": "# Guide\n\nMore.\n"})  # docs
+    assert _stamp(repo)["mode"] == "docs" and not [n for n, _ in ran if n.startswith("mypy")]
+
+
+def test_a_platform_only_type_error_fails_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """I-241, with real mypy on a tiny package: an early return for every platform but this one
+    leaves the rest of the function unreachable only in the other platform's run. This
+    machine's mypy passes it, and the gate fails on the second run."""
+    gate = _load()
+    _write(
+        tmp_path,
+        "pyproject.toml",
+        '[project]\nname = "x"\nversion = "0"\n'
+        '[tool.mypy]\npackages = ["pkg"]\nstrict = true\nwarn_unreachable = true\n',
+    )
+    _write(
+        tmp_path,
+        "pkg/__init__.py",
+        "import sys\n\n\ndef only_here() -> int:\n"
+        f"    if sys.platform != {sys.platform!r}:\n        return 0\n    return 1\n",
+    )
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    monkeypatch.setattr(gate, "FIRST", [s for s in gate.FIRST if s[0].startswith("mypy")])
+    monkeypatch.setattr(gate, "TOGETHER", [])
+    monkeypatch.setattr(gate, "LAST", [])
+    assert gate.main(["--no-lock"]) == 1
+    out = capsys.readouterr().out
+    assert "ok   mypy " in out and f"FAIL mypy-{gate.OTHER_PLATFORM}" in out, out
+    assert "Statement is unreachable" in out

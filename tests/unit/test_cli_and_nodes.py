@@ -124,7 +124,8 @@ def test_the_local_ci_line_runs_python_tools_as_modules() -> None:
     sys.modules["gate"] = gate  # @dataclass looks its module up there
     spec.loader.exec_module(gate)
     names = [name for name, _ in gate.steps()]
-    assert names == ["ruff check", "ruff format", "mypy", "pytest", "evals", "docs"], names
+    other = "mypy-linux" if sys.platform == "win32" else "mypy-win32"  # I-241
+    assert names == ["ruff check", "ruff format", "mypy", other, "pytest", "evals", "docs"], names
     for name, argv in gate.steps():
         assert argv[0] == sys.executable, (name, argv)  # the interpreter, not a launcher
         assert argv[1] == "-m" or argv[1].endswith(".py"), (name, argv)
