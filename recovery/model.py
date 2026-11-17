@@ -158,6 +158,14 @@ class RunRecord:
     supervisor_pid: int = 0
     supervisor_created: float = 0.0
     last_progress_at: float = 0.0
+    downtime_s: float = 0.0
+    """Seconds the machine was down (asleep, hibernating) while this run was supervised:
+    the sum of the gaps the supervisor's poll loop saw between two of its iterations. It
+    is never counted as idle time by the hang check (I-240). A record saved before the
+    field existed reads as 0.0."""
+    notes: list[str] = field(default_factory=list)
+    """What the supervisor noted about the run while it ran, one line per event (a machine
+    downtime, I-240). A record saved before the field existed reads as empty."""
     ended_at: float | None = None
     exit_code: int | None = None
     run_dir: str = ""
