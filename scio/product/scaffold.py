@@ -129,6 +129,22 @@ tools (I-140). SCIO's own checks run in its sandbox venv, where the install phas
 dependencies, so only the product's CI sees a missing install."""
 OLD_PYTHON_INSTALLS = ("pip install ruff pytest",)
 """Install lines older scaffolds wrote; ``scio upgrade`` replaces exactly these (I-142)."""
+PYTHON_HTTP_INSTALL = PYTHON_INSTALL + " playwright"
+"""The install line of a python product that serves pages (``app.kind`` http): its tests
+drive the page in a browser, and a CI without one skipped them while reading green
+(issue #169, I-242)."""
+BROWSER_INSTALL = "python -m playwright install --with-deps chromium"
+"""The CI step after ``PYTHON_HTTP_INSTALL``, and the Develop block's second line: the
+browser and its system packages, as Playwright's CI guide installs them."""
+
+
+def python_install_lines(spec: ProductSpec) -> list[str]:
+    """What a python product's CI and README Develop block install, in order."""
+    if spec.app.kind == "http":
+        return [PYTHON_HTTP_INSTALL, BROWSER_INSTALL]
+    return [PYTHON_INSTALL]
+
+
 PYTHON_BUILD_SYSTEM = (
     '[build-system]\nrequires = ["setuptools>=68"]\nbuild-backend = "setuptools.build_meta"\n'
 )
@@ -146,6 +162,7 @@ def python_scaffold(spec: ProductSpec, *, owner: str = "the author") -> dict[str
     pkg = spec.name
     test_cmd = " ".join(tc.test_argv(filter=None, path=None))
     lint_cmd = " ".join(tc.lint_argv("."))
+    installs = python_install_lines(spec)
     files = {
         "pyproject.toml": (
             PYTHON_BUILD_SYSTEM + "\n"
@@ -204,8 +221,8 @@ def python_scaffold(spec: ProductSpec, *, owner: str = "the author") -> dict[str
             "      - uses: actions/setup-python@v5\n"
             "        with:\n"
             '          python-version: "3.12"\n'
-            f"      - run: {PYTHON_INSTALL}\n"
-            f"      - run: {lint_cmd}\n"
+            + "".join(f"      - run: {line}\n" for line in installs)
+            + f"      - run: {lint_cmd}\n"
             f"      - run: {test_cmd}\n" + README_RUN_STEP
         ),
     }
@@ -215,7 +232,7 @@ def python_scaffold(spec: ProductSpec, *, owner: str = "the author") -> dict[str
             tc,
             owner=owner,
             run_cmd=tc.skeleton_command(pkg),
-            develop_cmds=[PYTHON_INSTALL, lint_cmd, test_cmd],
+            develop_cmds=[*installs, lint_cmd, test_cmd],
             skeleton_summary="package, `--version`, smoke test",
         )
     )

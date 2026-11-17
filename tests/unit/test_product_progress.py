@@ -391,6 +391,60 @@ def test_feature_task_is_the_typed_handoff_to_the_task_graph() -> None:
     assert "- [ ] c2a" in body and "<!-- scio:feature:P2 -->" in body and "M1" in body
 
 
+def test_a_ui_feature_with_string_only_criteria_gets_a_rendered_check() -> None:
+    """Issue #169 (I-242): graphcalc P14's two criteria checked that ids and paths exist, its
+    tests checked exactly that, and ``1/x`` drew a line across its asymptote. The planner
+    (prompt v4) flags such a feature; the flag survives the normaliser, and that feature's
+    task tells the coder to write a browser test. A feature without the flag reads as before."""
+    from scio.product.build import RENDERED_CHECK_NOTE
+    from scio.prompt.registry import PromptRegistry
+
+    spec = _spec(3)
+    out = MilestonePlanOutput(
+        milestone_title="Graph tab",
+        features=[
+            MilestoneFeatureOutput(id="P1", notes="the parser only"),
+            MilestoneFeatureOutput(id="P2", notes="x" * 400, rendered_check=True),
+        ],
+        rationale="r",
+    )
+    plan, _ = normalise_milestone(out, spec.features, 1)
+    assert [f.rendered_check for f in plan.features] == [False, True]
+    flagged = feature_task(spec, plan, plan.features[1], 7).description
+    assert f"Planner notes: {'x' * 400}\n\n{RENDERED_CHECK_NOTE}\n\nProduct memory:" in flagged
+    for said in ("playwright.sync_api", "never through `importorskip`", "drawn pixels"):
+        assert said in RENDERED_CHECK_NOTE, said
+    plain = feature_task(spec, plan, plan.features[0], 7).description
+    assert RENDERED_CHECK_NOTE not in plain and "Rendered check" not in plain
+    assert "Planner notes: the parser only\n\nProduct memory:" in plain
+    # the note names Python's Playwright: a product of another stack does not get it
+    node = spec.model_copy(update={"stack": "node-ts"})
+    assert RENDERED_CHECK_NOTE not in feature_task(node, plan, plan.features[1], 7).description
+    # the planner is asked for the flag, by the newest prompt only
+    reg = PromptRegistry()
+    assert reg.get("milestone_planner").version == 4
+    assert "rendered_check" in reg.get("milestone_planner").text
+    assert "rendered_check" not in reg.get("milestone_planner", 3).text
+    assert (
+        "rendered_check"
+        in MilestonePlanOutput.model_json_schema()["$defs"]["MilestoneFeatureOutput"]["properties"]
+    )
+
+
+def test_a_stored_plan_without_rendered_check_still_loads() -> None:
+    """A milestone plan committed before the field (``M<n>-plan.json`` on the milestone
+    branch) loads, with no rendered check asked for, and its task is what it was."""
+    stored = (
+        '{"number": 7, "title": "Graph tab", "branch": "milestone/7", "features": '
+        '[{"id": "P2", "tier": "T1", "notes": "", "depends_on": [], "files": ["app.js"]}]}'
+    )
+    plan = MilestonePlan.model_validate_json(stored)
+    assert plan.features[0].rendered_check is False
+    assert "Rendered check" not in feature_task(_spec(3), plan, plan.features[0], 7).description
+    again = MilestonePlan.model_validate_json(plan.model_dump_json())
+    assert again == plan and again.features[0].rendered_check is False
+
+
 def test_a_bug_fix_features_task_and_debugger_brief_carry_its_linked_issue() -> None:
     """Issue #120: graphcalc P26 ("Bug #14 fix: …") got only its title and criteria, and its
     coder spent 17 minutes re-deriving the root cause issue #14 recorded. The linked issue now

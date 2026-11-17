@@ -13,7 +13,12 @@ own ``PRODUCT.md`` (``scaffold_for``), so the upgrade and a fresh bootstrap cann
   scaffold's skeleton step; any other CI file is the product's and is left alone;
 - an old scaffold install line (``OLD_PYTHON_INSTALLS``, which never installed the project,
   I-140) becomes the current one in the CI and the README Develop block, line for line;
-  a line the product changed is its own (I-142).
+  a line the product changed is its own (I-142);
+- a python product that serves pages (``app.kind`` http) gets ``PYTHON_HTTP_INSTALL`` for
+  its scaffold install line, old or current, and a ``BROWSER_INSTALL`` line after it, in
+  the CI and the README: its browser tests skipped in a CI without a browser (issue #169).
+  A file that already has ``playwright install`` is left alone, and so is one whose
+  install line is the product's own, which the report names.
 Tests are not rewritten: a product whose tests reach the code only through a subprocess
 misses the coverage floor at its next feature's verify, which sends it to the debugger
 (I-091). The changes are one commit with a marker, on the branch that is checked out; a
@@ -32,8 +37,10 @@ from scio.aci.tools import SCIO_GIT_IDENTITY
 from scio.product.progress import PRODUCT_MD, parse_product_md
 from scio.product.release_checks import RUN_END, RUN_START
 from scio.product.scaffold import (
+    BROWSER_INSTALL,
     OLD_PYTHON_INSTALLS,
     PYTHON_BUILD_SYSTEM,
+    PYTHON_HTTP_INSTALL,
     PYTHON_INSTALL,
     README_RUN_STEP,
     python_packages_find,
@@ -78,16 +85,49 @@ def readme_with_run_block(text: str, block: str) -> str:
     return text.rstrip("\n") + "\n\n## Run\n\n" + block
 
 
-def replace_install_lines(text: str, *, prefix: str) -> tuple[str, int]:
+def replace_install_lines(
+    text: str,
+    *,
+    prefix: str,
+    olds: tuple[str, ...] = OLD_PYTHON_INSTALLS,
+    new: str = PYTHON_INSTALL,
+) -> tuple[str, int]:
     """``text`` with every line that is exactly ``prefix`` + an old scaffold install line
     replaced by the current one (I-140), and how many were replaced. Any other line, even a
     near miss, is the product's own (I-142)."""
-    old = {prefix + line for line in OLD_PYTHON_INSTALLS}
+    old = {prefix + line for line in olds}
     out, n = [], 0
     for line in text.splitlines(keepends=True):
         body = line.rstrip("\r\n")
         if body in old:
-            out.append(prefix + PYTHON_INSTALL + line[len(body) :])
+            out.append(prefix + new + line[len(body) :])
+            n += 1
+        else:
+            out.append(line)
+    return "".join(out), n
+
+
+BROWSER_MARK = "playwright install"
+"""A file with this text already installs a browser, however it spells it: left alone."""
+
+
+def add_browser_install(text: str, *, prefix: str) -> tuple[str, int]:
+    """``text`` for a python product that serves pages (issue #169): every scaffold install
+    line, old or current, becomes ``PYTHON_HTTP_INSTALL``, followed by a ``BROWSER_INSTALL``
+    line with the same ``prefix`` (so the same indentation) and line ending. Returns the text
+    and how many install lines it found. 0 leaves the text as it was: it already installs a
+    browser (``BROWSER_MARK``), or its install line is the product's own (I-142)."""
+    if BROWSER_MARK in text:
+        return text, 0
+    text, _ = replace_install_lines(
+        text, prefix=prefix, olds=(*OLD_PYTHON_INSTALLS, PYTHON_INSTALL), new=PYTHON_HTTP_INSTALL
+    )
+    out, n = [], 0
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        ending = line[len(body) :] or "\n"  # a last line without one gets one
+        if body == prefix + PYTHON_HTTP_INSTALL:
+            out += [body + ending, prefix + BROWSER_INSTALL + ending]
             n += 1
         else:
             out.append(line)
@@ -159,6 +199,23 @@ def upgrade_product(sb: Sandbox) -> UpgradeReport:
         for rel, prefix in ((CI_PATH, "      - run: "), ("README.md", "")):
             path = f"{root}/{rel}"
             if not sb.exists(path):
+                continue
+            if spec.app.kind == "http":  # its tests drive a page: CI needs a browser (#169)
+                current = sb.read_text(path)
+                text, n = add_browser_install(current, prefix=prefix)
+                if n:
+                    sb.write_text(path, text)
+                    report.added.append(
+                        f"{rel}: {PYTHON_HTTP_INSTALL!r} and {BROWSER_INSTALL!r}, so the "
+                        "browser tests run"
+                    )
+                elif BROWSER_MARK in current:
+                    report.kept.append(f"{rel} browser install (exists)")
+                else:
+                    report.kept.append(
+                        f"{rel} (no scaffold install line; add {PYTHON_HTTP_INSTALL!r} and "
+                        f"{BROWSER_INSTALL!r} by hand)"
+                    )
                 continue
             text, n = replace_install_lines(sb.read_text(path), prefix=prefix)
             if n:

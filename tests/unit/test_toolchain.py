@@ -150,3 +150,92 @@ def test_python_profile_declares_the_quality_bar_and_classifies_outcomes() -> No
     assert "--cov-fail-under={coverage_floor}" in coverage.argv
     assert "--cov-fail-under=65" in coverage.command({"coverage_floor": 65})
     assert coverage.command({}) == list(coverage.argv)  # nothing to fill, nothing changes
+
+
+def test_the_default_test_argv_is_unchanged() -> None:
+    """Issue #169: the skip report is asked for, never the default. The default argv is also
+    the product's CI line, its README line and the worker's permission rule."""
+    import yaml
+
+    py = python_toolchain()
+    assert py.test_argv(filter=None, path=None) == OLD_TEST_ARGV
+    assert py.test_argv(filter=None, path=None, report_skips=False) == OLD_TEST_ARGV
+    # pytest keeps only the last -r, so the profile's argument repeats fE beside s
+    assert py.test_argv(filter=None, path=None, report_skips=True) == [*OLD_TEST_ARGV, "-rfEs"]
+    assert py.test_argv(filter="slug", path="/w/tests/t.py", report_skips=True) == [
+        *OLD_TEST_ARGV,
+        "-rfEs",
+        "-k",
+        "slug",
+        "/w/tests/t.py",
+    ]
+    for name in ("python", "node-ts"):
+        tc = get_toolchain(name)
+        data = yaml.safe_load(
+            (REPO_ROOT / "configs" / "profiles" / f"{name}.yaml").read_text(encoding="utf-8")
+        )["test"]
+        default = [*data["argv"], *data.get("default_targets", [])]
+        assert tc.test_argv(filter=None, path=None) == default, name
+        asked = tc.test_argv(filter=None, path=None, report_skips=True)
+        assert asked == [*data["argv"], *data["skip_report_args"], *default[len(data["argv"]) :]]
+
+
+# What `python -m pytest ... -rfEs` printed on this machine (pytest 8, Windows), and Node 26's
+# TAP reporter: the lines the profiles' `skip_line` patterns read.
+PYTEST_SKIPS = (
+    "..sss.                                                                   [100%]\n"
+    "=========================== short test summary info ===========================\n"
+    "SKIPPED [1] tests\\test_browser.py:3: could not import 'playwright.sync_api': "
+    "No module named 'playwright'\n"
+    "SKIPPED [2] tests/acceptance/test_acc.py:1: APP_URL not set: scio build starts the app\n"
+    "SKIPPED [1] ./tests/test_mix.py:8: later: needs [GPU] x:1: y\n"
+    "3 passed, 4 skipped in 0.09s\n"
+)
+TAP_SKIPS = (
+    "# Subtest: runs\nok 1 - runs\n  ---\n  duration_ms: 0.385\n  ...\n"
+    "# Subtest: skipped one\nok 2 - skipped one # SKIP no browser here\n"
+    "# Subtest: bare skip\nok 3 - bare skip # SKIP\n1..3\n# pass 1\n# skipped 2\n"
+)
+
+
+def test_skips_are_read_from_the_runners_own_lines() -> None:
+    from scio.toolchain.base import Skip, skips_text, unverified_skips
+
+    py = python_toolchain()
+    skips = py.skips(PYTEST_SKIPS)
+    assert skips == [
+        Skip(
+            1,
+            "tests/test_browser.py",
+            "could not import 'playwright.sync_api': No module named 'playwright'",
+        ),
+        Skip(2, "tests/acceptance/test_acc.py", "APP_URL not set: scio build starts the app"),
+        Skip(1, "tests/test_mix.py", "later: needs [GPU] x:1: y"),
+    ]
+    outside = unverified_skips(skips, py.acceptance_dir)
+    assert [s.path for s in outside] == ["tests/test_browser.py", "tests/test_mix.py"]
+    assert skips_text(skips[1:2]) == (
+        "tests/acceptance/test_acc.py [2]: APP_URL not set: scio build starts the app"
+    )
+    node = get_toolchain("node-ts")
+    assert node.skips(TAP_SKIPS) == [
+        Skip(1, "", "skipped one: no browser here"),
+        Skip(1, "", "bare skip"),
+    ]
+    # TAP names no file, so a skip cannot be placed in or outside the acceptance directory
+    assert unverified_skips(node.skips(TAP_SKIPS), node.acceptance_dir) == []
+
+
+def test_reading_skips_never_raises() -> None:
+    """Reporting must not break a build: no pattern, a bad pattern, a pattern that matches
+    nothing and output cut short by a timeout all read as no skips."""
+    import dataclasses
+
+    py = python_toolchain()
+    assert py.skips("") == [] and py.skips("3 passed in 0.01s\n") == []
+    assert py.skips("SKIPPED [1] tests/test_x.py") == []  # cut mid-line
+    assert dataclasses.replace(py, skip_line="").skips(PYTEST_SKIPS) == []
+    assert dataclasses.replace(py, skip_line="(?P<reason>").skips(PYTEST_SKIPS) == []
+    assert dataclasses.replace(py, skip_line="(?m)^NEVER$").skips(PYTEST_SKIPS) == []
+    plain = dataclasses.replace(py, skip_report_args=(), skip_line="")
+    assert plain.test_argv(filter=None, path=None, report_skips=True) == OLD_TEST_ARGV

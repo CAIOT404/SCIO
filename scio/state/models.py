@@ -517,6 +517,11 @@ class MilestoneFeatureOutput(BaseModel):
     """The files this feature expects to create or change, as the milestone planner names
     them (prompt v3, issue #157): a guess made before any exploration, used only to decide an
     unset ``depends_on``. None in a plan from before the field."""
+    rendered_check: bool = False
+    """True when the feature changes what a page shows and its acceptance criteria only check
+    that elements, ids or strings exist (planner prompt v4, issue #169): the feature's task
+    then asks for a test that drives the page in a browser. False in a plan from before the
+    field."""
 
 
 class MilestonePlanOutput(BaseModel):

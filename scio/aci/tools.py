@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from scio.aci.sandbox.base import PathEscapeError, Sandbox
 from scio.aci.truncate import truncate
 from scio.toolchain import Toolchain, python_toolchain
+from scio.toolchain.base import skips_text, unverified_skips
 from scio.toolchain.python import failures_only  # noqa: F401  (re-export; ADR 0009)
 
 VIEW_WINDOW = 100
@@ -292,6 +293,10 @@ def delete_file(sandbox: Sandbox, inp: DeleteFileInput) -> str:
 
 
 SKIPPED_ONLY = "no tests ran: every selected test was skipped"
+SKIPS_NOTE = "skipped (not verified)"
+"""Starts the second line of a passing ``run_tests`` result that skipped tests outside the
+acceptance directory (issue #169)."""
+SKIPS_NOTE_MAX = 600
 
 
 def run_tests(
@@ -305,11 +310,14 @@ def run_tests(
     The result strings are the contract verify relies on: ``all tests passed: ...``,
     ``no tests collected[ for filter ...]: ...``, ``no tests ran: every selected test was
     skipped: ...`` (I-097), failure text, or ``ToolError`` when the runner itself could not
-    run.
+    run. A passing run that skipped a test outside the acceptance directory keeps its first
+    line and names each such skip on a second, ``skipped (not verified): path: reason; ...``
+    (issue #169): the acceptance tests skip here and run against the started app, any other
+    skip is a test that verified nothing.
     """
     tc = _toolchain_of(ctx, toolchain)
     path = _abs(sandbox, inp.path) if inp.path else None
-    argv = tc.test_argv(filter=inp.filter, path=path)
+    argv = tc.test_argv(filter=inp.filter, path=path, report_skips=True)
     timeout = inp.timeout_s or sandbox.limits.timeout_s
     r = sandbox.exec(argv, timeout_s=timeout)
     if r.timed_out:
@@ -320,7 +328,9 @@ def run_tests(
         # a pass in which nothing ran proves nothing (I-097): verify must not accept it
         return f"{SKIPPED_ONLY}: {last_line}"
     if outcome == "passed":
-        return f"all tests passed: {last_line}"
+        skips = unverified_skips(tc.skips(r.stdout), tc.acceptance_dir)
+        note = f"\n{SKIPS_NOTE}: {skips_text(skips)[:SKIPS_NOTE_MAX]}" if skips else ""
+        return f"all tests passed: {last_line}{note}"
     if outcome == "no_tests":
         scope = f" for filter {inp.filter!r}" if inp.filter else ""
         return f"no tests collected{scope}: {last_line}"

@@ -147,16 +147,30 @@ def test_upgrade_refuses_a_product_md_that_does_not_parse(tmp_path: Path) -> Non
         upgrade_product(LocalSandbox(tmp_path))
 
 
-def _v090_python_product(root: Path) -> dict[str, str]:
+def _v090_python_product(
+    root: Path, *, kind: str = "http", install: str = "pip install ruff pytest"
+) -> dict[str, str]:
     """A python product as the 0.9.0 scaffold wrote it: CI and README install only the tools,
-    never the project, and pyproject.toml has no build system (the graphcalc run's S6)."""
-    from scio.product.scaffold import PYTHON_BUILD_SYSTEM, PYTHON_INSTALL, python_packages_find
+    never the project, and pyproject.toml has no build system (the graphcalc run's S6).
+    ``install`` is the one install line it has; no scaffold before #169 installed a browser."""
+    from scio.product.scaffold import (
+        PYTHON_BUILD_SYSTEM,
+        python_install_lines,
+        python_packages_find,
+    )
 
     spec = _spec("python").model_copy(update={"dependencies": ["sympy"]})
+    if kind == "cli":
+        spec = spec.model_copy(update={"app": AppSpec()})
     fresh = scaffold_for(spec)
     old = dict(fresh)
-    for rel in (".github/workflows/ci.yml", "README.md"):
-        old[rel] = old[rel].replace(PYTHON_INSTALL, "pip install ruff pytest")
+    first, *later = python_install_lines(spec)
+    for rel, prefix in ((".github/workflows/ci.yml", "      - run: "), ("README.md", "")):
+        for line in later:
+            assert f"{prefix}{line}\n" in old[rel]
+            old[rel] = old[rel].replace(f"{prefix}{line}\n", "")
+        assert f"{prefix}{first}\n" in old[rel]
+        old[rel] = old[rel].replace(f"{prefix}{first}\n", f"{prefix}{install}\n")
     old["pyproject.toml"] = (
         old["pyproject.toml"]
         .replace(PYTHON_BUILD_SYSTEM + "\n", "")
@@ -183,7 +197,8 @@ def test_upgrade_makes_an_old_python_products_ci_install_the_project(tmp_path: P
 
     from scio.product.scaffold import PYTHON_INSTALL
 
-    fresh = _v090_python_product(tmp_path)
+    # a cli product: an http one also gets the browser (issue #169), in the test after this
+    fresh = _v090_python_product(tmp_path, kind="cli")
     report = upgrade_product(LocalSandbox(tmp_path))
     assert report.added == [
         "[build-system] and the package list in pyproject.toml",
@@ -200,6 +215,51 @@ def test_upgrade_makes_an_old_python_products_ci_install_the_project(tmp_path: P
     assert MARKER in _git(tmp_path, "log", "-1", "--format=%s")
     assert _git(tmp_path, "log", "-1", "--format=%an") == "scio"
     assert upgrade_product(LocalSandbox(tmp_path)).added == []
+
+
+@pytest.mark.parametrize("install", ["pip install -e . ruff pytest", "pip install ruff pytest"])
+def test_upgrade_adds_the_browser_to_an_http_products_ci_once(tmp_path: Path, install: str) -> None:
+    """Issue #169 (I-242): graphcalc's CI installs ``pip install -e . ruff pytest``, so its
+    browser tests skip there. Upgrade gives a python product that serves pages the install
+    line with Playwright and one browser step after it, with the step's indentation, in the
+    CI and the README; a second upgrade changes nothing."""
+    from scio.product.scaffold import BROWSER_INSTALL, PYTHON_HTTP_INSTALL
+
+    fresh = _v090_python_product(tmp_path, install=install)
+    ci_path = tmp_path / ".github/workflows/ci.yml"
+    assert "playwright" not in ci_path.read_text(encoding="utf-8")
+    report = upgrade_product(LocalSandbox(tmp_path))
+    change = f"{PYTHON_HTTP_INSTALL!r} and {BROWSER_INSTALL!r}, so the browser tests run"
+    assert report.added[-2:] == [f".github/workflows/ci.yml: {change}", f"README.md: {change}"]
+    ci = ci_path.read_text(encoding="utf-8")
+    assert ci == fresh[".github/workflows/ci.yml"]
+    assert (
+        "      - run: pip install -e . ruff pytest playwright\n"
+        "      - run: python -m playwright install --with-deps chromium\n"
+    ) in ci
+    assert ci.count("playwright install") == 1 and ci.count("pip install") == 1
+    assert (tmp_path / "README.md").read_text(encoding="utf-8") == fresh["README.md"]
+    head = _git(tmp_path, "rev-parse", "HEAD")
+    again = upgrade_product(LocalSandbox(tmp_path))
+    assert again.added == [] and again.commit is None
+    assert ".github/workflows/ci.yml browser install (exists)" in again.kept
+    assert _git(tmp_path, "rev-parse", "HEAD") == head and _git(tmp_path, "status", "-s") == ""
+    assert ci_path.read_text(encoding="utf-8") == ci
+
+
+def test_upgrade_names_an_http_ci_it_cannot_give_a_browser(tmp_path: Path) -> None:
+    """An install line the product changed is its own (I-142): the file is left as it is,
+    and the report says what to add by hand."""
+    _v090_python_product(tmp_path, install="pip install ruff pytest sympy")
+    ci_path = tmp_path / ".github/workflows/ci.yml"
+    before = ci_path.read_text(encoding="utf-8")
+    report = upgrade_product(LocalSandbox(tmp_path))
+    assert ci_path.read_text(encoding="utf-8") == before
+    assert [a for a in report.added if a.startswith((".github", "README.md:"))] == []
+    assert any(
+        k.startswith(".github/workflows/ci.yml (no scaffold install line; add ")
+        for k in report.kept
+    )
 
 
 def test_upgrade_keeps_an_install_line_and_build_system_the_product_changed(

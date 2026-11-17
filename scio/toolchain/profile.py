@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 
-from scio.toolchain.base import Detect, QualityCheck, Runtime, TestOutcome
+from scio.toolchain.base import Detect, QualityCheck, Runtime, Skip, TestOutcome
 
 PROFILES_DIR = Path(__file__).resolve().parent.parent.parent / "configs" / "profiles"
 
@@ -80,6 +80,12 @@ class ProfileToolchain:
     skipped_only_none: tuple[str, ...] = ()
     """Regexes over a passing run's output: all of the first and none of the second mean
     every selected test was skipped (I-097)."""
+    skip_report_args: tuple[str, ...] = ()
+    """Added to the test command by ``test_argv(report_skips=True)`` so the runner names
+    each skipped test (issue #169); never part of the default command."""
+    skip_line: str = ""
+    """A regex (with ``(?m)``) for one skipped-test line of the runner's output; see
+    :meth:`skips` for its groups. Empty: the profile reports no skips."""
     lint_absent_patterns: tuple[str, ...] = ()
     """Output fragments that mean the linter is not installed (clean, like exit 127)."""
     syntax_check_base_argv: tuple[str, ...] | None = None
@@ -157,8 +163,12 @@ class ProfileToolchain:
         return module or self.runtime_config.app_default_target or name
 
     # --- commands ---
-    def test_argv(self, *, filter: str | None, path: str | None) -> list[str]:
+    def test_argv(
+        self, *, filter: str | None, path: str | None, report_skips: bool = False
+    ) -> list[str]:
         argv = list(self.test_base_argv)
+        if report_skips:  # options, so before the filter and the targets (issue #169)
+            argv += self.skip_report_args
         if filter:
             argv += [self.filter_flag, filter]
         if path:
@@ -188,6 +198,31 @@ class ProfileToolchain:
         return all(re.search(p, stdout) for p in self.skipped_only_all) and not any(
             re.search(p, stdout) for p in self.skipped_only_none
         )
+
+    def skips(self, stdout: str) -> list[Skip]:
+        """One ``Skip`` per line ``skip_line`` matches. Its named groups: ``reason``, and
+        optionally ``count`` (1 without it), ``path`` (empty without it) and ``name`` (the
+        test's name, put in front of the reason). A profile without the key, a pattern that
+        does not compile and output cut short all give what was read, never an error."""
+        if not self.skip_line:
+            return []
+        try:
+            pattern = re.compile(self.skip_line)
+        except re.error:
+            return []
+        found: list[Skip] = []
+        for m in pattern.finditer(stdout):
+            groups = m.groupdict()
+            path = (groups.get("path") or "").strip().replace("\\", "/")
+            while path.startswith("./"):
+                path = path[2:]
+            reason = " ".join((groups.get("reason") or "").split())
+            name = (groups.get("name") or "").strip()
+            if name:
+                reason = f"{name}: {reason}" if reason else name
+            count = groups.get("count") or "1"
+            found.append(Skip(int(count) if count.isdigit() else 1, path, reason))
+        return found
 
     def failures_only(self, output: str) -> str:
         return self.parsers.failures_only(output)
@@ -252,6 +287,8 @@ def load_profile(path: Path, parsers: StackParsers) -> ProfileToolchain:
         no_tests_patterns=tuple(test.get("no_tests_patterns", [])),
         skipped_only_all=tuple(test.get("skipped_only", {}).get("all", [])),
         skipped_only_none=tuple(test.get("skipped_only", {}).get("none", [])),
+        skip_report_args=tuple(str(a) for a in test.get("skip_report_args", [])),
+        skip_line=str(test.get("skip_line", "")),
         selector_help=test["selector_help"],
         filter_help=test["filter_help"],
         lint_base_argv=tuple(lint["argv"]),
