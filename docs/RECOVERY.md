@@ -65,6 +65,20 @@ python -m recovery run --workspace <workspace> -- build --product <product dir> 
 
 `run` passes the build's output through and exits with the build's own exit code, so `PAUSED for a human:`, the resume hints and the exit status are exactly what `sh scio.sh` gives. When the build fails and the failure needs recovery, `run` prints one line naming the incident, and the recovery carries on in a background tick.
 
+### Start a build no session owns
+
+A build started with `run` is a child of the terminal or Claude session that started it, and it dies with that session. On 2026-11-15 a build was down for 200 minutes that way (I-246, issue #175). Start it detached instead, then wait for its stop:
+
+```sh
+cd <SCIO>/.scio/recovery-wt
+python -m recovery run --detach --workspace <workspace> -- build --product <product dir> --gh <owner/repo>
+python -m recovery wait --workspace <workspace>
+```
+
+`run --detach` starts the same supervised run as a detached process, prints `recovery run: detached run <run id> (pid <pid>); stdout: <path>` and returns 0 within seconds. The detached supervisor holds the lease, the stay-awake request and the hang watch, exactly as an attached `run` does. A busy workspace is refused the same way in both modes: the same line, exit 2, nothing started. If the process cannot start, or records no run within 10 seconds, `run --detach` says so and exits 1. What the detached supervisor itself prints goes to `runs/<run id>/supervisor.log`.
+
+`wait` blocks until the workspace's newest run ends (`--run <run id>` names another), prints the last 60 lines of its `stdout.log` (`--tail N`) and exits with the run's exit code: 2 for a run that was refused, 1 for a run with no exit code (killed as hung, or an orphan whose supervisor and build are both gone). When the run opened an incident, it prints the same `recovery: incident ... opened` line as an attached `run`. When the run has already ended, it reports it at once, so `wait` can be killed and started again, by any session, and gives the same answer. It only reads the store: it takes no lease and writes nothing, so killing it never affects the build. A replay that a tick starts is the workspace's newest run, so the next `wait` follows it. Exit 2 with one line when there is no store, no run of that workspace, or no run with that id.
+
 ### Which thread a run records
 
 `progress.json`'s `build_thread` is the thread that recorded the last finished milestone. `scio build` may run a different thread (I-163), so the run record treats that value as provisional. When the run ends, or a tick finds it orphaned, the supervisor records the thread SCIO actually ran (issue #123). It takes the first of these that names a thread:
@@ -94,6 +108,8 @@ The repair session runs `claude -p --permission-mode auto` in a fresh worktree u
 
 | Command | What it does |
 |---|---|
+| `python -m recovery run [--detach] --workspace W -- <SCIO arguments>` | a supervised build; with `--detach`, one that no session owns (above) |
+| `python -m recovery wait --workspace W [--run RUN_ID] [--tail N]` | blocks until that workspace's run ends, prints the tail of its stdout and exits with its code; read-only, safe to kill |
 | `python -m recovery status [--workspace W]` | runs (with their log directories) and open incidents |
 | `python -m recovery watch <incident> [--follow] [--last N]` | one incident live: its state, its timeline, and the repair session's steps (each tool call and what the session says), read from Claude Code's transcript of the repair worktree; `--follow` prints only what is new until the incident closes or escalates |
 | `python -m recovery incidents [--signature S] [--grep TEXT]` | searches incident history |
@@ -108,7 +124,7 @@ The supervisor's state lives under `%LOCALAPPDATA%/SCIO/recovery` (override with
 | Path | What it holds |
 |---|---|
 | `state.sqlite` | runs, incidents, their timelines, the step log and leases |
-| `runs/<run id>/` | each run's `stdout.log`, `stderr.log` and SCIO's `outcome.json` |
+| `runs/<run id>/` | each run's `stdout.log`, `stderr.log` and SCIO's `outcome.json`; for a detached run, also `supervisor.log` |
 | `incidents/<incident id>/` | the snapshot taken before any repair: database backups, `progress.json`, git facts, logs |
 | `incidents.jsonl` | one line per incident transition, for search |
 | `replays/`, `ticks/` | logs of background replays and ticks |

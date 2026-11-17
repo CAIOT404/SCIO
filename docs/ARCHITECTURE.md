@@ -787,7 +787,7 @@ scio/
 │   ├── runner.py                # n≥5 trials; pass@1, pass^k, tokens, $, latency, advisor rates
 │   └── report.py
 ├── recovery/                    # ADR 0019: the external recovery supervisor; stdlib only, never imports scio
-│   ├── runner.py                # supervises `scio build` as its parent: lease, output files, hang kill
+│   ├── runner.py                # supervises `scio build` as its parent: lease, output files, hang kill; starts that supervisor detached for `run --detach`
 │   ├── classify.py              # pure failure classifier (flip tests), signatures
 │   ├── machine.py               # incident state machine; `tick` reconciles orphans and incidents
 │   ├── repair.py                # headless Claude Code repair session in a fresh worktree; claim checks
