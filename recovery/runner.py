@@ -3,13 +3,14 @@ OWNER: wave-1 agent A."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import secrets
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 
 from recovery import procs
@@ -44,6 +45,79 @@ PRODUCT_FLAGS: tuple[str, ...] = ("--product", "--dir")
 
 KILL_WAIT_S = 60.0
 """How long to wait for a killed child before killing it directly."""
+
+SLEEP_GAP_S = 300.0
+"""Two consecutive iterations of the poll loop further apart than this mean the machine
+was down in between (asleep, hibernating): the supervisor was not scheduled, and neither
+was its child (I-240). An iteration is one poll wait (15 s by default) plus a few file
+reads and one store write, so a running machine never comes near it."""
+
+SLEEP_GAP_POLLS = 4.0
+"""The gap is never less than this many poll waits, for a workspace with a long
+``poll_s``."""
+
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+"""``SetThreadExecutionState`` flags (winbase.h). ``ES_SYSTEM_REQUIRED`` resets the
+system idle timer; with ``ES_CONTINUOUS`` the state stays until the next call that uses
+``ES_CONTINUOUS``. ``ES_CONTINUOUS`` alone clears it."""
+
+
+def sleep_gap_s(poll_s: float) -> float:
+    """The time between two poll-loop iterations above which the machine was down."""
+    return max(SLEEP_GAP_S, SLEEP_GAP_POLLS * poll_s)
+
+
+def idle_s(now: float, since: float, gaps: Sequence[tuple[float, float]]) -> float:
+    """Seconds without progress that the supervisor observed: ``now - since`` less the
+    part of each downtime gap ``(start, end)`` that lies after ``since`` (the last
+    progress, or the run's start). A gap that ended before the last progress excuses
+    nothing, so a hang after a sleep is killed after the usual limit of awake time."""
+    down = sum(max(0.0, end - max(start, since)) for start, end in gaps)
+    return now - since - down
+
+
+def set_execution_state(flags: int) -> None:
+    """Call ``SetThreadExecutionState(flags)`` for the calling thread. A no-op off
+    Windows. Raises ``OSError`` when the call fails (it returns NULL).
+
+    The request belongs to the calling thread and ends with it, so the thread that polls
+    the child makes it. It keeps the system from sleeping on its idle timer. It does not
+    stop a sleep the user asks for (the lid, the power button, the Start menu): the poll
+    loop's downtime gap covers that one."""
+    # A platform block, as in procs.py: mypy on Linux skips it. An early return made mypy
+    # there call the rest unreachable, which only CI saw (the gate runs on Windows).
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        call = kernel32.SetThreadExecutionState
+        call.argtypes = (ctypes.c_uint,)
+        call.restype = ctypes.c_uint
+        if not call(flags):
+            raise OSError(f"SetThreadExecutionState({flags:#010x}) failed")
+
+
+@contextlib.contextmanager
+def stay_awake(api: Callable[[int], object] = set_execution_state) -> Iterator[None]:
+    """Ask the system to stay awake inside the block, and release the request after it,
+    also when the block raises. A request that fails never stops the run: one line on
+    stderr, and nothing to release."""
+    held = _execution_state(api, ES_CONTINUOUS | ES_SYSTEM_REQUIRED, "stay awake")
+    try:
+        yield
+    finally:
+        if held:
+            _execution_state(api, ES_CONTINUOUS, "release its stay awake request")
+
+
+def _execution_state(api: Callable[[int], object], flags: int, what: str) -> bool:
+    try:
+        api(flags)
+    except Exception as exc:
+        print(f"recovery: could not ask the system to {what}: {exc!r}", file=sys.stderr)
+        return False
+    return True
 
 
 def new_run_id(clock: Callable[[], float] = time.time) -> str:
@@ -223,6 +297,7 @@ def supervise(
     alive: Callable[[ProcessKey], bool] = procs.alive,
     kill: Callable[[int], None] = kill_tree,
     git: Runner = run_command,
+    awake: Callable[[int], object] = set_execution_state,
 ) -> RunRecord:
     """Run ``cfg.launcher + argv`` in ``cfg.workspace`` as this process's child and return
     its finished record.
@@ -238,7 +313,11 @@ def supervise(
     - **While running.** Every ``cfg.limits.poll_s`` seconds it echoes new output to its
       own stdout and stderr (when ``echo``), updates ``last_progress_at`` from
       :func:`progress_time`, and kills the tree (status ``KILLED_HANG``) after
-      ``cfg.limits.hang_after_s`` with no progress.
+      ``cfg.limits.hang_after_s`` with no progress. Time the machine was down is not
+      idle time (I-240): two iterations more than :func:`sleep_gap_s` apart add the gap
+      to ``downtime_s`` with a note, and :func:`idle_s` leaves it out.
+    - **Awake.** ``awake`` (``SetThreadExecutionState``) is asked to keep the system
+      awake from before the spawn until the child has ended (:func:`stay_awake`).
     - **At exit.** Records the exit code, ``ended_at`` and status ``EXITED``, then releases
       the lease.
 
@@ -282,18 +361,20 @@ def supervise(
     try:
         run_dir.mkdir(parents=True, exist_ok=True)
         store.save_run(run)
-        return _supervise_child(
-            cfg,
-            store,
-            run,
-            product,
-            env=env,
-            echo=echo,
-            clock=clock,
-            sleep=sleep,
-            spawn=spawn,
-            kill=kill,
-        )
+        # This thread polls the child until it ends, so the request lives as long as it.
+        with stay_awake(awake):
+            return _supervise_child(
+                cfg,
+                store,
+                run,
+                product,
+                env=env,
+                echo=echo,
+                clock=clock,
+                sleep=sleep,
+                spawn=spawn,
+                kill=kill,
+            )
     finally:
         store.release_lease(cfg.lease_name, me)
 
@@ -343,7 +424,21 @@ def _supervise_child(
         run.pid = popen.pid
         run.pid_created = key.created if key is not None else 0.0
         store.save_run(run)
+        gap_s = sleep_gap_s(limits.poll_s)
+        gaps: list[tuple[float, float]] = []
+        seen = run.started_at
         while True:
+            # One clock reading per iteration: wherever the machine went down, the gap
+            # lies between two readings, and the hang check below uses the same one.
+            now = clock()
+            if now - seen > gap_s:
+                gaps.append((seen, now))
+                run.downtime_s += now - seen
+                run.notes.append(
+                    f"machine was down {(now - seen) / 3600:.1f} h; not counted as idle"
+                )
+                store.save_run(run)
+            seen = now
             code = popen.poll()
             if echo:
                 offsets = procs.follow(streams, offsets)
@@ -353,7 +448,8 @@ def _supervise_child(
             if progress > run.last_progress_at:
                 run.last_progress_at = progress
                 store.save_run(run)
-            if clock() - max(run.last_progress_at, run.started_at) > limits.hang_after_s:
+            since = max(run.last_progress_at, run.started_at)
+            if idle_s(now, since, gaps) > limits.hang_after_s:
                 kill(popen.pid)
                 code = _wait(popen)
                 run.status = RunStatus.KILLED_HANG

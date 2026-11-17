@@ -216,6 +216,8 @@ def _run_lines(run: RunRecord) -> list[str]:
         f"  {run.run_id}  {run.status.value}  exit {code}  {' '.join(run.argv)}",
         f"    started {_when(run.started_at)}, ended {_when(run.ended_at)}",
     ]
+    if run.downtime_s:
+        lines.append(f"    downtime: {run.downtime_s / 3600:.1f} h (not counted as idle)")
     if run.incident_id:
         lines.append(f"    incident: {run.incident_id}")
     if run.resumed_from:
