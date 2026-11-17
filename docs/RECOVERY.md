@@ -98,6 +98,7 @@ The repair session runs `claude -p --permission-mode auto` in a fresh worktree u
 | `python -m recovery watch <incident> [--follow] [--last N]` | one incident live: its state, its timeline, and the repair session's steps (each tool call and what the session says), read from Claude Code's transcript of the repair worktree; `--follow` prints only what is new until the incident closes or escalates |
 | `python -m recovery incidents [--signature S] [--grep TEXT]` | searches incident history |
 | `python -m recovery hold <incident>` and `release <incident>` | pause and resume an incident's automation |
+| `python -m recovery dismiss <incident> --reason "<text>"` | ends an open incident that was not a SCIO fault (a held one too, such as a machine sleep read as a hang): state `dismissed`, with the reason on its timeline, in its status comment and in one comment on its issue. It starts no repair and no replay and never touches live-wt, and a GitHub failure is only a timeline note. A dismissed incident is not open: `status` lists it under "dismissed by the owner, not open", the tick ignores it, and `scripts/move_live_wt.py` does not wait on it. Exit 1, with nothing changed, for an incident that is already closed, escalated or dismissed, and while a tick is driving it (a running repair session: hold it, wait for the session to end, then dismiss) |
 | `python -m recovery tick [--incident I]` | advance incidents now instead of waiting for the scheduled tick |
 
 ## Where things are

@@ -42,8 +42,8 @@ RUNNING, EXITED, KILLED_HANG, ORPHANED, REFUSED = (
 held the workspace), so it says nothing about a thread."""
 RUN_STATUSES = frozenset({RUNNING, EXITED, KILLED_HANG, ORPHANED, REFUSED})
 
-CLOSED, ESCALATED = "closed", "escalated"
-TERMINAL_STATES = frozenset({CLOSED, ESCALATED})
+CLOSED, ESCALATED, DISMISSED = "closed", "escalated", "dismissed"
+TERMINAL_STATES = frozenset({CLOSED, ESCALATED, DISMISSED})  # dismissed: #163, never listed
 """``recovery.model.TERMINAL``: every other incident state is open, as ``Store.open_incidents``
 reads it. A closed incident is never listed; an escalated one is, while it is recent."""
 
