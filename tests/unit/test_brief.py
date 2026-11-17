@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 from scio.settings import REPO_ROOT
 
 ISSUE = {
@@ -128,3 +130,120 @@ def test_an_owner_blockquote_is_an_invariant_and_a_bare_file_name_is_resolved(
     root = _repo(tmp_path / "repo")
     prop = brief.propose(body, root, sorted(FILES))
     assert prop.paths == {"scio/loop/exits.py": True}
+
+
+EDGE = "Edge decisions (decided before sending)"
+SLOTS = ("Identity", "Failure", "Resume", "Pins")
+
+
+def _fake_run(argv: list[str]) -> str:
+    if argv[0] == "gh":
+        return json.dumps(ISSUE)
+    raise subprocess.CalledProcessError(128, argv)  # git: the fixture is no checkout
+
+
+def _no_command(argv: list[str]) -> str:
+    raise AssertionError(f"--check ran a command: {argv}")
+
+
+def _brief(brief: ModuleType, tmp_path: Path, extra: dict[str, str] | None = None) -> Path:
+    root = _repo(tmp_path / "repo")
+    for rel, text in (extra or {}).items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text, encoding="utf-8", newline="\n")
+    out = tmp_path / "brief.md"
+    assert brief.main(["130", "--out", str(out)], run=_fake_run, root=root) == 0
+    return out
+
+
+def _slot(section: str, name: str) -> str:
+    """One edge decision: from its label to the next one."""
+    rest = section.split(f"- **{name}**", 1)[1]
+    return rest.split("\n- **", 1)[0]
+
+
+def test_the_brief_has_the_four_edge_decisions(tmp_path: Path) -> None:
+    """The four cases agents needed a second round for are decided in the brief: the template
+    and the filled brief both carry the section with its four slots. Identity, Failure and
+    Resume are the orchestrator's (a ``TODO``); ``brief.py`` fills Pins. The report carries
+    what the agent did for each."""
+    brief = _load()
+    template = (REPO_ROOT / ".claude" / "templates" / "agent-brief.md").read_text(encoding="utf-8")
+    text = _brief(brief, tmp_path).read_text(encoding="utf-8")
+    for source in (template, text):
+        section = _section(source, EDGE)
+        assert [n for n in SLOTS if f"- **{n}**" in section] == list(SLOTS)
+        for name in SLOTS[:3]:
+            assert _slot(section, name).count("TODO") == 1, name
+    assert "TODO" not in _slot(_section(text, EDGE), "Pins")
+    assert "`edge_decisions`" in _section(text, "Report")
+    report = (REPO_ROOT / ".claude" / "templates" / "agent-report.md").read_text(encoding="utf-8")
+    field = report.split("## edge_decisions", 1)[1].split("\n## ", 1)[0]
+    assert all(name in field for name in SLOTS)
+
+
+def test_a_brief_with_a_todo_fails_the_check(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--check`` exits 1 and names each ``TODO`` by line and section, without ``gh``. The
+    note ``brief.py`` writes at the top says "TODO" and is not one."""
+    brief = _load()
+    out = _brief(brief, tmp_path)
+    capsys.readouterr()
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert brief.main(["--check", str(out)], run=_no_command) == 1
+    printed = capsys.readouterr().out
+    for name in SLOTS[:3]:
+        number = next(i for i, ln in enumerate(lines, 1) if ln.startswith(f"- **{name}**"))
+        assert f"{out}:{number}: [{EDGE}]" in printed
+    assert "[Decided design (not to be reopened)]" in printed
+    assert "[Checks]" in printed and "[Invariants]" in printed
+    assert f"{out}:1:" not in printed
+    # one TODO left is enough
+    one = tmp_path / "one.md"
+    left = out.read_text(encoding="utf-8").replace("TODO", "done")
+    one.write_text(
+        left.replace("- **Resume**", "- **Resume** TODO", 1), encoding="utf-8", newline="\n"
+    )
+    assert brief.main(["--check", str(one)], run=_no_command) == 1
+    printed = capsys.readouterr().out
+    assert printed.count(f"{one}:") == 1 and f"[{EDGE}]" in printed
+
+
+def test_a_filled_brief_passes_the_check(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    brief = _load()
+    out = _brief(brief, tmp_path)
+    filled = tmp_path / "filled.md"
+    filled.write_text(
+        out.read_text(encoding="utf-8").replace("TODO", "decided"), encoding="utf-8", newline="\n"
+    )
+    assert brief.main(["--check", str(filled)], run=_no_command) == 0
+    assert f"{filled}:" not in capsys.readouterr().out
+
+
+def test_brief_lists_the_tests_outside_the_owned_files_that_pin_it(tmp_path: Path) -> None:
+    """Pins: every test file outside the owned ones that imports an owned module or names an
+    owned symbol, each with its reason, and each in the checks command. ``LoopLimits`` is a
+    public name of the owned ``scio/loop/exits.py`` that the issue does not name."""
+    brief = _load()
+    extra = {
+        "tests/integration/test_cli_text.py": 'EXPECTED = "LoopLimits(max_stall=2)"\n',
+        **{
+            f"tests/unit/test_many_{i:02}.py": "from scio.loop.exits import check_exit\n"
+            for i in range(brief.MAX_TESTS + 1)
+        },
+    }
+    text = _brief(brief, tmp_path, extra).read_text(encoding="utf-8")
+    owned = _section(text, "Owned files")
+    pins = _slot(_section(text, EDGE), "Pins")
+    checks = _section(text, "Checks")
+    assert "- `tests/integration/test_cli_text.py` (names `LoopLimits`)" in pins
+    assert "test_cli_text.py" not in owned and "tests/integration/test_cli_text.py" in checks
+    # past the cap on proposed owned tests, an importing test is a pin, never dropped
+    assert "- `tests/unit/test_many_10.py` (imports `scio.loop.exits`" in pins
+    assert "test_many_10.py" not in owned and "tests/unit/test_many_10.py" in checks
+    # an owned test is not a pin; an unrelated test is neither
+    assert "- `tests/unit/test_exits.py`" in owned and "test_exits.py" not in pins
+    assert "test_other.py" not in pins and "test_other.py" not in checks

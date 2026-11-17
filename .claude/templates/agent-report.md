@@ -29,6 +29,13 @@ failure it printed (the error line, not "it failed").
 Each existing test you changed, and why the change keeps what it checked. "none" when you
 changed none. An existing test changed to pass is a red flag: justify it or revert it.
 
+## edge_decisions
+One line for each of the brief's four edge decisions, saying what you built: Identity (how
+each id, key or file name stays unique across threads, milestones and reruns), Failure (what
+the code does when an external call or write fails), Resume (what a rerun, or a record stored
+before this change, does), Pins (the tests outside your files that you ran, and their counts).
+Where you built something other than the brief's line, say so and why.
+
 ## open_questions
 Each gap you could not close: the question, what you tried, the evidence, and what would
 settle it. Never "owner decision" (W-08): you report the question, the orchestrator decides
