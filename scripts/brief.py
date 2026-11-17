@@ -14,7 +14,14 @@ Usage: ``uv run python scripts/brief.py <issue> [--out FILE] [--worktree DIR] [-
    does each invariant's test: one invariant slot per sentence the issue quotes from the owner
    (a double-quoted span of three words or more, straight or curly quotes, on a line that
    names the owner, or a blockquote that follows such a line).
-6. Writes the brief to stdout, or to ``--out``.
+6. Fills the Pins edge decision: every test file outside the owned ones that imports an owned
+   module or names an owned symbol, with the reason, and adds them to the checks command.
+   The Identity, Failure and Resume decisions stay a ``TODO`` for the orchestrator.
+7. Writes the brief to stdout, or to ``--out``.
+
+``uv run python scripts/brief.py --check FILE`` is the gate before sending: it exits 1 and
+names each ``TODO`` left in the brief (line number and section), and exits 0 when there is
+none. It reads only the file: no ``gh``, no ``git``.
 
 The proposal is a starting point for the orchestrator, who reviews it before sending: a grep
 finds text, not intent.
@@ -212,6 +219,8 @@ class Proposal:
     foreign: list[str] = field(default_factory=list)
     """Named paths outside this tree's directories: evidence, never owned."""
     tests: dict[str, str] = field(default_factory=dict)
+    pins: dict[str, str] = field(default_factory=dict)
+    """Test file outside the owned ones that pins the owned code -> why."""
     docs: list[str] = field(default_factory=list)
     """Docs touchpoint lines, ready for the brief."""
     terms: list[str] = field(default_factory=list)
@@ -256,41 +265,61 @@ def propose(body: str, root: Path, files: list[str]) -> Proposal:
             prop.tests[path] = "named in the issue"
     terms = list(symbols)
     modules: list[str] = []
+    public: list[str] = []
     for rel in prop.code:
         if not rel.endswith(".py"):
             continue
         modules.append(_module(rel))
         terms += [rel, rel.rsplit("/", 1)[-1], _module(rel)]
         if prop.paths.get(rel):  # a named module: its public names are its surface
-            terms += [n for n in top_level_names(_read(root, rel)) if _distinctive(n)]
-    prop.terms = list(dict.fromkeys(terms))
-    _find_tests(prop, root, files, symbols, modules)
+            public += [n for n in top_level_names(_read(root, rel)) if _distinctive(n)]
+    prop.terms = list(dict.fromkeys(terms + public))
+    _find_tests(prop, root, files, symbols, modules, public)
     prop.docs = docs_touchpoints(root, files, prop.terms)
     return prop
 
 
 def _find_tests(
-    prop: Proposal, root: Path, files: list[str], symbols: list[str], modules: list[str]
+    prop: Proposal,
+    root: Path,
+    files: list[str],
+    symbols: list[str],
+    modules: list[str],
+    public: list[str],
 ) -> None:
+    """The owned tests (the ``MAX_TESTS`` that most import an owned module or use a symbol
+    the issue names) and the pins: every other test file that imports an owned module or
+    names an owned symbol (a named symbol, or a public name of a named module)."""
     import_res = [
-        re.compile(rf"\b(?:from|import)\s+{re.escape(m)}\b") for m in modules
+        (m, re.compile(rf"\b(?:from|import)\s+{re.escape(m)}\b")) for m in modules
     ] + [
-        re.compile(rf"\bfrom\s+{re.escape(m.rsplit('.', 1)[0])}\s+import\s+[^\n]*\b"
-                   rf"{re.escape(m.rsplit('.', 1)[-1])}\b")
+        (m, re.compile(rf"\bfrom\s+{re.escape(m.rsplit('.', 1)[0])}\s+import\s+[^\n]*\b"
+                       rf"{re.escape(m.rsplit('.', 1)[-1])}\b"))
         for m in modules if "." in m
     ]  # fmt: skip
-    symbol_res = [_term_re(s) for s in symbols]
+    named = set(symbols)
+    symbol_res = [(s, _term_re(s)) for s in dict.fromkeys([*symbols, *public])]
     scored: list[tuple[int, str]] = []
+    why: dict[str, str] = {}
     for rel in files:
         if not (rel.startswith("tests/") and rel.endswith(".py")) or rel in prop.tests:
             continue
         text = _read(root, rel)
-        score = 2 * sum(1 for r in import_res if r.search(text))
-        score += sum(1 for r in symbol_res if r.search(text))
+        imported = [m for m, r in import_res if r.search(text)]
+        used = [s for s, r in symbol_res if r.search(text)]
+        score = 2 * len(imported) + sum(1 for s in used if s in named)
         if score:
             scored.append((score, rel))
+        reasons = [
+            f"{verb} {', '.join(f'`{n}`' for n in dict.fromkeys(names))}"
+            for verb, names in (("imports", imported), ("names", used))
+            if names
+        ]
+        if reasons:
+            why[rel] = "; ".join(reasons)
     for _, rel in sorted(scored, key=lambda s: (-s[0], s[1]))[:MAX_TESTS]:
         prop.tests[rel] = "imports an owned module or uses a named symbol"
+    prop.pins = {rel: why[rel] for rel in sorted(why) if rel not in prop.tests}
 
 
 def _docs_files(files: list[str]) -> list[str]:
@@ -441,7 +470,10 @@ def render(
         or "none found (check by hand)",
         "owned_tests": _bullets(prop.tests, "TODO: the new test file")
         + "\n- `TODO tests/unit/test_<name>.py` (new: the invariant tests)",
-        "test_files": " ".join([*tests, "TODO"]),
+        "pins": "\n".join(f"  - `{k}` ({v})" for k, v in prop.pins.items())
+        or "  - none found: no test outside the owned files imports an owned module or names "
+        "an owned symbol",
+        "test_files": " ".join([*tests, *prop.pins, "TODO"]),
     }
     # The template's own comment is for whoever fills it by hand.
     text = re.sub(r"\A<!--.*?-->\n", "", template, flags=re.DOTALL)
@@ -454,17 +486,93 @@ def render(
     return note + text
 
 
+# ---------- the check ----------
+
+TODO_RE = re.compile(r"\bTODO\b")
+COMMENT_RE = re.compile(r"<!--.*?-->")
+EDGE_SECTION = "Edge decisions (decided before sending)"
+EDGE_SLOTS = ("Identity", "Failure", "Resume", "Pins")
+
+
+def remaining_todos(text: str) -> list[tuple[int, str, str]]:
+    """Each ``TODO`` left in a brief: its line number, its ``##`` section and the line. An HTML
+    comment is not the brief (the note this script writes at the top names the word)."""
+    found: list[tuple[int, str, str]] = []
+    section = "top"
+    fenced = commented = False
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw
+        if commented:
+            if "-->" not in line:
+                continue
+            line = line.split("-->", 1)[1]
+            commented = False
+        line = COMMENT_RE.sub("", line)
+        if "<!--" in line:
+            line = line.split("<!--", 1)[0]
+            commented = True
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        elif not fenced and line.startswith("## "):
+            section = line[3:].strip()
+        if TODO_RE.search(line):
+            found.append((number, section, raw.strip()))
+    return found
+
+
+def missing_edge_decisions(text: str) -> list[str]:
+    """The edge decisions a brief does not carry: a brief cut down by hand still states all four."""
+    section = text.split(f"## {EDGE_SECTION}", 1)[1].split("\n## ", 1)[0] if (
+        f"## {EDGE_SECTION}" in text
+    ) else ""  # fmt: skip
+    return [name for name in EDGE_SLOTS if f"- **{name}**" not in section]
+
+
+def check(file: str) -> int:
+    """1 while the brief at ``file`` has a ``TODO`` or lacks an edge decision, naming each;
+    0 when it is ready to send. Reads only the file."""
+    try:
+        text = Path(file).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"brief.py --check: cannot read the brief: {exc}", file=sys.stderr)
+        return 1
+    todos = remaining_todos(text)
+    missing = missing_edge_decisions(text)
+    for number, section, line in todos:
+        print(f"{file}:{number}: [{section}] {line[:160]}")
+    for name in missing:
+        print(f"{file}: [{EDGE_SECTION}] has no `- **{name}**` line")
+    if todos or missing:
+        print(
+            f"not ready to send: {len(todos)} TODO left, {len(missing)} edge decisions missing",
+            file=sys.stderr,
+        )
+        return 1
+    print("ready to send: no TODO left, and the four edge decisions are stated")
+    return 0
+
+
 def main(argv: list[str] | None = None, *, run: Run | None = None, root: Path | None = None) -> int:
     """Print (or write) the brief for one issue. ``run`` and ``root`` replace ``gh``/``git``
     and the repository in tests."""
     p = argparse.ArgumentParser(description="Fill the agent brief from a GitHub issue.")
-    p.add_argument("issue", type=int)
+    p.add_argument("issue", type=int, nargs="?", default=None)
+    p.add_argument(
+        "--check",
+        metavar="FILE",
+        default=None,
+        help="exit 1 and name each TODO left in the brief FILE; reads no issue",
+    )
     p.add_argument("--out", default=None, help="write here instead of stdout")
     p.add_argument("--worktree", default=None, help="default: TODO")
     p.add_argument("--branch", default=None, help="default: feat/<issue>-<slug>")
     p.add_argument("--base", default="main")
     p.add_argument("--parallel", default=None, help="the other agents of the wave")
     args = p.parse_args(argv)
+    if args.check is not None:
+        return check(args.check)
+    if args.issue is None:
+        p.error("an issue number, or --check FILE")
     run = run or default_run
     root = root or ROOT
     issue = fetch_issue(args.issue, run)
