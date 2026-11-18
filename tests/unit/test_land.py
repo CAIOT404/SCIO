@@ -9,6 +9,11 @@ issues and CI runs, and makes merges there, as GitHub does; ``land.py``'s own ``
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +33,17 @@ from tests.session_tools_support import (
     tree,
     write,
 )
+
+
+@pytest.fixture(autouse=True)
+def machine_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The checkout lock (I-243) lives in a directory of this test's own, never the owner's
+    machine directory (guardrail 90)."""
+    machine = tmp_path / "machine"
+    monkeypatch.setenv("LOCALAPPDATA", str(machine))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(machine))
+    return machine
+
 
 TEMPLATE_BODY = """## Summary
 <!-- What changed and why, in 1-3 sentences. -->
@@ -513,6 +529,65 @@ def test_after_merge_checks_merged_at_pulls_and_retargets_dependents(
     facts = (scio / ".scio" / "session-state.md").read_text(encoding="utf-8")
     assert facts == "# Session state\n\n- regenerated\n"
     assert runner.pushes == [], "not a release: no tag"
+
+
+def test_after_merge_pulls_main_under_the_checkout_lock_and_waits_for_another_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    machine_dir: Path,
+) -> None:
+    """I-243: two sessions each ran `land.py --after-merge` for one PR and pulled the main
+    checkout at the same moment, and one pull failed mid-checkout. The pull now holds the
+    machine-wide checkout lock: while another live process holds it, the pull waits and says
+    for whom; then it pulls, holding the lock itself, and releases it."""
+    land, gate = load("land"), load("gate")
+    monkeypatch.setattr(gate, "LOCK_POLL_S", 0.05)
+    hub, scio, gh = _merged_stack(tmp_path)
+    gh.prs[7]["mergedAt"] = "2026-11-17T16:29:57Z"
+    before = git(scio, "rev-parse", "HEAD")
+    lock = gate.machine_dir() / "checkout.lock"
+    assert lock.is_relative_to(machine_dir)
+    lock.parent.mkdir(parents=True)
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        held = {"pid": other.pid, "worktree": "C:/the/other/session", "at": "2026-11-17T16:29Z"}
+        lock.write_text(json.dumps(held), encoding="utf-8")
+
+        runner = FakeRunner(gh=gh, python=_python())
+        pulls: list[dict[str, Any]] = []
+        real_run = runner.run
+
+        def run(argv: Any, cwd: Path | None = None, **kw: Any) -> Any:
+            if list(argv[:1]) == ["git"] and "pull" in argv:
+                pulls.append(json.loads(lock.read_text(encoding="utf-8")))
+            return real_run(argv, cwd, **kw)
+
+        monkeypatch.setattr(runner, "run", run)
+        result: dict[str, int] = {}
+        thread = threading.Thread(
+            target=lambda: result.update(
+                code=land.main(["7", "--after-merge", "--root", str(scio)], runner=runner)
+            ),
+            daemon=True,
+        )
+        thread.start()
+        time.sleep(0.5)
+        assert thread.is_alive() and pulls == [], "no pull while another writer holds the lock"
+        assert git(scio, "rev-parse", "HEAD") == before
+        out = capsys.readouterr().out
+        assert f"checkout: waiting for the checkout in C:/the/other/session (pid {other.pid}" in out
+
+        lock.unlink()  # the other writer finished
+        thread.join(timeout=60)
+    finally:
+        other.kill()
+        other.wait()
+    assert not thread.is_alive() and result == {"code": 0}
+    assert git(scio, "rev-parse", "HEAD") == git(hub, "rev-parse", "main"), "pulled"
+    assert len(pulls) == 1 and pulls[0]["pid"] == os.getpid(), "the pull held the lock"
+    assert same(Path(pulls[0]["worktree"]), scio)
+    assert not lock.exists(), "released"
 
 
 def test_landing_a_release_pr_tags_its_merge_and_checks_the_release(

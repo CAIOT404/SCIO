@@ -11,8 +11,10 @@ change the code beneath it. "Idle" is read from the recovery supervisor:
 ``running`` and no open incident. A status that cannot be read counts as busy, never idle.
 
 When idle: ``git -C .scio/live-wt fetch origin``, then ``checkout --detach origin/main``, and
-it prints the move. A live-wt with local changes is not moved. ``.scio/recovery-wt`` is never
-touched: only the owner moves the supervisor's own code (ADR 0019).
+it prints the move. The move holds the machine-wide checkout lock
+(``session_state.checkout_lock``, I-243), so two sessions moving live-wt at once never write it
+together. A live-wt with local changes is not moved. ``.scio/recovery-wt`` is never touched:
+only the owner moves the supervisor's own code (ADR 0019).
 
 While busy, ``--when-idle`` checks again every ``--poll`` seconds (60) until ``--max-wait``
 (4 hours), then exits 3 naming what it waited on. Exit 0 when moved (or already there), 1 when
@@ -112,7 +114,8 @@ def main(argv: list[str] | None = None, runner: Any = None) -> int:
     while True:
         reasons = busy_reasons(main_co, runner, ss)
         if not reasons:
-            return move(live, runner)
+            with ss.checkout_lock(live):  # I-243: a second mover waits, then finds it moved
+                return move(live, runner)
         if runner.now() >= deadline:
             print("live-wt not moved; waited on:")
             print("\n".join(f"  {r}" for r in reasons))
