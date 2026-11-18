@@ -26,6 +26,10 @@ TASK_FAULT_REASONS: frozenset[str] = frozenset(
 """Halt reasons that are the product's or a human's business, never a SCIO repair."""
 
 AUTH_MARKERS: tuple[str, ...] = (
+    # SCIO's credential pre-flight refused the command (issue #103; ``SIGN_IN_REQUIRED_PREFIX``
+    # in scio/harness/preflight.py). First, so every such refusal has this one signature,
+    # whatever reason ``claude`` gave.
+    "scio: sign-in required:",
     "not logged in",
     "authentication",
     "invalid_grant",
@@ -304,7 +308,8 @@ def classify(ev: Evidence) -> Classification:
         (``... failed (...); build stopped``): ``TASK_FAULT``. This row sits above the marker
         rows because a person's free text can hold a marker word.
     5. An auth marker anywhere in the failure text (message, last ledger line, stderr):
-       ``EXTERNAL_AUTH``.
+       ``EXTERNAL_AUTH``. SCIO's pre-flight refusal (``scio: sign-in required: ...``, exit 2
+       before any work, issue #103) is one, whatever reason it quotes.
     6. A transient marker: ``EXTERNAL_TRANSIENT``.
     7. ``halt_reason`` in ``TASK_FAULT_REASONS``: ``TASK_FAULT``.
     8. A traceback with an innermost frame under ``scio/``: ``HARNESS_SUSPECT``.

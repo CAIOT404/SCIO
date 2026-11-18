@@ -95,7 +95,7 @@ The record's `build_thread_source` says which one it was (`outcome`, `stdout`, `
 |---|---|
 | done, or a human stop | records it; nothing else |
 | a task fault (`integration_failed`, `gate_escalated`, `release_failed`, `stopped`, `budget`, `load_failed`) | records it as a closed incident; the owner decides, as before |
-| a sign-in failure (`not logged in`, `invalid_grant`) | opens an issue labelled `needs-human`: sign in again; no repair |
+| a sign-in failure (`not logged in`, `invalid_grant`), or SCIO's pre-flight refusal (`scio: sign-in required: ...`, exit 2 before any work, issue #103) | opens an issue labelled `needs-human` and escalates in the same tick: sign in again (`claude auth login`), then re-run the build; no repair. A pre-flight that failed for another reason (`scio: pre-flight check failed: ...`) is read by its reason: a timeout is transient |
 | a rate limit, a used-up usage window (`You've hit your 5-hour limit · resets 2:20pm (America/Los_Angeles)`), a GitHub refusal | replays after a backoff (up to 3 times), then escalates. When the message names a reset time, the backoff lasts until then plus 5 minutes, at most 8 hours after the failure, and the timeline says "waiting for the usage window to reset at <UTC time>". On a Python with no time zone database (Windows without `tzdata`, as the scheduled tick runs), the named time is read as this machine's local time, since `claude -p` runs here. A time it cannot read keeps the 5, 15 and 30 minute schedule (#126) |
 | a traceback in SCIO's code, a harness error in a feature, or a hang | opens a `recovery` issue and starts a repair session; after the owner's merge, it updates live-wt, runs the health check and replays |
 | a reboot or a dead supervisor (orphan) | replays; no repair |

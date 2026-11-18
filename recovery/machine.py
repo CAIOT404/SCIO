@@ -356,8 +356,8 @@ def _unrepairable_reason(incident: Incident) -> str:
     cls = incident.failure_class
     if cls is FailureClass.EXTERNAL_AUTH:
         return (
-            "the Claude sign-in failed. Sign in again, then re-run the build; a repair "
-            "session would fail the same way."
+            "the Claude sign-in failed. Sign in again (`claude auth login`), then re-run the "
+            "build; a repair session would fail the same way."
         )
     if cls is FailureClass.UNKNOWN:
         return "the failure matched no known class. Read the evidence in the snapshot."
