@@ -33,7 +33,7 @@ flowchart TD
   M --> X[decompose into GitHub issues with acceptance tests]
   X --> F[for each feature: existing task graph, tier pinned, on branch milestone/n]
   F --> V[integration verify: full suite, e2e/smoke on running app, lint, types, build, audit]
-  V --> G[Opus milestone gate, overridden by any failing check]
+  V --> G[Opus milestone gate, overridden by any failing check or skipped test]
   G --> PR[milestone PR: cost, escalations, plan vs done]
   PR --> W{{human merge}}
   W --> U[update progress file, replan next milestone if needed]
@@ -77,7 +77,7 @@ Creating a GitHub repository publishes it, so a human always confirms that step.
    - the README's run instructions work (CI runs them)
    - CHANGELOG, LICENSE and a Dockerfile or release artifact are present
 
-   Any failing check overrides the model's verdict, as it does today.
+   Any failing check overrides the model's verdict, as it does today. So does a `[test skips]` line: a test that skipped outside the acceptance directory verified nothing (issue #169).
 
    At a milestone's merge stop and at the release stop, `scio build` prints one line per check before the stop's JSON (`[tests] passed: 231 passed, 1 skipped`), and the JSON carries the same list as `checks`: each check's `name`, its `verdict` (`passed`, `FAILED` or `skipped`) and a one-line `detail`. The milestone PR's "Test evidence" section opens with the same lines, read by the same function (`integration_verdicts`), so the stop and the PR cannot disagree (issue #156).
 6. **Budget.** By default the product has no dollar cap (`product.max_usd: null`, configurable). The per-feature tier caps, stall caps and iteration caps stay in place as runaway guards. Spend is reported in every milestone PR and at every human approval stop.

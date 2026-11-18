@@ -2435,10 +2435,17 @@ def _deferred_by_owner(state: ProductBuildState, feature_id: str) -> bool:
     )
 
 
+GATE_REASONING_MAX = 2000
+"""``GateOutput.reasoning``'s ``max_length``: an overridden verdict's reason goes in front of
+the model's own reasoning, and the result is cut to fit, so the stored gate still validates."""
+
+
 def milestone_gate(ctx: RunContext) -> Node:
     """One Opus verdict on the features built in this milestone; a failing check, a feature
-    that did not pass, or a milestone with every feature deferred overrides it. A feature the
-    owner skipped is named as deferred and not judged (#140)."""
+    that did not pass, a milestone with every feature deferred, or a test that skipped outside
+    the acceptance directory (the integration's ``[test skips]`` line, issue #169) overrides
+    it. The skip line is also listed as unmet. A feature the owner skipped is named as
+    deferred and not judged (#140)."""
 
     def node(state: ProductBuildState) -> dict[str, Any]:
         spec, plan = state.spec, state.milestone
@@ -2497,19 +2504,35 @@ def milestone_gate(ctx: RunContext) -> Node:
             and ((r := state.latest_run(mf.id)) is None or r.status != "passed")
         ]
         nothing_built = len(deferred) == len(plan.features)
-        if out.verdict == "pass" and (not state.integration_ok or failed or nothing_built):
+        # A test that skipped outside the acceptance directory verified nothing (issue #169):
+        # unmet whatever the verdict, and a pass stops for a human, who may still proceed.
+        skipped = next(
+            (
+                ln
+                for ln in (state.integration or "").splitlines()
+                if ln.startswith(f"[{TEST_SKIPS_CHECK}] ")
+            ),
+            "",
+        )
+        if skipped and skipped not in out.unmet_acceptance:
+            out = out.model_copy(update={"unmet_acceptance": [*out.unmet_acceptance, skipped]})
+        if out.verdict == "pass" and (
+            not state.integration_ok or failed or nothing_built or skipped
+        ):
             why = (
                 "integration checks failed"
                 if not state.integration_ok
                 else ("features not passed: " + ", ".join(failed))
                 if failed
                 else "every feature was deferred by the owner: nothing was delivered"
+                if nothing_built
+                else f"tests skipped outside {ctx.toolchain.acceptance_dir}: {skipped}"
             )
             out = out.model_copy(
                 update={
                     "verdict": "escalate_human",
                     "objective_met": False,
-                    "reasoning": f"overridden: {why}. " + out.reasoning,
+                    "reasoning": (f"overridden: {why}. " + out.reasoning)[:GATE_REASONING_MAX],
                 }
             )
         entry = decision(

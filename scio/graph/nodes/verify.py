@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Literal
 
-from scio.aci.tools import SKIPPED_ONLY, RunTestsInput, ToolError, run_tests
+from scio.aci.tools import SKIPPED_ONLY, SKIPS_NOTE, RunTestsInput, ToolError, run_tests
 from scio.graph.nodes.common import changed_since_head, diff_stat, fact
 from scio.graph.run_context import RunContext
 from scio.loop.escalation import decide, exit_for, review_decision
@@ -80,10 +80,26 @@ SKIP_HINT = (
     "against the started app; prove the feature with tests that run here, in-process; "
     "existing tests count)"
 )
+UNVERIFIED_SKIP_HINT = (
+    " (a feature test that skipped verified nothing, so this feature is not verified: make "
+    "the skipped test run here. Import what it needs plainly, never through importorskip or "
+    "a skip marker: the product's environment has it, or a missing package goes in the "
+    "product's dependencies, from the approved list, and the install phase installs it. Or "
+    "remove the skip)"
+)
+"""Appended to a feature's own selector run that passed with a ``skipped (not verified)``
+line (issue #169, part B): the skips the whole-suite run leaves are reported, a feature's own
+are a failure."""
+
+
+def _unverified_skip(out: str) -> bool:
+    """A passing ``run_tests`` result that names skips outside the acceptance directory."""
+    return out.startswith("all tests passed") and f"\n{SKIPS_NOTE}:" in out
 
 
 def _run(ctx: RunContext, flt: str | None) -> tuple[str, bool]:
-    """The whole suite (the regression check): nothing may fail; skips are not failures."""
+    """The whole suite (the regression check): nothing may fail; skips are not failures, and
+    a skip it names fails no feature (issue #169: integration and the gate report them)."""
     try:
         out = run_tests(ctx.sandbox, RunTestsInput(filter=flt), toolchain=ctx.toolchain)
     except ToolError as exc:
@@ -92,7 +108,9 @@ def _run(ctx: RunContext, flt: str | None) -> tuple[str, bool]:
 
 
 def _run_selectors(ctx: RunContext, test_filter: str) -> tuple[str, bool]:
-    """Run every selector in a feature's ``test_filter``; all must pass and collect tests."""
+    """Run every selector in a feature's ``test_filter``; all must pass and collect tests, and
+    none may skip outside the acceptance directory (issue #169): a skipped feature test
+    verified nothing. The result keeps the skip line, so the feature's output names it."""
     chunks: list[str] = []
     ok_all = True
     for sel in split_selectors(test_filter):
@@ -108,6 +126,9 @@ def _run_selectors(ctx: RunContext, test_filter: str) -> tuple[str, bool]:
         if out.startswith(SKIPPED_ONLY):  # a feature's proof must run (I-097)
             ok = False
             out += SKIP_HINT
+        if _unverified_skip(out):  # and every test of it must run (issue #169)
+            ok = False
+            out += UNVERIFIED_SKIP_HINT
         label = f"path={inp.path!r}" if inp.path else f"filter={inp.filter!r}"
         chunks.append(f"[run_tests {label}]\n{out}")
         ok_all &= ok
@@ -150,7 +171,7 @@ def verify(ctx: RunContext) -> Node:
         per_filter_ok: dict[str | None, bool] = {}
         for flt in sorted({f.test_filter for f in in_scope if f.test_filter}):
             out, ok = _run_selectors(ctx, flt)
-            unproven = "matched nothing" in out or SKIPPED_ONLY in out
+            unproven = "matched nothing" in out or SKIPPED_ONLY in out or SKIPS_NOTE in out
             if not ok and fallback and fallback != flt and unproven:
                 # The plan guessed test names before the tests existed (I-037). The tests the
                 # worker actually reports are the ground truth; adopt them if they pass.
