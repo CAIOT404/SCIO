@@ -21,7 +21,12 @@ from scio.harness.config import ModelConfig, ModelsConfig, ProviderRegistry
 from scio.harness.failures import RefusalError
 from scio.harness.provider import ModelProvider
 from scio.harness.retry import RetryPolicy, with_retry
-from scio.harness.telemetry import configure_tracing, invoke_agent_span, record_response
+from scio.harness.telemetry import (
+    account_span,
+    configure_tracing,
+    invoke_agent_span,
+    record_response,
+)
 from scio.harness.types import (
     CompletionRequest,
     CompletionResponse,
@@ -205,7 +210,8 @@ class Harness:
         tags: dict[str, str] | None = None,
     ) -> float:
         """Record a call that happened outside ``_call`` (a Claude Code turn, ADR 0012) in
-        the ledger and the budget at this harness's prices. Returns the USD estimate."""
+        the ledger and the budget at this harness's prices, then emit its ``invoke_agent``
+        span, backdated by ``latency_ms`` (I-122). Returns the USD estimate."""
         usd = self.config.model(model).pricing.cost_of(usage)
         self.ledger.record(
             role=role,
@@ -219,6 +225,16 @@ class Harness:
             tags=tags,
         )
         self.budget.record(usage, usd)
+        account_span(
+            role=role,
+            model=model,
+            provider=provider,
+            usage=usage,
+            usd=usd,
+            latency_ms=latency_ms,
+            request_id=request_id,
+            tags=tags,
+        )
         return usd
 
     def summary(self) -> dict[str, Any]:

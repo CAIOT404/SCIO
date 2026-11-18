@@ -9,7 +9,9 @@ rename is a one-line change here. Prompt and completion text are recorded only w
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+import logging
+import time
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any, Literal
 
@@ -24,7 +26,9 @@ from opentelemetry.sdk.trace.export import (
 )
 from opentelemetry.trace import Span, StatusCode
 
-from scio.harness.types import CompletionRequest, CompletionResponse
+from scio.harness.types import CompletionRequest, CompletionResponse, Usage
+
+log = logging.getLogger(__name__)
 
 SEMCONV_VERSION = "1.37.0"
 
@@ -48,6 +52,7 @@ SYSTEM_INSTRUCTIONS = "gen_ai.system_instructions"
 SCIO_USD = "scio.usd"
 SCIO_ATTEMPTS = "scio.attempts"
 SCIO_THREAD_ID = "scio.thread_id"
+"""The thread id, from a call's ``thread`` tag (I-123); the tag is also ``scio.tag.thread``."""
 
 _TRACER_NAME = "scio"
 _configured_provider: TracerProvider | None = None
@@ -95,6 +100,29 @@ def tracer() -> trace.Tracer:
     return trace.get_tracer(_TRACER_NAME, SEMCONV_VERSION)
 
 
+def _set_agent_attributes(
+    span: Span, *, role: str, provider: str, model: str, tags: Mapping[str, str]
+) -> None:
+    """The attributes every ``invoke_agent`` span carries, through the harness or not."""
+    span.set_attribute(OPERATION, "invoke_agent")
+    span.set_attribute(AGENT_NAME, role)
+    span.set_attribute(PROVIDER, provider)
+    span.set_attribute(REQ_MODEL, model)
+    for k, v in tags.items():
+        span.set_attribute(f"scio.tag.{k}", v)
+    if "thread" in tags:
+        span.set_attribute(SCIO_THREAD_ID, tags["thread"])
+
+
+def _set_usage_attributes(span: Span, usage: Usage, *, usd: float, attempts: int) -> None:
+    span.set_attribute(IN_TOKENS, usage.input_tokens)
+    span.set_attribute(OUT_TOKENS, usage.output_tokens)
+    span.set_attribute(CACHE_READ_TOKENS, usage.cache_read_tokens)
+    span.set_attribute(CACHE_WRITE_TOKENS, usage.cache_write_tokens)
+    span.set_attribute(SCIO_USD, usd)
+    span.set_attribute(SCIO_ATTEMPTS, attempts)
+
+
 @contextmanager
 def invoke_agent_span(
     request: CompletionRequest, *, provider: str, capture_content: bool = False
@@ -102,12 +130,9 @@ def invoke_agent_span(
     """Span for one model call made on behalf of a SCIO role."""
     role = request.role or "model"
     with tracer().start_as_current_span(f"invoke_agent {role}") as span:
-        span.set_attribute(OPERATION, "invoke_agent")
-        span.set_attribute(AGENT_NAME, role)
-        span.set_attribute(PROVIDER, provider)
-        span.set_attribute(REQ_MODEL, request.model)
-        for k, v in request.tags.items():
-            span.set_attribute(f"scio.tag.{k}", v)
+        _set_agent_attributes(
+            span, role=role, provider=provider, model=request.model, tags=request.tags
+        )
         if capture_content:
             span.set_attribute(SYSTEM_INSTRUCTIONS, request.system)
             span.set_attribute(
@@ -133,17 +158,46 @@ def record_response(
     span.set_attribute(RES_MODEL, response.model)
     if response.request_id:
         span.set_attribute(RES_ID, response.request_id)
-    span.set_attribute(IN_TOKENS, response.usage.input_tokens)
-    span.set_attribute(OUT_TOKENS, response.usage.output_tokens)
-    span.set_attribute(CACHE_READ_TOKENS, response.usage.cache_read_tokens)
-    span.set_attribute(CACHE_WRITE_TOKENS, response.usage.cache_write_tokens)
+    _set_usage_attributes(span, response.usage, usd=usd, attempts=attempts)
     span.set_attribute(FINISH_REASONS, [response.stop_reason.value])
-    span.set_attribute(SCIO_USD, usd)
-    span.set_attribute(SCIO_ATTEMPTS, attempts)
     if capture_content:
         span.set_attribute(
             OUTPUT_MESSAGES, json.dumps(response.as_assistant_message().model_dump(mode="json"))
         )
+
+
+def account_span(
+    *,
+    role: str,
+    model: str,
+    provider: str,
+    usage: Usage,
+    usd: float,
+    latency_ms: int = 0,
+    request_id: str | None = None,
+    tags: Mapping[str, str] | None = None,
+) -> None:
+    """One ``invoke_agent`` span for a finished turn made outside ``Harness._call``: a Claude
+    Code worker turn (ADR 0012, I-122). The turn is over when it is accounted, so the span
+    starts ``latency_ms`` before now and ends now. It carries what an API turn's span does,
+    except the finish reason, which such a turn does not report. With no tracer configured
+    it is OpenTelemetry's no-op. A failure here is logged and never raised: the ledger and
+    the budget are recorded before this runs, and tracing must not fail the turn."""
+    try:
+        end = time.time_ns()
+        span = tracer().start_span(
+            f"invoke_agent {role}", start_time=end - max(latency_ms, 0) * 1_000_000
+        )
+        try:
+            _set_agent_attributes(span, role=role, provider=provider, model=model, tags=tags or {})
+            span.set_attribute(RES_MODEL, model)
+            if request_id:
+                span.set_attribute(RES_ID, request_id)
+            _set_usage_attributes(span, usage, usd=usd, attempts=1)
+        finally:
+            span.end(end_time=end)
+    except Exception:
+        log.warning("no span for the %s turn %s", role, request_id or "", exc_info=True)
 
 
 @contextmanager
