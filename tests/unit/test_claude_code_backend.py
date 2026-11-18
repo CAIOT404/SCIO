@@ -475,9 +475,12 @@ def test_worker_turn_then_resume_summary_accounts_both_calls(tmp_path: Path) -> 
     assert _flag(first, "--max-turns") == "10" and float(_flag(first, "--max-budget-usd")) == 3.0
     assert "Edit" in _flag(first, "--allowedTools") and fake.calls[0][1] == str(tmp_path)
     assert fake.calls[0][2] == "# Task: do it"
-    assert _flag(second, "--resume") == "sess-w" and _flag(second, "--tools") == ""
-    assert "WorkerOutput" not in _flag(second, "--json-schema")  # a wire schema, not a title
-    assert json.loads(_flag(second, "--json-schema"))["type"] == "object"
+    # the summary keeps the session's tool list, so it reads the prompt cache (#185, I-250)
+    assert _flag(second, "--resume") == "sess-w" and "--tools" not in second
+    assert "--json-schema" not in second
+    schema_text = (fake.calls[1][2] or "").rsplit("\n", 1)[-1]  # the prompt ends with it
+    assert "WorkerOutput" not in schema_text  # a wire schema, not a title
+    assert json.loads(schema_text)["type"] == "object"
     assert "--no-session-persistence" not in first  # the session must survive for --resume
     system_file = Path(_flag(first, "--system-prompt-file"))
     assert not system_file.exists()  # temp file removed after the run
@@ -530,7 +533,7 @@ def test_worker_summary_capped_by_claude_codes_schema_check_is_re_asked(tmp_path
     assert isinstance(result.output, WorkerOutput) and result.output.summary == "done"
     assert len(fake.calls) == 3
     summary_argv = fake.calls[1][0]
-    assert _flag(summary_argv, "--max-turns") == "3" and _flag(summary_argv, "--tools") == ""
+    assert _flag(summary_argv, "--max-turns") == "3" and "--tools" not in summary_argv
     re_ask = fake.calls[2][2] or ""
     assert "never matched the schema" in re_ask and "required keys: step_id" in re_ask
 
