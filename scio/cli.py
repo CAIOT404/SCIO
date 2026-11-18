@@ -12,6 +12,10 @@ and ``scio status`` (product mode), ``scio report``, ``scio dashboard``.
 ``run``, ``resume``, ``new`` and ``build`` take ``--outcome-file PATH``: one JSON object
 written there on every exit path (ADR 0019 decision 11), for the recovery supervisor.
 
+With ``SCIO_PROVIDER_OVERRIDE=claude_code``, ``new`` and ``build`` first check the ``claude``
+sign-in with one tool-less call (issue #103, ``scio/harness/preflight.py``): a failure is one
+line and exit 2, before any thread, checkpoint or product file is written.
+
 The spec file is Markdown: the first ``#`` heading is the title, checkbox lines are the
 acceptance criteria, everything else is the description.
 """
@@ -282,6 +286,31 @@ def _print_product(outcome: Any) -> None:
         print(f"resume with: {_product_resume(s.thread_id)}")
 
 
+def _preflight(settings: Any, rec: _Outcome) -> int | None:
+    """A live ``scio new`` or ``scio build`` on the Claude Code backend checks its sign-in
+    with one tool-less call before it writes anything: no thread, checkpoint or product file
+    (issue #103). A sign-in failure, or a check that failed, refuses the command: one line,
+    exit 2. A warning is printed and the command goes on. None: go on. The Fake provider and
+    an API provider skip it."""
+    from scio.harness import preflight
+
+    if not preflight.preflight_applies(settings):
+        return None
+    from scio.harness.providers import claude_code
+
+    # the module's runner, looked up now: a test's injected runner serves the provider too
+    runner = claude_code.claude_runner(settings.claude_code_bin)
+    try:
+        warning = preflight.check_sign_in(runner)
+    except preflight.SignInRequired as exc:
+        return rec.refuse(preflight.sign_in_required_line(exc.reason))
+    except preflight.PreflightFailed as exc:
+        return rec.refuse(preflight.preflight_failed_line(exc.reason))
+    if warning:
+        print(f"scio: warning: {warning}", file=sys.stderr)
+    return None
+
+
 def _scripted_harness(settings: Any) -> Harness | None:
     """Offline demo: drive the Fake provider with the scripted eval behaviour."""
     if settings.provider_override == "fake" and os.environ.get("SCIO_FAKE_SCRIPT") == "1":
@@ -352,6 +381,9 @@ def _build(args: argparse.Namespace, rec: _Outcome) -> int:
         return rec.refuse(f"{progress_path} not found: run scio new first")
     progress = ProgressFile.from_json(progress_path.read_text(encoding="utf-8"))
     settings = get_settings()
+    # before any thread is named or opened, a resume with --decision included (#103)
+    if (refused := _preflight(settings, rec)) is not None:
+        return refused
     # Docker by default for product builds when it is there (M9) and the image can run the
     # product's stack, read from PRODUCT.md before any sandbox exists (I-101); the reason
     # lands in the build ledger from `load`.
@@ -558,6 +590,9 @@ def _new(args: argparse.Namespace, rec: _Outcome) -> int:
     if not resuming and args.dir is None:
         return rec.refuse("scio new --prompt/--spec also needs --dir (the target directory)")
     spec_md = args.spec.read_text(encoding="utf-8") if args.spec is not None else None
+    # before the thread is named and before a resume reads the checkpoint store (#103)
+    if (refused := _preflight(settings, rec)) is not None:
+        return refused
     thread = rec.thread = args.thread or f"new-{uuid.uuid4().hex[:8]}"
     target: Path
     if resuming:

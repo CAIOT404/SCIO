@@ -96,7 +96,7 @@ live-wt moves only when no `python -m scio` process is running from it. The supe
 | exit 0 and `PAUSED for a human:` | `human_stop` | Record it and notify. The supervisor never answers a stop. |
 | exit 0, no pause | `done` | Close the run. |
 | exit 1 with halt `integration_failed`, `gate_escalated`, `release_failed`, `stopped`, `budget` or `load_failed` | `task_fault` | Record it. No repair; the human decides, as today. |
-| `not logged in`, `authentication`, `invalid_grant` anywhere in the failure | `external_auth` | Escalate ("sign in again"). Never repair, because the repair session would fail the same way. |
+| `scio: sign-in required:` (the credential pre-flight's refusal, issue #103), `not logged in`, `authentication`, `invalid_grant` anywhere in the failure | `external_auth` | Escalate ("sign in again"). Never repair, because the repair session would fail the same way. |
 | rate limit, usage window, `overloaded`, `scio build stopped on GitHub:`, `claude -p timed out` (a `claude` process killed at its timeout on every retry, I-180) | `external_transient` | Replay after a backoff, at most 3 times, then escalate. |
 | exit 1 with a traceback whose innermost frames are under `scio/` (or LangGraph called from `scio/`) | `harness_suspect` | Incident, then repair. |
 | `feature_failed` whose last ledger line names a `HarnessError` that is not one of the external kinds above | `harness_suspect` | Incident, then repair. |
