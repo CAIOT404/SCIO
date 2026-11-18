@@ -45,7 +45,7 @@ import os
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -180,6 +180,28 @@ def sibling(name: str, directory: Path = SCRIPTS) -> ModuleType:
         del sys.modules[key]
         raise
     return mod
+
+
+CHECKOUT_LOCK = "checkout.lock"
+"""Beside the gate's lock in the machine directory (I-243)."""
+
+
+@contextlib.contextmanager
+def checkout_lock(checkout: Path) -> Iterator[None]:
+    """Hold the machine-wide checkout lock while a tool writes a pinned checkout: the main
+    checkout's pull (``land.py --after-merge``) or live-wt's move (``move_live_wt.py``).
+    I-243: two sessions each ran ``land.py --after-merge`` for one PR, and both pulled the main
+    checkout at the same moment. One pull moved ``main`` while the other was still in its fetch
+    ("fetch updated the current branch head"), so the second pull failed mid-checkout. With the
+    lock, a second writer waits and says for whom, then finds nothing left to do. It is the
+    gate's lock (W-16), in another file, so a lock whose process is gone is taken over."""
+    gate = sibling("gate")
+    path = gate.machine_dir() / CHECKOUT_LOCK
+    gate.acquire_lock(path, str(checkout), name="checkout")
+    try:
+        yield
+    finally:
+        gate.release_lock(path)
 
 
 # Worktrees, the main checkout, and gate stamps.

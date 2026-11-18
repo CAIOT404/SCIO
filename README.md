@@ -179,14 +179,17 @@ runs a suite under an A/B role configuration (`sonnet_only`, `sonnet_opus_adviso
 spend reaches X (the report says what was skipped). `python -m evals.tune` sweeps the escalation
 thresholds (ADR 0006).
 
-Nightly live suite: `python scripts/nightly_live.py` runs regression and capability on Anthropic
-under a total cost cap (default $10), using the `ant auth login` profile, and appends one row per
-suite to [docs/EVAL_HISTORY.md](docs/EVAL_HISTORY.md). On the dev machine it is registered as the
-Windows scheduled task `SCIO nightly live evals` (03:17 daily); remove it with
-`schtasks /delete /tn "SCIO nightly live evals" /f`. The GitHub nightly workflow runs the same
-capped commands and switches to the live provider only when an `ANTHROPIC_API_KEY` or
-`ANTHROPIC_AUTH_TOKEN` repository secret exists. The nightly workflow runs
-both suites per config and posts the tables to the job summary.
+Live suites run on demand: `python scripts/nightly_live.py` runs regression and capability on
+Anthropic under a total cost cap (default $10), using the `ant auth login` profile, and appends
+one row per suite to [docs/EVAL_HISTORY.md](docs/EVAL_HISTORY.md). No machine runs it on a
+schedule. The dev machine's `SCIO nightly live evals` task was disabled on 2026-10-12, when live
+runs moved to the Max login on the Claude Code backend (ADR 0012), and was removed on 2026-11-18
+(issue #101, I-181). The dev machine's one SCIO task is the recovery tick
+([docs/RECOVERY.md](docs/RECOVERY.md)); check with
+`Get-ScheduledTask | Where-Object TaskName -like 'SCIO*'`. The GitHub nightly workflow runs the
+same capped commands on the Fake provider, and switches to the live provider only when an
+`ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` repository secret exists. It runs both suites per
+config and posts the tables to the job summary.
 
 ## Acceptance status (PROMPT.md)
 
@@ -292,7 +295,6 @@ Proposed next (each one on the [board](https://github.com/users/NewMe505/project
 - Workflow v2: every change from the 2026-11-14 workflow teardown, tracked item by item in [docs/WORKFLOW_V2.md](docs/WORKFLOW_V2.md), whose status is computed from the code ([#122](https://github.com/CAIOT404/SCIO/issues/122), done)
 - keep verified work across a retry ([#119](https://github.com/CAIOT404/SCIO/issues/119)), give a bug-fix feature's brief its bug issue ([#120](https://github.com/CAIOT404/SCIO/issues/120)), and ground a feature's plan in the repository ([#121](https://github.com/CAIOT404/SCIO/issues/121)), from graphcalc's P26 (all three done)
 - guard every orchestrator node's harness errors, I-182 ([#99](https://github.com/CAIOT404/SCIO/issues/99))
-- move the nightly live suite to the Claude Code backend, or retire it, I-181 ([#101](https://github.com/CAIOT404/SCIO/issues/101))
 - the dashboard's last two follow-ups: Claude Code spans (I-122) and the thread id in telemetry (I-123) ([#102](https://github.com/CAIOT404/SCIO/issues/102), done)
 - a credential pre-flight before live product commands ([#103](https://github.com/CAIOT404/SCIO/issues/103))
 - close the oldest open ledger entries, I-145, I-159 and I-170 ([#104](https://github.com/CAIOT404/SCIO/issues/104))

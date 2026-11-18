@@ -565,11 +565,12 @@ def _stale(path: Path, holder: dict[str, Any] | None) -> bool:
     return not (isinstance(pid, int) and pid_alive(pid))
 
 
-def acquire_lock(path: Path, worktree: str) -> bool:
+def acquire_lock(path: Path, worktree: str, name: str = "gate") -> bool:
     """W-16: take the machine-wide gate lock, created atomically (``O_CREAT | O_EXCL``) with
     this gate's pid, worktree and start time. While another gate holds it, say whose and poll
     every ``LOCK_POLL_S`` seconds; a lock whose process is gone is stale and taken over.
-    Returns whether it waited."""
+    Returns whether it waited. ``name`` words the messages: ``session_state.checkout_lock``
+    takes another lock file this way (I-243)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     waited, shown, denied = False, "", 0
     while True:
@@ -590,14 +591,14 @@ def acquire_lock(path: Path, worktree: str) -> bool:
         holder = _read_json(path)
         if _stale(path, holder):
             who = f"pid {holder.get('pid')}" if holder else "never written"
-            print(f"gate: taking over a stale lock ({who})", flush=True)
+            print(f"{name}: taking over a stale lock ({who})", flush=True)
             with contextlib.suppress(OSError):
                 if _read_json(path) == holder:
                     path.unlink()
             continue
         if holder is not None:
             line = (
-                f"gate: waiting for the gate in {holder.get('worktree')} "
+                f"{name}: waiting for the {name} in {holder.get('worktree')} "
                 f"(pid {holder.get('pid')}, since {holder.get('at')})"
             )
             if line != shown:

@@ -1,0 +1,1 @@
+`scripts/land.py --after-merge` pulls the main checkout, and `scripts/move_live_wt.py` moves live-wt, under one machine-wide checkout lock (`checkout.lock` beside the gate's lock). A second writer waits, says for whom, and then finds nothing left to do. Before, two sessions landing PRs at once could pull the main checkout together, and one pull failed mid-checkout (I-243).

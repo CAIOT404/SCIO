@@ -8,11 +8,25 @@ sleeps, so a four-hour wait takes no time.
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from tests.session_tools_support import FakeRunner, clone, commit, git, load, make_hub, same
+
+
+@pytest.fixture(autouse=True)
+def machine_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The checkout lock (I-243) lives in a directory of this test's own, never the owner's
+    machine directory (guardrail 90)."""
+    machine = tmp_path / "machine"
+    monkeypatch.setenv("LOCALAPPDATA", str(machine))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(machine))
+    return machine
+
 
 RUNNING = """runs (2, newest first):
   run-20261114-a1  running  exit -  build --product C:/graphcalc
@@ -85,6 +99,33 @@ def test_live_wt_moves_only_when_no_supervised_build_runs(
     runner, _ = _statuses((0, IDLE))
     assert mv.main(["--root", str(scio)], runner=runner) == 0
     assert f"already at origin/main {new[:7]}" in capsys.readouterr().out
+
+
+def test_live_wt_moves_under_the_checkout_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, machine_dir: Path
+) -> None:
+    """I-243's sweep: two sessions moving live-wt at once would write it together, as two
+    `land.py --after-merge` runs once pulled the main checkout together. The move's checkout
+    holds the machine-wide checkout lock, which is released after."""
+    mv, gate = load("move_live_wt"), load("gate")
+    scio, live, _, _, new = _pinned(tmp_path)
+    lock = gate.machine_dir() / "checkout.lock"
+    assert lock.is_relative_to(machine_dir)
+    runner, _ = _statuses((0, IDLE))
+    held: list[dict[str, Any]] = []
+    real_run = runner.run
+
+    def run(argv: Any, cwd: Path | None = None, **kw: Any) -> Any:
+        if list(argv[:1]) == ["git"] and "checkout" in argv:
+            held.append(json.loads(lock.read_text(encoding="utf-8")))
+        return real_run(argv, cwd, **kw)
+
+    monkeypatch.setattr(runner, "run", run)
+    assert mv.main(["--root", str(scio)], runner=runner) == 0
+    assert git(live, "rev-parse", "HEAD") == new
+    assert len(held) == 1 and held[0]["pid"] == os.getpid(), "the checkout held the lock"
+    assert same(Path(held[0]["worktree"]), live)
+    assert not lock.exists(), "released"
 
 
 def test_live_wt_waits_no_longer_than_max_wait_and_says_on_what(
