@@ -1,0 +1,1 @@
+The dev machine's `SCIO nightly live evals` scheduled task, disabled since 2026-10-12, is retired (issue #101, option b, the owner's choice). The live suites run on demand with `python scripts/nightly_live.py`. The README says so and gives the command that lists SCIO's scheduled tasks (I-181).
