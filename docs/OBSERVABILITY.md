@@ -80,16 +80,17 @@ Attribute names follow the OTel GenAI semantic conventions at the version pinned
   - `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`;
   - `scio.usd` (the call's cost at SCIO's prices) and `scio.attempts` (retries included);
   - `scio.tag.<key>` for each tag the node set: `scio.tag.thread` (the thread id) on every node's calls, plus keys such as `step`, `attempt`, `round`, `debug`, `explore`, `trigger`, `plan_version`, `milestone` or `revision` where they apply.
+  - `scio.thread_id`, the thread id again, on every call that carries the `thread` tag.
   - A failed call has status `ERROR` and the exception recorded.
 - **`execute_tool <tool>`**, one per tool a worker ran through SCIO's toolbox: `gen_ai.operation.name` (`execute_tool`), `gen_ai.tool.name`, `scio.call_index` and `scio.role`.
 
-Each model call is its own trace; there is no span for a node or a whole thread. To follow one thread, filter on `scio.tag.thread`.
+Each model call is its own trace; there is no span for a node or a whole thread. To follow one thread, filter on `scio.thread_id`.
 
 Prompt and completion text is off by default. `SCIO_OTEL_CAPTURE_CONTENT=1` adds `gen_ai.system_instructions`, `gen_ai.input.messages` and `gen_ai.output.messages`. These hold the prompts and the code the model saw, so turn it on only for a viewer you trust.
 
-### The gap under the Claude Code worker backend
+### Under the Claude Code worker backend
 
-With `SCIO_WORKER_BACKEND=claude_code` (ADR 0012), a worker turn (coder, debugger, documenter, explorer) runs inside the `claude` binary. SCIO records its cost in the ledger, but it opens no span for the turn. The tools run inside the binary too, so they produce no `execute_tool` spans. Those turns are missing from the traces. The tool-less roles (`SCIO_PROVIDER_OVERRIDE=claude_code`) still go through the harness and do get spans. The dashboard and `scio report` read the ledger, so they show the worker turns' cost either way.
+With `SCIO_WORKER_BACKEND=claude_code` (ADR 0012), a worker turn (coder, debugger, documenter, explorer) runs inside the `claude` binary, outside the harness's call path. SCIO records its cost in the ledger, then emits one `invoke_agent <role>` span for it (I-122). A resumed summary call is a turn of its own and gets its own span. The span is written when the turn ends, so it starts the turn's own API time (from `duration_api_ms`, I-210) before that and carries the attributes above: `gen_ai.response.id` is the Claude Code session id, `scio.attempts` is 1, and there is no `gen_ai.response.finish_reasons`, which the binary does not report. The tools run inside the binary, so they produce no `execute_tool` spans. The tool-less roles (`SCIO_PROVIDER_OVERRIDE=claude_code`) go through the harness as before.
 
 ## 3. The dashboard
 
