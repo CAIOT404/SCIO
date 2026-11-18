@@ -35,9 +35,10 @@ refuses (I-233). A PR already queued is left as it is.
 ``--after-merge`` checks ``mergedAt`` in its own call first (I-087). While N is still in the
 merge queue (GraphQL ``isInMergeQueue``) it polls until the queue merges it, for
 ``--queue-timeout`` minutes (30); an open PR out of the queue stops it. Then it pulls the main
-checkout, retargets the PRs based on N's branch to ``main`` and requeues them, says when
-live-wt should move (N touched runtime code), tags a ``chore(release): X.Y.Z`` PR's merge
-and checks its release, and regenerates ``.scio/session-state.md``. Then it watches main's
+checkout under the machine-wide checkout lock (I-243: two runs once pulled it at once),
+retargets the PRs based on N's branch to ``main`` and requeues them, says when live-wt should
+move (N touched runtime code), tags a ``chore(release): X.Y.Z`` PR's merge and checks its
+release, and regenerates ``.scio/session-state.md``. Then it watches main's
 ``ci`` run for N's merge commit, by its SHA. When that run failed, it opens one ``red-main``
 issue (``main is red after #N``, with the run's URL), prints the revert recipe, and exits 1.
 
@@ -674,7 +675,8 @@ class Lander:
         branch = self.git("branch", "--show-current", cwd=self.main)
         if branch != "main":
             raise Stop(f"the main checkout {self.main} is on {branch or 'a detached HEAD'}")
-        self.git("pull", "--ff-only", "--quiet", cwd=self.main)
+        with self.ss.checkout_lock(self.main):  # I-243: one pull of it at a time
+            self.git("pull", "--ff-only", "--quiet", cwd=self.main)
         print(
             f"pulled main in {self.main}: {self.git('rev-parse', '--short', 'HEAD', cwd=self.main)}"
         )
