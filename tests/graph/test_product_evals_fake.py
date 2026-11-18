@@ -33,8 +33,10 @@ def test_the_web_product_is_graded_in_a_real_browser() -> None:
     """p003 (the owner's choice, 2026-10-26): the hidden tests drive the page in Chromium."""
     report = run_suite("product", provider="fake", trials=1, only=["p003_web_todo"])
     (result,) = report.results
-    assert result.passed and result.error is None, result.notes
-    assert "release=v0.1.0" in result.notes and "hidden=4 passed" in result.notes
+    # the trial's halt reason (exit=..., phase=...), its error and its time (I-145)
+    halt = f"{result.notes} error={result.error} latency_s={result.latency_s:.1f}"
+    assert result.passed and result.error is None, halt
+    assert "release=v0.1.0" in result.notes and "hidden=4 passed" in result.notes, halt
 
 
 def test_a_product_that_breaks_the_contract_fails_its_hidden_tests(tmp_path: Path) -> None:

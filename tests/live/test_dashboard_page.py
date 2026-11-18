@@ -13,12 +13,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import inspect
 import queue
 import re
 import socket
 import threading
 import time
+import traceback
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,12 +32,13 @@ from playwright.sync_api import (
     Browser,
     BrowserContext,
     ConsoleMessage,
+    Expect,
     Locator,
     Page,
     Request,
     Route,
-    expect,
 )
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from scio.dashboard.contract import (
     ChangeEvent,
@@ -53,6 +57,28 @@ if TYPE_CHECKING:
 
 # a serializer warning or an unraisable error from a pending route is a bug here, not noise
 pytestmark = pytest.mark.filterwarnings("error::UserWarning")
+
+# I-170: a loaded CI runner took more than 10 s to render a view, and more than Playwright's
+# default 5 s to redraw a row after a reconnect. A wait ends as soon as the page is ready, so
+# a long one costs only a broken page's time. Every timeout in this module is one of these
+# names; test_dashboard_page_waits_are_long_enough fails on a bare number under 15 s.
+WAIT_MS = 30_000
+"""Every fixed browser wait (``Watched.wait_for``) and every ``expect`` assertion."""
+RECONNECT_WAIT_MS = 15_000
+"""The reconnect test's waits for the socket's state: its 1 s backoff, on a loaded runner."""
+CAPTURE_MS = 15_000
+"""The screenshot a timed-out wait takes."""
+NEVER_MS = 1_000
+"""The capture's own test: a selector that never appears, given 1 s."""
+REDRAW_AFTER_SELECTION_MS = 1_500
+"""Not a render wait but the behaviour under test: once the selection is gone (or the window
+loses focus) the held redraw comes at once, well inside the 3 s cap a longer wait would hide."""
+SELECTION_HOLD_CAP_MS = 5_000
+"""Not a render wait: a selection left behind holds a redraw for 3 s at most."""
+SERVER_STOP_S = 15
+"""The page server's thread join at teardown, in seconds."""
+expect = Expect()  # this module's own, so the default does not reach other modules' tests
+expect.set_options(timeout=WAIT_MS)
 
 STATIC = Path(__file__).resolve().parents[2] / "scio" / "dashboard" / "static"
 CDN = "https://cdnjs.cloudflare.com/**"
@@ -218,7 +244,7 @@ class PageServer:
         if self._server is not None:
             self._server.should_exit = True
         if self._thread is not None:
-            self._thread.join(timeout=15)
+            self._thread.join(timeout=SERVER_STOP_S)
             assert not self._thread.is_alive(), "the page server did not stop"
         assert not self._died, self._died
 
@@ -301,12 +327,41 @@ def _build_app(server: PageServer) -> Starlette:
     )
 
 
+WaitState = Literal["attached", "detached", "hidden", "visible"]
+PAGE_STATE = """() => {
+    const conn = document.querySelector('#conn');
+    return [
+        'url: ' + location.href,
+        'conn: ' + (conn ? conn.getAttribute('data-state') : '(no #conn)'),
+        'refresh: ' + document.documentElement.getAttribute('data-refresh'),
+        document.body ? document.body.innerText : '(no body)',
+    ];
+}"""
+
+
+@dataclass
+class Captures:
+    """Where a timed-out wait saves the page (I-170): the test's own ``tmp_path``, as
+    ``<test name>-<n>.png`` and ``.txt``, ``n`` counting that test's captures over all its
+    pages, so no two captures share a file."""
+
+    directory: Path
+    test_name: str
+    taken: int = 0
+
+    def next_paths(self) -> tuple[Path, Path]:
+        self.taken += 1
+        stem = f"{self.test_name}-{self.taken}"
+        return self.directory / f"{stem}.png", self.directory / f"{stem}.txt"
+
+
 @dataclass
 class Watched:
     """A page with every page error, console error and off-machine request recorded."""
 
     page: Page
     url: str
+    captures: Captures
     page_errors: list[str] = field(default_factory=list)
     console_errors: list[str] = field(default_factory=list)
     foreign_requests: list[str] = field(default_factory=list)
@@ -316,27 +371,69 @@ class Watched:
         self.page.goto(self.url + "/" + hash_route, wait_until="domcontentloaded")
         if hash_route.startswith("#/thread/"):  # a hash change is a same-document navigation
             ref = hash_route.removeprefix("#/thread/")
-            self.page.wait_for_selector(f'.head[data-thread="{ref}"]', timeout=10_000)
+            self.wait_for(f'.head[data-thread="{ref}"]')
         else:
-            self.page.wait_for_selector(".root-section", timeout=10_000)
+            self.wait_for(".root-section")
         self.settle()
 
     def settle(self) -> None:
         """The socket said hello and the refetch it started has finished."""
-        self.page.wait_for_selector('#conn[data-state="live"]', timeout=10_000)
+        self.wait_for('#conn[data-state="live"]')
         self.wait_idle()
 
     def wait_idle(self) -> None:
         # selectors, not wait_for_function: its polling evals a string, which the page's
         # CSP (no 'unsafe-eval') refuses, so it fails whenever the first check is false
-        self.page.wait_for_selector('html[data-refresh="idle"]', state="attached")
+        self.wait_for('html[data-refresh="idle"]', state="attached")
+
+    def wait_for(
+        self, selector: str, *, state: WaitState = "visible", timeout: float = WAIT_MS
+    ) -> None:
+        """This module's one fixed browser wait (I-170): up to ``WAIT_MS`` for ``selector``.
+        A timeout saves the page (:meth:`captured_on_timeout`) and raises as Playwright's."""
+        with self.captured_on_timeout():
+            self.page.wait_for_selector(selector, state=state, timeout=timeout)
+
+    @contextmanager
+    def captured_on_timeout(self) -> Iterator[None]:
+        """A wait inside that times out saves a screenshot and the page's text (its URL,
+        socket and refresh state, then what it shows) and adds their paths to the original
+        error, which goes on as raised. A capture that fails is noted, never raised in its
+        place: the timeout is the failure to report."""
+        try:
+            yield
+        except (PlaywrightTimeoutError, AssertionError) as exc:
+            for note in self.capture():
+                exc.add_note(note)
+            raise
+
+    def capture(self) -> list[str]:
+        """Save the page under the test's ``tmp_path``; one note per file (or failure)."""
+        png, txt = self.captures.next_paths()
+        notes: list[str] = []
+        try:
+            self.page.screenshot(path=str(png), full_page=True, timeout=CAPTURE_MS)
+            notes.append(f"screenshot: {png}")
+        except Exception as exc:  # the page may be closed or hung
+            notes.append(f"screenshot failed: {type(exc).__name__}: {exc}")
+        try:
+            lines = [str(line) for line in self.page.evaluate(PAGE_STATE)]
+            txt.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+            notes.append(f"page text: {txt}")
+            notes.append(f"page state: {'; '.join(lines[:3])}")
+        except Exception as exc:
+            notes.append(f"page text failed: {type(exc).__name__}: {exc}")
+        return notes
 
     def mermaid_texts(self) -> list[str]:
         texts: list[str] = self.page.evaluate("window.__mermaidTexts || []")
         return texts
 
     def wait_for_mermaid_text(self, needle: str) -> None:
-        _wait_until(lambda: any(needle in t for t in self.mermaid_texts()), f"Mermaid got {needle}")
+        with self.captured_on_timeout():
+            _wait_until(
+                lambda: any(needle in t for t in self.mermaid_texts()), f"Mermaid got {needle}"
+            )
 
     def assert_clean(self) -> None:
         assert self.page_errors == [], self.page_errors
@@ -382,15 +479,19 @@ OpenPage = Callable[..., Watched]
 
 
 @pytest.fixture
-def open_page(browser: Browser, served: PageServer) -> Iterator[OpenPage]:
+def open_page(
+    browser: Browser, served: PageServer, tmp_path: Path, request: pytest.FixtureRequest
+) -> Iterator[OpenPage]:
     contexts: list[BrowserContext] = []
     hanging: list[Route] = []
+    # one counter for all the test's pages; a parametrized id may hold any character
+    captures = Captures(tmp_path, re.sub(r"[^\w.\[\]-]", "_", request.node.name))
 
     def opener(cdn: CdnMode = "stub", width: int = 1280, height: int = 900) -> Watched:
         context = browser.new_context(viewport={"width": width, "height": height})
         contexts.append(context)
         page = context.new_page()
-        watched = Watched(page=page, url=served.url)
+        watched = Watched(page=page, url=served.url, captures=captures)
 
         def on_console(message: ConsoleMessage) -> None:
             if message.type == "error":
@@ -428,7 +529,7 @@ def open_page(browser: Browser, served: PageServer) -> Iterator[OpenPage]:
         context.close()
 
 
-def _wait_until(check: Callable[[], bool], what: str, timeout_s: float = 10.0) -> None:
+def _wait_until(check: Callable[[], bool], what: str, timeout_s: float = WAIT_MS / 1000) -> None:
     deadline = time.monotonic() + timeout_s
     while not check():
         assert time.monotonic() < deadline, f"timed out waiting until {what}"
@@ -442,7 +543,10 @@ def _publish_and_wait_for_the_refetch(
     refresh: the page marks itself busy when the event arrives, before it fetches."""
     listed = served.calls(f"list_threads:{ref[0]}")
     served.publish(ref)
-    _wait_until(lambda: served.calls(f"list_threads:{ref[0]}") > listed, "the list is refetched")
+    with watched.captured_on_timeout():
+        _wait_until(
+            lambda: served.calls(f"list_threads:{ref[0]}") > listed, "the list is refetched"
+        )
     watched.wait_idle()
 
 
@@ -660,26 +764,27 @@ def test_a_live_redraw_waits_while_text_is_selected(
     watched = open_page()
     watched.goto()
     page = watched.page
+    phase = _row(page, TASK).locator(".phase")
     page.evaluate(SELECT_RESUME)
     served.overrides[TASK] = {"phase": "review"}
     _publish_and_wait_for_the_refetch(watched, served, TASK)
-    expect(_row(page, TASK).locator(".phase")).to_have_text("implement")
+    expect(phase).to_have_text("implement")
     assert page.evaluate("String(window.getSelection())").startswith("scio build")
     page.evaluate("window.getSelection().removeAllRanges()")
-    expect(_row(page, TASK).locator(".phase")).to_have_text("review", timeout=1500)
+    expect(phase).to_have_text("review", timeout=REDRAW_AFTER_SELECTION_MS)
     # the wait is bounded: a selection left behind holds a redraw for 3 s at most ...
     page.evaluate(SELECT_RESUME)
     served.overrides[TASK] = {"phase": "debug"}
     _publish_and_wait_for_the_refetch(watched, served, TASK)
-    expect(_row(page, TASK).locator(".phase")).to_have_text("review")
-    expect(_row(page, TASK).locator(".phase")).to_have_text("debug", timeout=5000)
+    expect(phase).to_have_text("review")
+    expect(phase).to_have_text("debug", timeout=SELECTION_HOLD_CAP_MS)
     # ... and none once the window loses focus (the user went to the terminal)
     page.evaluate(SELECT_RESUME)
     served.overrides[TASK] = {"phase": "advise"}
     _publish_and_wait_for_the_refetch(watched, served, TASK)
-    expect(_row(page, TASK).locator(".phase")).to_have_text("debug")
+    expect(phase).to_have_text("debug")
     page.evaluate("window.dispatchEvent(new Event('blur'))")
-    expect(_row(page, TASK).locator(".phase")).to_have_text("advise", timeout=1500)
+    expect(phase).to_have_text("advise", timeout=REDRAW_AFTER_SELECTION_MS)
     watched.assert_clean()
 
 
@@ -692,11 +797,12 @@ def test_a_dropped_socket_reconnects_and_catches_up(
     page = watched.page
     page.evaluate("window.__marker = 'kept'")
     served.hub.drop_connections()
-    page.wait_for_selector('#conn[data-state="reconnecting"]', timeout=5000)
+    watched.wait_for('#conn[data-state="reconnecting"]', timeout=RECONNECT_WAIT_MS)
     # changed while the page was not listening: no event will ever name it
     served.overrides[TASK] = {"phase": "gate"}
-    page.wait_for_selector('#conn[data-state="live"]', timeout=5000)  # the 1 s backoff
-    expect(_row(page, TASK).locator(".phase")).to_have_text("gate")  # the hello refetched
+    watched.wait_for('#conn[data-state="live"]', timeout=RECONNECT_WAIT_MS)  # the 1 s backoff
+    # the hello refetched; this expect is the wait that failed on CI in I-170's recurrence
+    expect(_row(page, TASK).locator(".phase")).to_have_text("gate")
     assert page.evaluate("window.__marker") == "kept"
     watched.assert_clean()
 
@@ -789,7 +895,7 @@ def test_the_page_fits_a_phone_screen(open_page: OpenPage, served: PageServer) -
     for route in ("#/", _href(BUILD), _href(P2), _href(BOOTSTRAP)):
         watched.goto(route)
         if route != "#/":
-            page.wait_for_selector('.diagram[data-drawn="svg"]', state="attached")
+            watched.wait_for('.diagram[data-drawn="svg"]', state="attached")
         width = page.evaluate("[document.documentElement.scrollWidth, window.innerWidth]")
         assert width[0] <= width[1], f"{route} scrolls sideways: {width}"
     watched.assert_clean()
@@ -815,3 +921,63 @@ def test_the_page_works_without_the_cdn(
     assert all("Failed to load resource" in e for e in watched.console_errors), (
         watched.console_errors
     )
+
+
+# ---------- I-170: the waits are long enough, and a timed-out one saves the page ----------
+
+BARE_TIMEOUT = re.compile(r"\btimeout=(\d[\d_]*(?:\.\d+)?)")
+SELECTOR_WAIT = re.compile(r"\.wait_for_selector\(")
+
+
+@pytest.mark.scan
+def test_dashboard_page_waits_are_long_enough() -> None:
+    """I-170: a 10 s selector wait and a 5 s ``expect`` timed out on loaded CI runners. Every
+    timeout here is a name (``WAIT_MS`` and its kin, each with its reason); a bare number
+    under 15 s is that short wait back. Selector waits go through ``Watched.wait_for``, and
+    the module's ``expect`` and ``_wait_until`` default to ``WAIT_MS``."""
+    source = Path(__file__).read_text(encoding="utf-8")
+    short = [
+        f"line {n}: {line.strip()}"
+        for n, line in enumerate(source.splitlines(), start=1)
+        for m in BARE_TIMEOUT.finditer(line)
+        if float(m.group(1).replace("_", "")) < 15_000
+    ]
+    assert short == [], f"a bare timeout under 15 s; use WAIT_MS or a named bound: {short}"
+    assert len(SELECTOR_WAIT.findall(source)) == 1, "a selector wait outside Watched.wait_for"
+    assert WAIT_MS >= 30_000 and RECONNECT_WAIT_MS >= 15_000
+    assert expect._timeout == WAIT_MS
+    assert inspect.signature(_wait_until).parameters["timeout_s"].default * 1000 == WAIT_MS
+
+
+@requires_browser
+def test_a_timed_out_page_wait_saves_a_screenshot(
+    open_page: OpenPage, served: PageServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I-170: a wait that times out leaves the page behind, a screenshot and its text under
+    the test's ``tmp_path``, both named in the failure; Playwright's error is the one raised.
+    A capture that fails is noted and never hides the timeout."""
+    watched = open_page()
+    watched.goto()
+    name = "test_a_timed_out_page_wait_saves_a_screenshot"
+    with pytest.raises(PlaywrightTimeoutError) as timed_out:
+        watched.wait_for("#never-rendered", timeout=NEVER_MS)
+    assert "#never-rendered" in str(timed_out.value)
+    png, txt = tmp_path / f"{name}-1.png", tmp_path / f"{name}-1.txt"
+    notes = timed_out.value.__notes__
+    assert f"screenshot: {png}" in notes and f"page text: {txt}" in notes, notes
+    assert png.read_bytes().startswith(b"\x89PNG")
+    text = txt.read_text(encoding="utf-8")
+    assert "conn: live" in text and "refresh: idle" in text and TASK[1] in text, text
+    shown = "".join(traceback.format_exception(timed_out.value))  # what pytest prints
+    assert str(png) in shown and str(txt) in shown
+
+    def gone(**_kw: object) -> bytes:
+        raise RuntimeError("the page is gone")
+
+    monkeypatch.setattr(watched.page, "screenshot", gone)
+    with pytest.raises(PlaywrightTimeoutError) as again:
+        watched.wait_for("#never-rendered", timeout=NEVER_MS)
+    notes = again.value.__notes__
+    assert "screenshot failed: RuntimeError: the page is gone" in notes, notes
+    assert f"page text: {tmp_path / f'{name}-2.txt'}" in notes, notes
+    watched.assert_clean()

@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Collection, Iterable
+from fnmatch import fnmatchcase
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -71,6 +72,9 @@ GENERIC_QUESTIONS = [
     "How are tests organized and run in this repository (framework, directories, fixtures)?",
     "Which modules and conventions (naming, docstrings, typing) must new code follow?",
 ]
+NOT_EXPECTED_FILES = frozenset({"pyproject.toml", "uv.lock", "package.json", "package-lock.json"})
+"""The dependency and lock files an explorer's naming never makes expected (I-159), with
+``requirements*.txt``; see :func:`expected_for_its_step`."""
 
 
 def _tracked_files(ctx: RunContext) -> list[str]:
@@ -214,20 +218,40 @@ def _resolve(raw: str, root: str | None, tracked: dict[str, str]) -> str | None:
     return hits.pop() if len(hits) == 1 else None
 
 
+def expected_for_its_step(path: str) -> bool:
+    """Whether a tracked file an explorer named counts as expected for its step (I-159).
+
+    It does unless it is SCIO's own bookkeeping (under ``.scio/``), a docs file (``*.md``),
+    or a dependency or lock file (``pyproject.toml``, ``uv.lock``, ``package.json``,
+    ``package-lock.json``, ``requirements*.txt``): reading those is context, and a change to
+    a dependency file is the high-impact signal's to judge, not a plan's. The toolchain's
+    ``is_source`` no longer decides, so a Python product's ``static/app.js`` that a UI
+    step's explorer names is expected rather than plan drift.
+    """
+    p = PurePosixPath(drift_norm(path, None))
+    name = p.name.lower()
+    if ".scio" in p.parts or name.endswith(".md"):
+        return False
+    return name not in NOT_EXPECTED_FILES and not fnmatchcase(name, "requirements*.txt")
+
+
 def localized_files(
     summary: ExplorerSummary,
     *,
     tracked: Iterable[str],
-    is_source: Callable[[str], bool],
     root: str | None = None,
+    is_source: Callable[[str], bool] | None = None,
 ) -> list[str]:
     """The files an explorer localized, as git spells them (I-151).
 
     Its ``relevant_files`` and the files its ``findings`` cite as ``path:line`` or
     ``path:symbol``; a bare file name counts when exactly one tracked path ends with it.
-    Only tracked files the toolchain calls source stay: a planned file that does not exist
-    is no evidence, and docs, configs and SCIO's own bookkeeping are not code to change.
+    Only tracked files stay, since a planned file that does not exist is no evidence, and
+    of those only the ones :func:`expected_for_its_step` keeps (I-159). ``is_source`` is
+    ignored: the toolchain's notion of source no longer decides, and the keyword stays only
+    so a caller that still passes it keeps working.
     """
+    del is_source  # ignored since I-159
     by_norm = {drift_norm(t, None): t for t in tracked if t}
     cited: list[str] = []
     for entry in summary.relevant_files:
@@ -238,7 +262,7 @@ def localized_files(
     out: list[str] = []
     for raw in cited:
         path = _resolve(raw, root, by_norm)
-        if path is not None and path not in out and is_source(path):
+        if path is not None and path not in out and expected_for_its_step(path):
             out.append(path)
     return out
 
@@ -273,15 +297,13 @@ def add_localized_files(
 def _localize_plan(
     ctx: RunContext, plan: Plan, summary: ExplorerSummary, *, named: Collection[str] = ()
 ) -> tuple[Plan, str]:
-    files = localized_files(
-        summary,
-        tracked=_tracked_files(ctx),
-        is_source=ctx.toolchain.is_source,
-        root=ctx.sandbox.root,
-    )
+    files = localized_files(summary, tracked=_tracked_files(ctx), root=ctx.sandbox.root)
     new_plan, added = add_localized_files(plan, files, root=ctx.sandbox.root, named=named)
     if not files:
-        return new_plan, "no files added to the plan (the explorer named no tracked source file)"
+        return new_plan, (
+            "no files added to the plan (the explorer named no tracked file outside .scio/, "
+            "docs and dependency files)"
+        )
     if not added:
         return new_plan, (
             f"no files added to the plan: the explorer localized {', '.join(files)}, but each "
@@ -646,9 +668,7 @@ def keep_localized_files(
     summaries = [x for x in stored if x is not None]
     localized: list[str] = []
     for summary in summaries:
-        found = localized_files(
-            summary, tracked=tracked, is_source=ctx.toolchain.is_source, root=root
-        )
+        found = localized_files(summary, tracked=tracked, root=root)
         localized += [f for f in found if f not in localized]
     plan, grounding, named = ground_plan(
         plan, tree=tree, localized=localized, is_test_path=ctx.toolchain.is_test_path, root=root
