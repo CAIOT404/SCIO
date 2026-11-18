@@ -524,7 +524,11 @@ def test_github_mode_crash_after_the_pr_duplicates_nothing(tmp_path: Path) -> No
     ctx = _ctx(tmp_path, harness, build_thread_id(PRODUCT), github=client)
     try:
         out = run_build(ctx, gh_repo="o/r")
-        assert out.paused and out.state.phase == "merge_wait"
+        # a halt names its reason, so a parallel-run failure is diagnosable (I-145)
+        assert out.paused and out.state.phase == "merge_wait", (
+            f"exit_reason={out.state.exit_reason} phase={out.state.phase} "
+            f"last ledger lines: {[e.text for e in out.state.ledger[-5:]]}"
+        )
         s = out.state
         assert s.pr and s.pr.number and s.pr.url and s.pr.body_path is None
         assert s.issues == {"P1": 102, "P2": 103} or set(s.issues) == {"P1", "P2"}

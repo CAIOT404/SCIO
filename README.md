@@ -295,5 +295,5 @@ Proposed next (each one on the [board](https://github.com/users/NewMe505/project
 - move the nightly live suite to the Claude Code backend, or retire it, I-181 ([#101](https://github.com/CAIOT404/SCIO/issues/101))
 - the dashboard's last two follow-ups: Claude Code spans (I-122) and the thread id in telemetry (I-123) ([#102](https://github.com/CAIOT404/SCIO/issues/102))
 - a credential pre-flight before live product commands ([#103](https://github.com/CAIOT404/SCIO/issues/103))
-- close the oldest open ledger entries, I-145, I-159 and I-170 ([#104](https://github.com/CAIOT404/SCIO/issues/104))
+- close the oldest open ledger entries, I-145, I-159 and I-170 ([#104](https://github.com/CAIOT404/SCIO/issues/104), done)
 - read a repair session's turns and time from its transcript, I-195
