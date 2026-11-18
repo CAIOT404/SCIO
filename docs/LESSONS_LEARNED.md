@@ -830,3 +830,96 @@ The owner, after Workflow v2: freeze process work and judge it by the calculator
 - **Improvements (for the freeze, both graphcalc bottlenecks):**
   1. The 44% of attempts that fail without a human stop. Break them down by `failed_by_reason` in `metrics.py --json` after graphcalc's next milestone, and fix the largest reason first.
   2. The backslash refusals (10 in two days). I-232 extends the hooks to PowerShell; the repeated habit is writing inline scripts. Count the next pass's refusals before adding anything.
+
+## Live product: graphcalc (2026-10-27 to 2026-11-17, issue #63)
+
+SCIO built `graphcalc`, a graphing calculator web app in the spirit of a TI-Nspire CX CAS, with four tabs: Calculator, Graphs, Lists & Statistics and CAS. It went from the interview (2026-10-27 22:19 UTC) to its last milestone merge (2026-11-17 23:03:55 UTC) in 10 milestones. An operator session drove it from its own workspace, `graphcalc-run`, and checked SCIO's work from outside with a hidden test suite, a grammar probe and screenshots. SCIO bugs came to this repository. At 23:05:07 UTC the build stopped at its release gate, with all 34 features done and the product-ready bar green on `main`. The workspace's `RUN_LOG.md` holds the per-pass record (Passes 0 to 10): cost, time, stops, bugs and a bottleneck audit for each.
+
+### What succeeded
+- **The product is complete.**
+  - All 34 features passed: the interview's 22, plus 12 added during the run (P23 to P34) to fix calculator bugs and carry the owner's revisions.
+  - On `main`: 518 tests passed, and acceptance passed 10 of 10 against the running app.
+  - The hidden suite, written before each feature was built, passed 380 with 0 failures.
+- **Every calculator bug was fixed through SCIO, never by hand.** There were 7: #5, #7, #14, #20, #21, #27 and #40. Each became a `PRODUCT.md` feature that SCIO planned, built and verified.
+- **The second half ran nearly clean.** In M7 to M10, 11 of 12 features passed on their first attempt; P15 needed one retry. SCIO's own working time was 95.8, 153.7, 70.8 and 19.2 minutes for M7, M8, M9 and M10.
+- **Parallel features (ADR 0018) ran three batches, and no batch merge failed.** They saved:
+  - M5's P29 + P33, 9.7 min;
+  - M8's P34 + P15, about 24 min;
+  - M9's P18 + P19, about 20 min.
+- **The supervisor (ADR 0019) carried the run through its harness faults.**
+  - It repaired S17 in a PR (#144) and replayed M5 after the merge.
+  - The faults it misread (S15, a used-up usage window; S18, a machine sleep) became fixes: #134 and #160.
+  - From M10 the build ran detached (#176). Its stop was seen within 10 s, with no session owning the build.
+- **The owner's standing merge rule (2026-11-17 15:38 UTC) removed the merge-stop stall.** A milestone PR merges when all 8 checks pass and no new bug is found. Merge stops 8 and 10 took 3.9 and 17.7 min, and stop 9 took 2 min once someone was looking (see I-246).
+
+### What failed
+- **SCIO's own checks caught none of the 7 calculator bugs.**
+  - The hidden tests found #5 and #14.
+  - A hand probe found #7, and the grammar probe found #20 and #21.
+  - Screenshots found #27 (the page 8,963 px wide) and #40 (`1/x` drawn across its asymptote).
+  - #40 passed every SCIO check, because nothing rendered the page (#169, I-242).
+- **SCIO bugs stopped or misled the build 18 times** (S1 to S18 in RUN_LOG). Each one has its ledger entries:
+  - S1 to S5: I-107 to I-116.
+  - S6: I-140 to I-143.
+  - S7 to S9: I-149 to I-160.
+  - S10: I-147 and I-148.
+  - S11: I-163 to I-166.
+  - S12: I-171.
+  - S13: I-208.
+  - S14: I-220.
+  - S15: I-221 to I-223.
+  - S16: I-230.
+  - S17: I-229.
+  - S18: I-240.
+
+  M7 to M10 added four more: #169 (I-242), #172 (I-245), #175 (I-246) and I-247.
+- **Rework:** 45 attempts for 34 features.
+  - 6 attempts ended at a human stop: `advisor_cap` 5, `escalate_human` 1.
+  - 5 failed without one: `error` 3, `budget` 1, `stall` 1.
+- **Most of the 21 calendar days were holds, not building:**
+  - M3 was held 9 d 9 h (2026-11-05 to 11-14), on S11 and S12 and then until the supervisor took the build over.
+  - M6 lost about 29 h to a machine sleep that S18 read as a hang.
+  - M5 was held 14 h 29 min (the owner's hold on the repair).
+  - M9's stop sat unseen for 3 h 13 min (I-246).
+  - `Read` permission prompts at merge stops 5, 7 and 10 cost 3 h 5 min (I-247).
+
+### Actions
+- **Fixes from the run's bugs:**
+  - #65, #67 and #71 (S1 to S5);
+  - #76 (S6);
+  - #78 and #80 (S7 to S10);
+  - #85 (S11);
+  - #89 (S12, `--safe-mode`);
+  - #117 (S13);
+  - #134 (S14, S15);
+  - #144 (S17);
+  - #146 (S16);
+  - #160 (S18);
+  - #170 (#169 part A);
+  - #174 (#172);
+  - #176 (#175).
+- **Proposals from the run:**
+  - ADR 0018 (#86, parallel features), ADR 0019 (#96, the supervisor) and ADR 0020 (#147, #150 and #153, the question channel);
+  - #116 (the capped-session ladder);
+  - #133, #136 and #129 (#119, #120 and #121, from P26);
+  - #143 (#137, an answer reaches a retry);
+  - #161 (#156, the check verdicts at the merge stop);
+  - #162 (#157, an unset `depends_on` decided from the planned files).
+- **The workspace's own guards**, outside this repository: the hidden suite, `tools/merge_stop_checks.py` (8 checks at once in 1 to 1.5 min), `tools/probe_grammar.py`, `tools/shot.py` and `GUARDRAILS.md`.
+- **The ledger:** every resolved entry above has its guardrail (`check_guardrails`). I-247 stays open for the owner's permission choice.
+
+### Bottleneck audit (`scripts/metrics.py --product-root graphcalc-run`, 2026-11-18 05:24 UTC)
+
+| Window | Features passed | $ per feature (API prices) | Escalated | Failed, no human stop | Batched |
+|---|---:|---:|---:|---:|---:|
+| 2 days to 2026-11-15 (Streamline's audit) | 4 | 7.49 | 1/9 | 4/9 | - |
+| 3 days to 2026-11-18 (M5's replay to M10) | 19 | 3.66 | 1/20 | 0/20 | 5/19 |
+| The whole run, 23 days | 34 | 4.38 | 6/45 | 5/45 | 5/34 |
+
+- **Read the table with its n.** The windows are short and overlap, and each later milestone differs in size and kind. It shows the rates moving; it does not measure what caused the move. The whole run cost $148.75 at API prices over 45 attempts, on the Max subscription, so nothing was billed. Its stall hours (19.9 h over 14 stops) include the release gate's wait, which was still open when measured.
+- **Slowest steps:** the holds above. Inside SCIO, the slowest were P15's two M8 attempts (50.6 and 55.5 min) and P12 (45.2 min).
+- **Serial work that could have run in parallel:** only 3 batches ran. M7 stayed serial because its features share files, and M10 had one feature. The planner's file overlap check (#162) decided these, and it was right each time: no batch failed to merge.
+- **Repeated friction:** a stop that waits unseen. That was the operator session's lifetime (I-246, fixed), a machine sleep (I-240, fixed) and the `Read` permission prompt (I-247, open).
+- **Improvements:**
+  1. Close I-247 with the owner's choice of `additionalDirectories` or allow rules, so a merge stop never waits on a prompt.
+  2. #169 part B: a feature whose own tests were skipped is not verified. The local browser is present only by accident (SCIO's own environment), so a machine without it would pass a UI feature untested.
