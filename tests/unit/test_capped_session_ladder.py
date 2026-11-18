@@ -304,9 +304,11 @@ def test_a_capped_session_that_edited_nothing_is_resumed_once_with_its_tools(
     assert _flag(resume, "--permission-prompts") == "none"
     assert _flag(resume, "--output-format") == "stream-json" and "--verbose" in resume
     assert "--safe-mode" in resume and _flag(resume, "--model") == CODER_MODEL
-    assert "--tools" not in resume  # tools on, unlike the summary call
+    assert "--tools" not in resume  # the session's tools, as in the summary call (#185)
     assert "--system-prompt-file" not in resume  # the session keeps its system prompt
-    assert _flag(claude.argv(3), "--resume") == "sess-a" and _flag(claude.argv(3), "--tools") == ""
+    summary = claude.argv(3)
+    assert _flag(summary, "--resume") == "sess-a" and "--tools" not in summary
+    assert "--allowedTools" not in summary  # tools listed, none allowed (I-250)
     p = state.progress
     assert (p.last_worker_stop, p.last_worker_edited, p.last_worker_resumed) == (
         "end_turn",

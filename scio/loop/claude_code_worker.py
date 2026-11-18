@@ -11,8 +11,10 @@ Shape of a turn:
    (issue #115: on the subscription the dollars are a metric); ``stream-json`` output is
    rendered into the same transcript shape ``AgentLoop`` produces, so ``scio report`` reads
    it unchanged.
-2. One ``--resume`` call on that session, one turn, no tools, ``--json-schema`` for the
-   typed closing output (``WorkerOutput`` by default).
+2. One ``--resume`` call on that session for the typed closing output (``WorkerOutput`` by
+   default). It keeps the session's tool list, so it reads the session's prompt cache instead
+   of writing it again (issue #185): no ``--tools`` and no ``--json-schema``. The schema
+   travels in the prompt, and the reply's JSON is parsed and validated here.
 3. Only when the node asks (issue #116, ladder step 1: the session ended at its turn cap and
    git shows no edit): :meth:`ClaudeCodeWorker.resume_typed` continues the same session with
    tools for a bounded number of turns, then takes the typed summary again as in 2.
@@ -24,7 +26,8 @@ share of the session's cumulative ``duration_api_ms`` (I-210). Every call runs w
 :func:`worker_env`, so the turn's Bash commands find the product's interpreter first (I-114).
 The arguments of 1 and 3 come from :func:`worker_argv` and :func:`resume_argv`, which
 ``scripts/dev/claude_probe.py`` imports, so a probe runs with exactly the worker's flags
-(issue #122, W-31).
+(issue #122, W-31); those of 2 from :func:`summary_argv` and its stdin from
+:func:`summary_ask`.
 """
 
 from __future__ import annotations
@@ -67,10 +70,16 @@ DEFAULT_MAX_TURNS = 30
 assistant API message: ``num_turns`` in the ``result`` line, and Claude Code's
 ``max_turns_reached`` fires after ``max_turns`` of them (I-153)."""
 SUMMARY_MAX_TURNS = 3
-"""Turns for the typed summary on ``--resume``. Claude Code delivers ``--json-schema`` output
-through a ``StructuredOutput`` tool call and answers a payload that misses the schema with a
-tool error the model must act on in a further turn; with one turn that retry was impossible
-and the call ended ``error_max_turns`` (I-077, the first live http milestone)."""
+"""Turns for the typed summary on ``--resume``. Set when the summary used ``--json-schema``,
+whose ``StructuredOutput`` tool call Claude Code bounced on a schema miss, and one turn left no
+room for the retry (I-077). Since issue #185 the summary keeps the session's tools: a tool the
+model still tries costs a turn, denied or not. Measured live (I-250): a plain summary took one
+turn, and one told to Write and Read first took all three (the Write denied) and answered."""
+SUMMARY_SCHEMA_PROMPT = (
+    "Reply with only one JSON object that matches this JSON Schema, with no prose and no code "
+    "fence:"
+)
+"""The summary prompt's last instruction, followed by the schema as JSON (issue #185)."""
 
 BACKEND_NOTE = (
     "\n\nThis turn runs inside Claude Code. Its built-in tools replace the ones named above: "
@@ -213,6 +222,60 @@ def resume_argv(
     )
 
 
+def summary_argv(*, model: str, session_id: str) -> list[str]:
+    """The ``claude`` arguments of the typed summary that closes a worker turn: a ``--resume``
+    of ``session_id`` that keeps the session's tool list, so it reads the session's prompt
+    cache (issue #185, I-250). Tool definitions are part of the cached prefix: ``--tools ""``
+    removed them and ``--json-schema`` added a ``StructuredOutput`` tool, and either made the
+    call write the whole context to the cache again. The schema travels in the prompt instead
+    (:func:`summary_ask`).
+
+    No tool may edit: there is no ``--allowedTools`` and no ``acceptEdits``. The mode is
+    passed, never inherited: a ``-p --resume`` starts in the mode a new ``-p`` run would,
+    which is the settings' ``permissions.defaultMode``, and on the owner's machine that is
+    ``auto``, where the live probe's Write ran (I-250). ``dontAsk`` denies every call that
+    would prompt; reads inside the working directory and read-only commands still run."""
+    return [
+        "-p",
+        SAFE_MODE,  # never the machine's CLAUDE.md (I-171)
+        "--output-format",
+        "json",
+        "--resume",
+        session_id,
+        "--model",
+        model,
+        "--max-turns",
+        str(SUMMARY_MAX_TURNS),
+        "--permission-mode",
+        "dontAsk",
+        "--permission-prompts",
+        "none",
+    ]
+
+
+def summary_ask(prompt: str, schema: Mapping[str, Any], error: str = "") -> str:
+    """The summary call's stdin: ``prompt``, then the previous reply's ``error`` when it is
+    asked again, then :data:`SUMMARY_SCHEMA_PROMPT` and ``schema`` as JSON, last."""
+    parts = [prompt]
+    if error:
+        parts.append(f"Your previous reply was invalid: {error}")
+    parts.append(f"{SUMMARY_SCHEMA_PROMPT}\n{json.dumps(schema)}")
+    return "\n\n".join(parts)
+
+
+def summary_reply_json(text: str) -> Any:
+    """The JSON value of a summary reply: ``text`` with one surrounding code fence (three
+    backticks, optionally followed by ``json``) removed, then parsed. A reply that is not
+    JSON raises ``json.JSONDecodeError``."""
+    body = text.strip()
+    if len(body) >= 6 and body.startswith("```") and body.endswith("```"):
+        body = body[3:-3]
+        if body[:4].lower() == "json":
+            body = body[4:]
+        body = body.strip()
+    return json.loads(body)
+
+
 @dataclass
 class StreamTurn:
     """What one ``stream-json`` run produced."""
@@ -284,8 +347,8 @@ def parse_stream(stdout: str) -> StreamTurn:
 
 def validate_with_trimming[T: BaseModel](output_model: type[T], raw: Any) -> T:
     """Validate ``raw`` against ``output_model``, trimming string fields that only exceed
-    their ``max_length`` (I-070). The wire schema handed to ``--json-schema`` carries no
-    length caps, and a cap on prose is a presentation limit: trim, then validate again.
+    their ``max_length`` (I-070). The wire schema in the summary prompt carries no length
+    caps, and a cap on prose is a presentation limit: trim, then validate again.
     Any other error is raised unchanged. ``raw`` is modified in place when trimmed."""
     try:
         return output_model.model_validate(raw)
@@ -386,7 +449,8 @@ class ClaudeCodeWorker:
         ``max_turns`` more turns, then take the typed summary again, as :meth:`run_typed`
         does. Measured live on Claude Code 2.1.325: a ``-p --resume`` keeps the session id and
         its system prompt, runs tools when the tool flags are passed again (also after the
-        no-tools ``--json-schema`` summary call), and counts ``--max-turns`` from zero."""
+        summary call, then made with no tools and ``--json-schema``), and counts
+        ``--max-turns`` from zero."""
         model = self.harness.config.role(self.role).model
         env = worker_env(self.sandbox)
         argv = resume_argv(
@@ -448,7 +512,8 @@ class ClaudeCodeWorker:
         tags: dict[str, str] | None,
         env: Mapping[str, str],
     ) -> LoopResult:
-        """The typed closing output: one more turn on the same session, no tools."""
+        """The typed closing output: one more call on the same session, with its tool list
+        unchanged and no tool allowed (:func:`summary_argv`)."""
         messages = [Message.user(stdin), *turn.messages]
         schema = wire_schema(output_model)
         output, summary_text, calls = self._summary(
@@ -475,49 +540,38 @@ class ClaudeCodeWorker:
         env: Mapping[str, str],
     ) -> tuple[T, str, int]:
         last_error = ""
+        argv = summary_argv(model=model, session_id=session_id)
         for attempt in range(1, 3):
-            ask = (
-                prompt
-                if attempt == 1
-                else f"{prompt}\n\nYour previous reply was invalid: {last_error}"
-            )
-            argv = [
-                "-p",
-                SAFE_MODE,  # never the machine's CLAUDE.md (I-171)
-                "--output-format",
-                "json",
-                "--resume",
-                session_id,
-                "--tools",
-                "",
-                "--max-turns",
-                str(SUMMARY_MAX_TURNS),
-                "--model",
-                model,
-                "--json-schema",
-                json.dumps(schema),
-            ]
             self.calls.append(list(argv))
             res = self._run(
-                argv, cwd=self.sandbox.root, stdin=ask, timeout_s=self.timeout_s, env=env
+                argv,
+                cwd=self.sandbox.root,
+                stdin=summary_ask(prompt, schema, last_error),
+                timeout_s=self.timeout_s,
+                env=env,
             )
             try:
                 data = parse_result(res)
             except FatalError as exc:
                 if "error_max_turns" not in str(exc):
                     raise
-                # Claude Code's schema check refused every attempt within the turn cap
-                # (I-077): re-ask once with the schema's required keys spelled out.
+                # No reply within the turn cap (I-077; since #185 a denied tool attempt
+                # spends a turn): re-ask once with the schema's required keys spelled out.
                 last_error = (
-                    "the structured output never matched the schema within the turn cap; "
+                    "the reply never matched the schema within the turn cap; use no tool; "
                     f"required keys: {', '.join(schema.get('required', []))}"
                 )
                 continue
             self._account(data, model, tags)
+            # Claude Code sets ``structured_output`` only for a ``--json-schema`` call, which
+            # the summary no longer makes (#185); a result that carries one is still taken.
             payload = data.get("structured_output")
-            text = json.dumps(payload) if payload is not None else str(data.get("result") or "")
             try:
-                raw = payload if payload is not None else json.loads(text)
+                raw = (
+                    payload
+                    if payload is not None
+                    else summary_reply_json(str(data.get("result") or ""))
+                )
                 value = validate_with_trimming(output_model, raw)
                 return value, json.dumps(raw), attempt
             except (ValidationError, json.JSONDecodeError) as exc:
