@@ -21,7 +21,7 @@ A model-agnostic, multi-agent framework built on LangGraph that turns a prompt i
 > - Faster gates, and push-gate hooks that run in every session.
 > - The graphcalc run's fixes.
 >
-> **In progress:** the `graphcalc` live product run, a TI-Nspire-style graphing calculator, which is next to run under the supervisor ([#98](https://github.com/CAIOT404/SCIO/issues/98)).
+> **The `graphcalc` live product run:** SCIO built a TI-Nspire-style graphing calculator, all 34 features in 10 milestones, from 2026-10-27 to 2026-11-17, under the supervisor since M3. Its release (v0.1.0) is the owner's call at the release gate. The retrospective is in [docs/LESSONS_LEARNED.md](docs/LESSONS_LEARNED.md) ([#63](https://github.com/CAIOT404/SCIO/issues/63)).
 >
 > **Next:** see the [roadmap](#roadmap) and the [board](https://github.com/users/NewMe505/projects/1). Decision records are in [docs/adr/](docs/adr/), and the [milestones](https://github.com/CAIOT404/SCIO/milestones) list on GitHub.
 
@@ -280,15 +280,17 @@ Self-healing ([ADR 0019](docs/adr/0019-external-recovery-supervisor.md), [docs/R
   - After the owner's merge, the scheduled tick moved live-wt, ran the health check and replayed the build, unattended.
   - The build planned and built the next milestone, and the first milestone's commits appear once.
 
-In progress:
-- **The graphcalc live product run** (a TI-Nspire-style graphing calculator, [issue #63](https://github.com/CAIOT404/SCIO/issues/63) for its retrospective), paused at M3 since 2026-11-05.
+The graphcalc live product run (a TI-Nspire-style graphing calculator, [issue #63](https://github.com/CAIOT404/SCIO/issues/63)):
+- all 34 features built and merged in 10 milestones, 2026-10-27 to 2026-11-17; the build stopped at its release gate, which is the owner's call
+- run under the supervisor from M3 on ([#98](https://github.com/CAIOT404/SCIO/issues/98), done), and detached from the operator session from M10 on ([#175](https://github.com/CAIOT404/SCIO/issues/175), done)
+- its retrospective and bottleneck audit: [docs/LESSONS_LEARNED.md](docs/LESSONS_LEARNED.md), "Live product: graphcalc"
 
 Proposed next (each one on the [board](https://github.com/users/NewMe505/projects/1)):
-- run graphcalc under the supervisor ([#98](https://github.com/CAIOT404/SCIO/issues/98); the tick is registered, and graphcalc's M3 runs supervised since 2026-11-14)
+- a feature whose own tests were skipped is not verified ([#169](https://github.com/CAIOT404/SCIO/issues/169) part B; part A, the rendered check for UI features, is done)
 - on the Claude subscription the budget is a metric, never a stop ([#115](https://github.com/CAIOT404/SCIO/issues/115), done, on `main` for the next release)
 - a capped worker session that edited nothing escalates cheapest step first: resume it, carry its findings, twice the turns once, then halt as before ([#116](https://github.com/CAIOT404/SCIO/issues/116), done, on `main`; a tier change mid-feature stays a possible later step)
-- Workflow v2: every change from the 2026-11-14 workflow teardown, tracked item by item in [docs/WORKFLOW_V2.md](docs/WORKFLOW_V2.md), whose status is computed from the code ([#122](https://github.com/CAIOT404/SCIO/issues/122))
-- keep verified work across a retry ([#119](https://github.com/CAIOT404/SCIO/issues/119)), give a bug-fix feature's brief its bug issue ([#120](https://github.com/CAIOT404/SCIO/issues/120)), and ground a feature's plan in the repository ([#121](https://github.com/CAIOT404/SCIO/issues/121)), from graphcalc's P26
+- Workflow v2: every change from the 2026-11-14 workflow teardown, tracked item by item in [docs/WORKFLOW_V2.md](docs/WORKFLOW_V2.md), whose status is computed from the code ([#122](https://github.com/CAIOT404/SCIO/issues/122), done)
+- keep verified work across a retry ([#119](https://github.com/CAIOT404/SCIO/issues/119)), give a bug-fix feature's brief its bug issue ([#120](https://github.com/CAIOT404/SCIO/issues/120)), and ground a feature's plan in the repository ([#121](https://github.com/CAIOT404/SCIO/issues/121)), from graphcalc's P26 (all three done)
 - guard every orchestrator node's harness errors, I-182 ([#99](https://github.com/CAIOT404/SCIO/issues/99))
 - move the nightly live suite to the Claude Code backend, or retire it, I-181 ([#101](https://github.com/CAIOT404/SCIO/issues/101))
 - the dashboard's last two follow-ups: Claude Code spans (I-122) and the thread id in telemetry (I-123) ([#102](https://github.com/CAIOT404/SCIO/issues/102))
